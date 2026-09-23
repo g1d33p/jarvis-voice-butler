@@ -55,7 +55,7 @@ class Assistant(Agent):
             #     llm=openai.realtime.RealtimeModel(voice="marin")
             instructions=textwrap.dedent(
                         """\
-                        You are Jarvis a helpful and sarcastic AI butler.
+                        You are Sureedu a helpful and sarcastic AI butler.
 
                         # Output rules
 
