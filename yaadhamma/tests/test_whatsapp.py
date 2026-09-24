@@ -1,5 +1,7 @@
 """Tests for the WhatsApp Web client (browser layer is faked)."""
 
+import re
+
 import pytest
 
 from whatsapp import (
@@ -13,6 +15,22 @@ from whatsapp import (
 
 def _chat(name, unread=0, preview="", time=""):
     return {"name": name, "unread": unread, "preview": preview, "time": time}
+
+
+_CLICK_ARG = re.compile(r"waClickChat\(document,\s*\"((?:[^\"\\]|\\.)*)\"\)")
+
+
+def _script_arg(script):
+    """The chat-name argument passed to waClickChat in an evaluate script."""
+    m = _CLICK_ARG.search(script)
+    return m.group(1) if m else ""
+
+
+def _script_clicked_name(browser):
+    for script in reversed(browser.scripts):
+        if "return waClickChat(document" in script:
+            return _script_arg(script)
+    return ""
 
 
 class FakeBrowser:
@@ -36,6 +54,18 @@ class FakeBrowser:
         self.last_message_calls = 0
         self.type_results = {"typed": True, "clickedSend": True}
         self.sent_texts = []
+        self.click_calls = 0
+        # Conversation header: None means the header follows whatever chat
+        # was clicked (the healthy case); a test can pin it to simulate a
+        # stale pane showing the wrong chat.
+        self.conversation_title = None
+        # waReadMessages canned rounds: a list of result dicts consumed one
+        # per call, so a test can simulate slow-loading message panes.
+        self.read_rounds = None
+        # waScrollMessagesUp message pages: a list of message lists; each
+        # scroll advances to the next page, simulating older history loading.
+        self.message_pages = None
+        self._scrolls = 0
 
     async def list_tabs(self):
         return {"tab_count": len(self.tabs), "tabs": self.tabs}
@@ -72,8 +102,18 @@ class FakeBrowser:
         if "return waScrollChats(document" in script:
             return {"before": len(self.chats)}
         if "return waClickChat(document" in script:
-            return {"opened": True, "matched": "x"}
+            self.click_calls += 1
+            name = _script_arg(script)
+            return {"opened": True, "matched": name or "x"}
+        if "return waConversationTitle(document" in script:
+            return {"title": self.conversation_title or _script_clicked_name(self)}
         if "return waReadMessages(document" in script:
+            if self.message_pages is not None:
+                idx = min(self._scrolls, len(self.message_pages) - 1)
+                return {"messages": self.message_pages[idx], "empty": False}
+            if self.read_rounds is not None:
+                idx = min(self._read_calls(), len(self.read_rounds) - 1)
+                return self.read_rounds[idx]
             return {
                 "messages": [
                     {
@@ -88,12 +128,21 @@ class FakeBrowser:
                     },
                 ]
             }
+        if "return waScrollMessagesUp(document" in script:
+            if self.message_pages is not None:
+                self._scrolls += 1
+                advanced = self._scrolls < len(self.message_pages)
+                return {"ok": True, "advanced": advanced, "atTop": not advanced}
+            return {"ok": True, "advanced": False, "atTop": True}
         if "return waTypeAndSend(document" in script:
             return dict(self.type_results)
         if "return waLastMessage(document" in script:
             self.last_message_calls += 1
             return {"message": self._last_message()}
         raise AssertionError(f"unexpected evaluate script: {script[:60]}")
+
+    def _read_calls(self):
+        return sum(1 for s in self.scripts if "return waReadMessages(document" in s)
 
     def _last_message(self):
         # Overridden per-test via last_message_sequence.
@@ -313,6 +362,111 @@ async def test_read_messages_parses_sender_time_direction() -> None:
     )
     assert (second["sender"], second["outgoing"]) == ("Jeevan", True)
     assert first["text"] == "Are we still on for 6?"
+
+
+# ---------------------------------------------------------------------------
+# Wrong-chat protection (2026-09-24: read_chat("SC1-Confidants") silently
+# returned SC1-Executives' messages twice because the pane stayed stale)
+# ---------------------------------------------------------------------------
+
+
+async def test_read_messages_raises_when_header_shows_wrong_chat() -> None:
+    browser = FakeBrowser(chats=[_chat("SC1-Executives"), _chat("SC1-Confidants")])
+    browser.conversation_title = "SC1-Executives"  # stale pane after the click
+    client = WhatsAppClient(browser=browser)
+    with pytest.raises(
+        WhatsAppError, match=r"SC1-Confidants.*SC1-Executives|wrong chat"
+    ):
+        await client.read_messages("SC1-Confidants")
+    # The header check runs inside _open_chat, so no messages are returned.
+
+
+async def test_read_messages_succeeds_when_header_matches_clicked_chat() -> None:
+    browser = FakeBrowser(chats=[_chat("SC1-Confidants")])
+    client = WhatsAppClient(browser=browser)
+    result = await client.read_messages("SC1-Confidants")
+    assert result["chat"] == "SC1-Confidants"
+    assert len(result["messages"]) == 2
+
+
+async def test_header_match_ignores_case_and_extra_whitespace() -> None:
+    browser = FakeBrowser(chats=[_chat("SC1-Confidants")])
+    browser.conversation_title = "  sc1-confidants "
+    client = WhatsAppClient(browser=browser)
+    result = await client.read_messages("sc1-confidants")
+    assert result["chat"] == "SC1-Confidants"
+
+
+# ---------------------------------------------------------------------------
+# Resilient message loading (2026-09-24: "its messages would not load"
+# aborted the whole where_needed triage; the same chat worked on retry)
+# ---------------------------------------------------------------------------
+
+
+async def test_open_chat_waits_for_slow_loading_messages() -> None:
+    browser = FakeBrowser(chats=[_chat("Ravi")])
+    browser.read_rounds = [
+        {"messages": []},  # pane exists but messages not rendered yet
+        {"messages": []},
+        {
+            "messages": [
+                {"meta": "[10:30] Ravi: ", "text": "hi", "outgoing": False},
+            ]
+        },
+    ]
+    client = WhatsAppClient(browser=browser)
+    result = await client.read_messages("Ravi", limit=5)
+    assert len(result["messages"]) == 1
+    assert browser.click_calls == 1  # no retry needed: polling waited it out
+
+
+async def test_open_chat_retries_once_then_raises_when_unloadable() -> None:
+    browser = FakeBrowser(chats=[_chat("SC1-Organization12")])
+    browser.read_rounds = [{"messages": []}]  # never renders
+    client = WhatsAppClient(browser=browser)
+    with pytest.raises(WhatsAppError, match="would not load"):
+        await client._open_chat("SC1-Organization12", timeout_s=0.05, poll_s=0.01)
+    assert browser.click_calls == 2  # one retry, then give up
+
+
+async def test_open_chat_treats_empty_chat_placeholder_as_loaded() -> None:
+    browser = FakeBrowser(chats=[_chat("Quiet")])
+    browser.read_rounds = [{"messages": [], "empty": True}]
+    client = WhatsAppClient(browser=browser)
+    result = await client.read_messages("Quiet", limit=5)
+    assert result["messages"] == []
+
+
+# ---------------------------------------------------------------------------
+# Message-pane scroll-up pagination (2026-09-24: limit=100 only returned the
+# initially rendered handful; older history was never reached)
+# ---------------------------------------------------------------------------
+
+
+def _paged_msg(i):
+    return {"meta": f"[10:{i:02d}] Ravi: ", "text": f"message {i}", "outgoing": False}
+
+
+async def test_read_messages_scrolls_up_for_older_history() -> None:
+    browser = FakeBrowser(chats=[_chat("Ravi")])
+    browser.message_pages = [
+        [_paged_msg(1), _paged_msg(2)],
+        [_paged_msg(i) for i in range(1, 6)],
+    ]
+    client = WhatsAppClient(browser=browser)
+    result = await client.read_messages("Ravi", limit=5, scroll_pause_s=0.01)
+    texts = [m["text"] for m in result["messages"]]
+    assert texts == [f"message {i}" for i in range(1, 6)]
+    assert any("return waScrollMessagesUp(document" in s for s in browser.scripts)
+
+
+async def test_read_messages_stops_scrolling_when_history_exhausted() -> None:
+    browser = FakeBrowser(chats=[_chat("Ravi")])
+    # Only 3 messages exist in total: scrolling cannot grow the list.
+    browser.message_pages = [[_paged_msg(i) for i in range(1, 4)]]
+    client = WhatsAppClient(browser=browser)
+    result = await client.read_messages("Ravi", limit=100, scroll_pause_s=0.01)
+    assert len(result["messages"]) == 3
 
 
 # ---------------------------------------------------------------------------

@@ -88,3 +88,16 @@ def test_orchestrator_prompt_defines_the_question_protocol() -> None:
     assert 'starts with "QUESTION:"' in ORCHESTRATOR_INSTRUCTIONS
     assert "Never use CSS selectors" in ORCHESTRATOR_INSTRUCTIONS
     assert "Never rephrase or add to it" in ORCHESTRATOR_INSTRUCTIONS
+
+
+def test_whatsapp_means_whatsapp_web_tools_not_native_app() -> None:
+    # 2026-09-24: "open my WhatsApp" opened the native macOS app. WhatsApp
+    # requests must always route to the whatsapp_* tools (WhatsApp Web in
+    # Yaadhamma's dedicated browser), never to open_application.
+    assert "never open the native macOS WhatsApp application" in AGENT_INSTRUCTIONS
+
+
+def test_voice_whatsapp_means_whatsapp_web_tools_not_native_app() -> None:
+    from prompts import VOICE_INSTRUCTIONS
+
+    assert "never open the native macOS WhatsApp application" in VOICE_INSTRUCTIONS

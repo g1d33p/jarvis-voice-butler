@@ -14,9 +14,10 @@ def _chat(name, unread=0, preview="", time=""):
 
 
 class FakeClient:
-    def __init__(self, chats=(), paired=True):
+    def __init__(self, chats=(), paired=True, fail_chats=()):
         self._chats = list(chats)
         self._paired = paired
+        self._fail_chats = set(fail_chats)
         self.sent = []
         self.read_calls = []
 
@@ -50,6 +51,10 @@ class FakeClient:
         self._need_paired()
         chat_name = await self.find_chat(chat_name)
         self.read_calls.append(chat_name)
+        if chat_name in self._fail_chats:
+            raise WhatsAppError(
+                f"Opened {chat_name!r} but its messages would not load."
+            )
         return {
             "chat": chat_name,
             "messages": [
@@ -169,6 +174,39 @@ async def test_where_needed_quiet_when_nothing_unread(tmp_path) -> None:
     result = await tools.whatsapp_where_needed(_Context())
     assert result["chats_needing_attention"] == []
     assert result["unread_chat_count"] == 0
+
+
+async def test_where_needed_skips_unloadable_chat_and_continues(tmp_path) -> None:
+    # 2026-09-24: one chat's messages would not load and the old code let
+    # that single failure abort the entire triage. Triage must continue and
+    # report the skipped chat honestly.
+    audit = AuditLog(path=tmp_path / "audit.jsonl")
+    tools = WhatsAppTools(
+        client=FakeClient(
+            chats=[
+                _chat("SC1-Organization12", unread=2, preview="budget", time="10:30"),
+                _chat("Ravi", unread=1, preview="see you at 6", time="10:31"),
+            ],
+            fail_chats={"SC1-Organization12"},
+        ),
+        approvals=ApprovalManager(audit=audit),
+    )
+    result = await tools.whatsapp_where_needed(_Context())
+    assert [c["chat"] for c in result["chats_needing_attention"]] == ["Ravi"]
+    assert result["unread_chat_count"] == 2
+    skipped = result["skipped_chats"]
+    assert len(skipped) == 1
+    assert skipped[0]["chat"] == "SC1-Organization12"
+    assert "would not load" in skipped[0]["reason"]
+
+
+async def test_where_needed_still_aborts_when_not_paired(tmp_path) -> None:
+    audit = AuditLog(path=tmp_path / "audit.jsonl")
+    tools = WhatsAppTools(
+        client=FakeClient(paired=False), approvals=ApprovalManager(audit=audit)
+    )
+    with pytest.raises(ToolError, match="whatsapp_signin"):
+        await tools.whatsapp_where_needed(_Context())
 
 
 async def test_send_message_asks_for_approval(tools) -> None:

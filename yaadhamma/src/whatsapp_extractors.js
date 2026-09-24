@@ -194,7 +194,10 @@ function waReadMessages(doc, limit) {
     var cls = String((host.className || "") + " " + (el.className || ""));
     out.push({ meta: meta, text: text, outgoing: /message-out/.test(cls) });
   }
-  return { messages: out };
+  // A genuinely empty chat shows a "No messages here yet" placeholder; the
+  // Python side treats that as loaded (not flaky) so it does not retry.
+  var empty = out.length === 0 && /no messages here yet/i.test(main.innerText || "");
+  return { messages: out, empty: empty };
 }
 
 function waTypeAndSend(doc, text) {
@@ -232,6 +235,49 @@ function waLastMessage(doc) {
   return { message: r.messages.length ? r.messages[0] : null };
 }
 
+// Active conversation header: the chat name shown at the top of the open
+// conversation pane. Used to verify a click actually opened the requested
+// chat; a stale pane would otherwise silently return the wrong chat's
+// messages as if they belonged to the requested one.
+function waConversationTitle(doc) {
+  var main = doc.querySelector("#main");
+  if (!main) return { title: "" };
+  var header = main.querySelector("header");
+  if (!header) return { title: "" };
+  var el =
+    header.querySelector('[data-testid="conversation-title"]') ||
+    header.querySelector('[data-testid="cell-frame-title"]');
+  var text = el ? (el.textContent || "").trim() : "";
+  if (text) return { title: text };
+  var titled = header.querySelector("[title]");
+  if (titled) return { title: (titled.getAttribute("title") || "").trim() };
+  return { title: "" };
+}
+
+// Message-pane scroller: the scrollable ancestor of the message nodes inside
+// #main. Scrolling it up loads older history (the pane is virtualized), which
+// is how read_chat reaches beyond the initially rendered handful.
+function _messageScroller(doc) {
+  var main = doc.querySelector("#main");
+  if (!main) return null;
+  var nodes = main.querySelectorAll("[data-pre-plain-text]");
+  var anchor = nodes.length ? nodes[nodes.length - 1] : main;
+  var el = anchor;
+  while (el && el !== doc.body) {
+    if (el.scrollHeight > el.clientHeight + 4) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+
+function waScrollMessagesUp(doc) {
+  var el = _messageScroller(doc);
+  if (!el) return { ok: false, advanced: false, atTop: true };
+  var before = el.scrollTop;
+  el.scrollTop = Math.max(0, el.scrollTop - el.clientHeight);
+  return { ok: true, advanced: el.scrollTop < before, atTop: el.scrollTop === 0 };
+}
+
 // Export for the Node test harness; guarded so page.evaluate is unaffected.
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
@@ -243,6 +289,8 @@ if (typeof module !== "undefined" && module.exports) {
     waScrollChats: waScrollChats,
     waScrollTop: waScrollTop,
     waReadMessages: waReadMessages,
+    waConversationTitle: waConversationTitle,
+    waScrollMessagesUp: waScrollMessagesUp,
     waTypeAndSend: waTypeAndSend,
     waLastMessage: waLastMessage,
   };

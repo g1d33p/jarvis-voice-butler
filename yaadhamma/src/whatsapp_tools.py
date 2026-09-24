@@ -27,9 +27,13 @@ from policy import can_send_without_asking
 from whatsapp import WhatsAppClient, WhatsAppError, WhatsAppNotPairedError
 
 _SIGNIN_HINT = (
-    "WhatsApp is not paired yet. On the Mac, run "
+    "WhatsApp is not paired in Yaadhamma's own dedicated browser window. "
+    "WhatsApp being open in your regular Chrome does not count — Yaadhamma "
+    "never uses your Chrome, it drives its own separate browser with its "
+    "own saved login. To pair, on the Mac run "
     "`uv run scripts/whatsapp_signin.py` in the yaadhamma folder and scan "
-    "the QR code with the phone, then try again."
+    "the QR code with the phone (WhatsApp > Settings > Linked devices > "
+    "Link a device), then try again."
 )
 
 
@@ -114,10 +118,20 @@ class WhatsAppTools:
         chats = await self._guarded(self._client.list_all_chats)
         unread = [c for c in chats if c.get("unread", 0) > 0]
         attention = []
+        skipped = []
         for chat in unread[:max_chats]:
-            messages = await self._guarded(
-                self._client.read_messages, chat["name"], messages_per_chat
-            )
+            # One unloadable chat must not abort the whole triage: skip it,
+            # report it, and keep going. A lost pairing still aborts — nothing
+            # can be triaged without it.
+            try:
+                messages = await self._client.read_messages(
+                    chat["name"], messages_per_chat
+                )
+            except WhatsAppNotPairedError as exc:
+                raise ToolError(_SIGNIN_HINT) from exc
+            except WhatsAppError as exc:
+                skipped.append({"chat": chat["name"], "reason": str(exc)})
+                continue
             attention.append(
                 {
                     "chat": chat["name"],
@@ -128,6 +142,7 @@ class WhatsAppTools:
             )
         return {
             "chats_needing_attention": attention,
+            "skipped_chats": skipped,
             "unread_chat_count": len(unread),
             "total_chats": len(chats),
         }

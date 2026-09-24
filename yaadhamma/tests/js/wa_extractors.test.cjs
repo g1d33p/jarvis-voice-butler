@@ -6,7 +6,7 @@
 
 const assert = require("node:assert/strict");
 const ex = require("../../src/whatsapp_extractors.js");
-const { loggedInDoc, qrDoc, loadingDoc, chatRow } = require("./fixtures.js");
+const { loggedInDoc, qrDoc, loadingDoc, chatRow, conversationDoc } = require("./fixtures.js");
 
 let passed = 0;
 function test(name, fn) {
@@ -181,3 +181,53 @@ test("last message returns the newest message", () => {
 });
 
 console.log(`\n${passed} passed`);
+
+// --- Conversation header title (wrong-chat protection) -------------------
+
+test("waConversationTitle returns the active chat's header title", () => {
+  const { title } = ex.waConversationTitle(conversationDoc({ title: "SC1-Confidants" }));
+  assert.equal(title, "SC1-Confidants");
+});
+
+test("waConversationTitle falls back to a [title] attribute span", () => {
+  const { title } = ex.waConversationTitle(
+    conversationDoc({ title: "SC1-Executives", useTitleAttr: true })
+  );
+  assert.equal(title, "SC1-Executives");
+});
+
+test("waConversationTitle returns empty string when no conversation is open", () => {
+  assert.equal(ex.waConversationTitle(qrDoc()).title, "");
+  assert.equal(ex.waConversationTitle(loadingDoc()).title, "");
+});
+
+// --- Message-pane scroll-up pagination -----------------------------------
+
+test("waScrollMessagesUp scrolls the message pane up one viewport", () => {
+  const doc = conversationDoc();
+  const scroller = doc.querySelector(".msg-scroller");
+  const r = ex.waScrollMessagesUp(doc);
+  assert.equal(r.ok, true);
+  assert.equal(r.advanced, true);
+  assert.equal(r.atTop, false);
+  assert.equal(scroller.scrollTop, 2200 - 800);
+});
+
+test("waScrollMessagesUp reports atTop and no advance at the top", () => {
+  const doc = conversationDoc();
+  const scroller = doc.querySelector(".msg-scroller");
+  scroller.scrollTop = 100;
+  const r = ex.waScrollMessagesUp(doc);
+  assert.equal(r.ok, true);
+  assert.equal(r.advanced, true);
+  assert.equal(r.atTop, true);
+  assert.equal(scroller.scrollTop, 0);
+  const r2 = ex.waScrollMessagesUp(doc);
+  assert.equal(r2.advanced, false);
+  assert.equal(r2.atTop, true);
+});
+
+test("waScrollMessagesUp fails cleanly when there is no message pane", () => {
+  const r = ex.waScrollMessagesUp(qrDoc());
+  assert.equal(r.ok, false);
+});

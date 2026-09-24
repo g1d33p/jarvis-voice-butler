@@ -24,9 +24,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 import time
 from pathlib import Path
+
+logger = logging.getLogger("yaadhamma.whatsapp")
 
 WHATSAPP_URL = "https://web.whatsapp.com/"
 
@@ -73,6 +76,11 @@ def find_chats(name: str, chats: list[dict]) -> list[dict]:
     if exact:
         return exact
     return [c for c in chats if target in c.get("name", "").casefold()]
+
+
+def _norm_chat_name(name: str) -> str:
+    """Normalized for comparing a resolved chat name with the on-screen header."""
+    return " ".join(str(name).casefold().split())
 
 
 def _js_call(name: str, *args: object) -> str:
@@ -272,29 +280,81 @@ class WhatsAppClient:
             "Check the name, or list the chats first."
         )
 
-    async def _open_chat(self, exact_name: str, timeout_s: float = 10) -> None:
-        clicked = await self._evaluate("waClickChat", exact_name)
-        if not clicked.get("opened"):
-            raise WhatsAppError(
-                f"The chat {exact_name!r} is not visible right now. "
-                "Try listing the chats first."
-            )
-        deadline = time.monotonic() + timeout_s
-        while time.monotonic() < deadline:
-            result = await self._evaluate("waReadMessages", 1)
-            if result.get("error") is None:
-                return
-            await asyncio.sleep(0.5)
-        raise WhatsAppError(f"Opened {exact_name!r} but its messages would not load.")
+    async def _open_chat(
+        self,
+        exact_name: str,
+        timeout_s: float = 10,
+        poll_s: float = 0.5,
+        attempts: int = 2,
+    ) -> None:
+        """Click a chat row and wait until its messages actually render.
 
-    async def read_messages(self, chat_name: str, limit: int = 15) -> dict[str, object]:
-        """Recent messages from one chat, oldest first.
-
-        Opening the chat marks its messages as read in WhatsApp.
+        A chat whose pane stays empty is retried once (a fresh click); after
+        that it is declared unloadable. The conversation header is then
+        verified, so a stale pane can never silently return another chat's
+        messages.
         """
-        matched = await self.find_chat(chat_name)
-        await self._open_chat(matched)
-        result = await self._evaluate("waReadMessages", limit)
+        last_error: WhatsAppError | None = None
+        for _ in range(max(1, attempts)):
+            clicked = await self._evaluate("waClickChat", exact_name)
+            if not clicked.get("opened"):
+                last_error = WhatsAppError(
+                    f"The chat {exact_name!r} is not visible right now. "
+                    "Try listing the chats first."
+                )
+                continue
+            deadline = time.monotonic() + timeout_s
+            loaded = False
+            while time.monotonic() < deadline:
+                result = await self._evaluate("waReadMessages", 1)
+                # An empty pane with no messages yet is still loading; a
+                # genuinely empty chat shows WhatsApp's "No messages here
+                # yet" placeholder, reported as `empty`, which counts as
+                # loaded rather than flaky.
+                if result.get("error") is None and (
+                    result.get("messages") or result.get("empty")
+                ):
+                    loaded = True
+                    break
+                await asyncio.sleep(poll_s)
+            if not loaded:
+                last_error = WhatsAppError(
+                    f"Opened {exact_name!r} but its messages would not load."
+                )
+                continue
+            try:
+                await self._verify_conversation_header(exact_name)
+            except WhatsAppError as exc:
+                last_error = exc
+                continue
+            return
+        raise last_error or WhatsAppError(
+            f"The chat {exact_name!r} is not visible right now."
+        )
+
+    async def _verify_conversation_header(self, exact_name: str) -> None:
+        """Raise if the open conversation header is not the requested chat.
+
+        2026-09-24: read_chat("SC1-Confidants") twice returned SC1-Executives'
+        messages because the pane stayed on the previous chat. A positive
+        mismatch is never tolerated; an unreadable header (layout drift)
+        skips the check rather than breaking everything.
+        """
+        title = (await self._evaluate("waConversationTitle")).get("title", "")
+        if title and _norm_chat_name(title) != _norm_chat_name(exact_name):
+            logger.warning(
+                "WhatsApp header mismatch: requested %r but pane shows %r",
+                exact_name,
+                title,
+            )
+            raise WhatsAppError(
+                f"Opened {exact_name!r} but WhatsApp is still showing the wrong chat "
+                f"({title!r}); those messages would not be trustworthy. "
+                "Please try again."
+            )
+
+    @staticmethod
+    def _parse_messages(result: dict) -> list[dict]:
         messages = []
         for raw in result.get("messages", []):
             timestamp, sender = parse_message_meta(raw.get("meta", ""))
@@ -306,6 +366,38 @@ class WhatsAppClient:
                     "outgoing": bool(raw.get("outgoing")),
                 }
             )
+        return messages
+
+    async def read_messages(
+        self,
+        chat_name: str,
+        limit: int = 15,
+        scroll_pause_s: float = 0.8,
+        max_scrolls: int = 10,
+    ) -> dict[str, object]:
+        """Recent messages from one chat, oldest first.
+
+        When `limit` exceeds the initially rendered handful, the message pane
+        is scrolled upward (bounded) so older history loads; it stops when
+        the limit is reached or no more history appears. Opening the chat
+        marks its messages as read in WhatsApp.
+        """
+        matched = await self.find_chat(chat_name)
+        await self._open_chat(matched)
+        result = await self._evaluate("waReadMessages", limit)
+        messages = self._parse_messages(result)
+        scrolls = 0
+        while len(messages) < limit and scrolls < max_scrolls:
+            scrolled = await self._evaluate("waScrollMessagesUp")
+            if not scrolled.get("advanced"):
+                break
+            await asyncio.sleep(scroll_pause_s)
+            result = await self._evaluate("waReadMessages", limit)
+            grown = self._parse_messages(result)
+            if len(grown) <= len(messages):
+                break  # history exhausted: scrolling loaded nothing older
+            messages = grown
+            scrolls += 1
         return {"chat": matched, "messages": messages}
 
     # ------------------------------------------------------------------

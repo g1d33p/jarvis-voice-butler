@@ -1,3 +1,4 @@
+import inspect
 import logging
 from datetime import datetime
 
@@ -20,6 +21,7 @@ import config
 from actions import ActionRegistry
 from audit import AuditLog
 from browser import BrowserManager
+from echo_guard import EchoGuard, filter_echo_events
 from failover_llm import FailoverLLM, maybe_wrap_with_failover
 from file_tools import FileTools
 from gmail_tools import GmailTools
@@ -110,6 +112,9 @@ def voice_components():
 
 class Assistant(Agent):
     def __init__(self, browser: BrowserManager | None = None) -> None:
+        # Echo guard first: it must exist before any STT node runs, so her
+        # own TTS coming back through the mic is not heard as Jeevan.
+        self.echo_guard = EchoGuard()
         # The voice stack first: pipeline (Muse Spark + Voice Transcribe +
         # LiveKit TTS) or the Gemini Live realtime fallback.
         self._voice_llm, self.voice_stt, self.voice_tts, self.voice_mode = (
@@ -173,6 +178,23 @@ class Assistant(Agent):
             tools=[*tools, *self._end_call_tool.tools],
         )
 
+    async def stt_node(self, audio, model_settings):
+        """Default STT node plus the echo guard.
+
+        Her own TTS can come back through the mic and be transcribed as if
+        Jeevan said it (2026-09-24: it interrupted her own turns three
+        times). Final transcripts that near-verbatim match what she just
+        said are dropped before they can commit a user turn; everything
+        else — including genuine barge-in — passes through untouched.
+        """
+        node = super().stt_node(audio, model_settings)
+        if inspect.isawaitable(node):
+            node = await node
+        if node is None:
+            return
+        async for event in filter_echo_events(node, self.echo_guard):
+            yield event
+
 
 server = AgentServer()
 
@@ -214,6 +236,16 @@ async def my_agent(ctx: JobContext):
         voice_llm = assistant._voice_llm
         if isinstance(voice_llm, FailoverLLM):
             logger.info("LLM failover active and silent")
+
+    # Echo guard: remember what she says so her own TTS coming back through
+    # the mic is not transcribed as Jeevan (Assistant.stt_node drops it).
+    @session.on("conversation_item_added")
+    def _note_assistant_text(event) -> None:
+        item = event.item
+        if getattr(item, "role", None) == "assistant":
+            text = getattr(item, "text_content", "") or ""
+            if text.strip():
+                assistant.echo_guard.note_assistant_text(text)
 
     # Start the session, which initializes the voice pipeline and warms up the models
     await session.start(

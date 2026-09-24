@@ -95,4 +95,38 @@ function loadingDoc() {
   return docWith([new El("div", {}, ["Loading WhatsApp…"])]);
 }
 
-module.exports = { loggedInDoc, qrDoc, loadingDoc, chatRow };
+function _msgEl(meta, text, outgoing) {
+  return new El(
+    "div",
+    { "data-testid": "msg-container", class: outgoing ? "message-out" : "message-in" },
+    [
+      new El("div", { "data-pre-plain-text": meta }, [
+        new El("div", { class: "copyable-text" }, [text]),
+      ]),
+    ]
+  );
+}
+
+/* A conversation pane as it looks right after a chat is opened: the #main
+ * column has a header naming the active chat and a tall scrollable message
+ * pane sitting near the bottom (newest messages visible).
+ */
+function conversationDoc({ title = "SC1-Confidants", useTitleAttr = false, messageCount = 20 } = {}) {
+  const titleEl = useTitleAttr
+    ? new El("span", { title: title }, [title])
+    : new El("span", { "data-testid": "conversation-title" }, [title]);
+  const header = new El("header", {}, [titleEl]);
+  const scroller = new El("div", { class: "msg-scroller" }, []);
+  for (let i = 1; i <= messageCount; i++) {
+    scroller.append(
+      _msgEl(`[10:${String(i).padStart(2, "0")}, 24/09/2026] Sender: `, `message ${i}`, i % 2 === 0)
+    );
+  }
+  scroller.scrollHeight = 3000;
+  scroller.clientHeight = 800;
+  scroller.scrollTop = 2200; // = scrollHeight - clientHeight
+  const main = new El("div", { id: "main" }, [header, scroller]);
+  return docWith([main]);
+}
+
+module.exports = { loggedInDoc, qrDoc, loadingDoc, chatRow, conversationDoc, _msgEl };

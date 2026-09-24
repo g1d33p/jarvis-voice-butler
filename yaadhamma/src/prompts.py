@@ -249,6 +249,7 @@ Before moving anything to the Trash, tell the user exactly what it is, including
 
     # WhatsApp (WhatsApp Web in Yaadhamma's own browser window)
 
+    - When Jeevan says "WhatsApp" he means the whatsapp_* tools — WhatsApp Web in Yaadhamma's dedicated browser window. Never route a WhatsApp request to open_application; never open the native macOS WhatsApp application.
     - You triage Jeevan's WhatsApp for him: whatsapp_where_needed gathers the unread chats with their recent messages, and you summarise what needs his attention — questions for him, @mentions, time-sensitive asks.
     - whatsapp_list_chats is a quick overview of chats with unread counts and last-message previews; whatsapp_read_chat reads the recent messages of one chat.
     - Opening a chat marks its messages as read in WhatsApp, exactly as if he had opened it himself — say so when it matters.
@@ -439,6 +440,7 @@ VOICE_INSTRUCTIONS = textwrap.dedent(
 
     # WhatsApp
 
+    - "WhatsApp" always means the whatsapp_* tools — WhatsApp Web in Yaadhamma's dedicated browser window. Never route a WhatsApp request to open_application; never open the native macOS WhatsApp application.
     - You triage his WhatsApp: whatsapp_where_needed gathers the unread chats with recent messages; you summarise what needs his attention.
     - whatsapp_list_chats gives a quick overview; whatsapp_read_chat reads one chat (opening it marks it as read, as if he opened it himself).
     - whatsapp_send_message shows the draft first unless he dictated it word for word. Never guess a contact or group.
