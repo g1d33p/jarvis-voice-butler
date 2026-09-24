@@ -14,14 +14,18 @@ from livekit.agents import (
 from livekit.agents.beta.tools import EndCallTool
 from livekit.plugins import ai_coustics, google
 
+import config
+from actions import ActionRegistry
 from browser import BrowserManager
-from prompts import AGENT_INSTRUCTIONS
 from file_tools import FileTools
 from mac_tools import MacTools
 from observation import ObservationTools
+from orchestrator import Orchestrator, TaskTools, voice_tools
+from prompts import AGENT_INSTRUCTIONS, VOICE_INSTRUCTIONS
+from task_manager import TaskStore
 from tools import BrowserTools
 
-load_dotenv(".env.local")
+load_dotenv(".env.local")  # also loaded by config; harmless twice
 
 
 def _current_time_note() -> str:
@@ -41,6 +45,12 @@ class Assistant(Agent):
         self.mac_tools = MacTools()
         self.file_tools = FileTools()
         self.observation_tools = ObservationTools(self.browser)
+        toolsets = (
+            self.browser_tools,
+            self.mac_tools,
+            self.file_tools,
+            self.observation_tools,
+        )
         self._end_call_tool = EndCallTool(
             extra_description=(
                 "Only end the call after the user clearly says they are finished, "
@@ -50,6 +60,19 @@ class Assistant(Agent):
                 "Give Sureedu's brief, polite British-English farewell, then end the call."
             ),
         )
+        if config.MODE == "direct":
+            # Phase 1-2 behaviour: the voice model does everything itself.
+            instructions = AGENT_INSTRUCTIONS
+            tools = [tool for toolset in toolsets for tool in toolset.tools]
+        else:
+            # Phase 3 split: the voice model talks and does quick actions; a
+            # cheaper background model carries out multi-step tasks.
+            self.orchestrator = Orchestrator(
+                registry=ActionRegistry(*toolsets), store=TaskStore()
+            )
+            instructions = VOICE_INSTRUCTIONS
+            tools = [*voice_tools(*toolsets), *TaskTools(self.orchestrator).tools]
+
         super().__init__(
             # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
             # See all available models at https://docs.livekit.io/agents/models/llm/
@@ -68,14 +91,8 @@ class Assistant(Agent):
             # 3. Add `from livekit.plugins import openai` to the top of this file
             # 4. Replace the llm argument with:
             #     llm=openai.realtime.RealtimeModel(voice="marin")
-            instructions=AGENT_INSTRUCTIONS + _current_time_note(),
-            tools=[
-                *self.browser_tools.tools,
-                *self.mac_tools.tools,
-                *self.file_tools.tools,
-                *self.observation_tools.tools,
-                *self._end_call_tool.tools,
-            ],
+            instructions=instructions + _current_time_note(),
+            tools=[*tools, *self._end_call_tool.tools],
         )
 
 

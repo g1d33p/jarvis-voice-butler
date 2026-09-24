@@ -69,3 +69,22 @@ def test_approval_flow_is_described() -> None:
 def test_observation_tool_is_explained() -> None:
     assert "call observe_state rather than guessing" in AGENT_INSTRUCTIONS
     assert "You cannot see images yet" in AGENT_INSTRUCTIONS
+
+
+def test_voice_prompt_is_short() -> None:
+    from prompts import VOICE_INSTRUCTIONS
+
+    words = len(VOICE_INSTRUCTIONS.split())
+    assert words < len(AGENT_INSTRUCTIONS.split()) / 4
+    assert "run_task" in VOICE_INSTRUCTIONS
+    assert "continue_task" in VOICE_INSTRUCTIONS
+    assert "At your service, Sir" in VOICE_INSTRUCTIONS
+    assert "Babai" in VOICE_INSTRUCTIONS
+
+
+def test_orchestrator_prompt_defines_the_question_protocol() -> None:
+    from prompts import ORCHESTRATOR_INSTRUCTIONS
+
+    assert 'starts with "QUESTION:"' in ORCHESTRATOR_INSTRUCTIONS
+    assert "Never use CSS selectors" in ORCHESTRATOR_INSTRUCTIONS
+    assert "Never rephrase or add to it" in ORCHESTRATOR_INSTRUCTIONS
