@@ -304,6 +304,12 @@ VOICE_TOOL_NAMES = {
     "open_path",
     # Completing an approval round-trip must always be one direct call away.
     "approve_pending_action",
+    # Personal memory is instant and local; the voice model handles it itself.
+    "remember",
+    "recall",
+    "correct_memory",
+    "forget_memory",
+    "export_memories",
 }
 
 

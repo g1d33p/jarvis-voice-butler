@@ -22,6 +22,7 @@ from audit import AuditLog
 from browser import BrowserManager
 from file_tools import FileTools
 from mac_tools import MacTools
+from memory_tools import MemoryTools
 from meta_client import (
     MetaConfig,
     MetaConfigError,
@@ -113,12 +114,14 @@ class Assistant(Agent):
         self.file_tools = FileTools(approvals=self.approvals)
         self.approval_tools = ApprovalTools(approvals=self.approvals)
         self.observation_tools = ObservationTools(self.browser)
+        self.memory_tools = MemoryTools(audit=self.audit_log)
         toolsets = (
             self.browser_tools,
             self.mac_tools,
             self.file_tools,
             self.approval_tools,
             self.observation_tools,
+            self.memory_tools,
         )
         self._end_call_tool = EndCallTool(
             extra_description=(
