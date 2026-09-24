@@ -32,6 +32,11 @@ class BrowserTools:
             self.type_text,
             self.scroll,
             self.press_key,
+            self.list_tabs,
+            self.switch_tab,
+            self.open_tab,
+            self.close_tab,
+            self.reload_page,
         ]
 
     @function_tool()
@@ -176,6 +181,79 @@ class BrowserTools:
         """
         try:
             return await self.browser.press_key(key)
+        except BrowserError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @function_tool()
+    async def list_tabs(self, context: RunContext) -> dict[str, object]:
+        """List the open browser tabs with their numbers, titles and URLs.
+
+        Use this when the user asks what tabs are open, or before switching or
+        closing a tab when you are not sure which number it has.
+        """
+        try:
+            return await self.browser.list_tabs()
+        except BrowserError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @function_tool()
+    async def switch_tab(
+        self, context: RunContext, tab_number: int
+    ) -> dict[str, object]:
+        """Switch to an open browser tab so later page actions apply to it.
+
+        Args:
+            tab_number: The tab's number from list_tabs, counting from 1 on the left.
+        """
+        try:
+            return await self.browser.switch_tab(tab_number)
+        except BrowserError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @function_tool()
+    async def open_tab(self, context: RunContext, url: str = "") -> dict[str, object]:
+        """Open a new browser tab and make it the active tab.
+
+        Use this when the user asks for a new tab, or wants a site opened without
+        leaving the current page. To replace the current page instead, use open_url.
+
+        Args:
+            url: Optional complete http or https URL to load in the new tab.
+        """
+        try:
+            return await self.browser.open_tab(url or None)
+        except BrowserError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @function_tool()
+    async def close_tab(
+        self,
+        context: RunContext,
+        tab_number: int = 0,
+        user_confirmed: bool = False,
+    ) -> dict[str, object]:
+        """Close a browser tab.
+
+        If the result says needs_confirmation, the tab holds unsent or unsaved text.
+        Tell the user, ask whether to close it anyway, and only call again with
+        user_confirmed set to true after they clearly agree.
+
+        Args:
+            tab_number: The tab's number from list_tabs. Use 0 for the active tab.
+            user_confirmed: True only after the user explicitly approved losing unsaved text.
+        """
+        try:
+            return await self.browser.close_tab(
+                tab_number or None, confirmed=user_confirmed
+            )
+        except BrowserError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @function_tool()
+    async def reload_page(self, context: RunContext) -> dict[str, str]:
+        """Reload the active browser tab."""
+        try:
+            return await self.browser.reload()
         except BrowserError as exc:
             raise ToolError(str(exc)) from exc
 

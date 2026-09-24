@@ -30,12 +30,42 @@ async def _bring_page_window_to_front(page: Page) -> None:
         await page.bring_to_front()
 
 
-class BrowserManager:
-    """Own one isolated, visible browser for a LiveKit room."""
+DEFAULT_PROFILE_DIR = Path.home() / ".sureedu" / "chrome-profile"
 
-    def __init__(self, *, headless: bool = False, timeout_ms: int = 15_000) -> None:
+# Detects typed-but-unsent work (drafts, form entries) before a tab is closed.
+_UNSAVED_INPUT_SCRIPT = """() => {
+  const skipTypes = new Set(['hidden', 'search', 'submit', 'button', 'checkbox',
+                             'radio', 'password', 'file', 'reset', 'image']);
+  for (const el of document.querySelectorAll('input, textarea')) {
+    const type = (el.getAttribute('type') || 'text').toLowerCase();
+    if (el.tagName === 'INPUT' && skipTypes.has(type)) continue;
+    if (el.value && el.value.trim() && el.value !== el.defaultValue) return true;
+  }
+  for (const el of document.querySelectorAll('[contenteditable="true"]')) {
+    if (el.innerText && el.innerText.trim()) return true;
+  }
+  return false;
+}"""
+
+
+class BrowserManager:
+    """Own one isolated, visible browser for a LiveKit room.
+
+    The browser can hold several tabs. One of them is the "active" tab: every
+    page action (read, click, type, ...) applies to it. Tabs are numbered from 1,
+    left to right, so the user can say "switch to tab 2".
+    """
+
+    def __init__(
+        self,
+        *,
+        headless: bool = False,
+        timeout_ms: int = 15_000,
+        profile_dir: Path | None = None,
+    ) -> None:
         self._headless = headless
         self._timeout_ms = timeout_ms
+        self._profile_dir = profile_dir or DEFAULT_PROFILE_DIR
         self._playwright = None
         self._browser = None
         self._context = None
@@ -43,17 +73,20 @@ class BrowserManager:
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
-        if self._page is not None:
+        if self._context is not None:
             return
 
         self._playwright = await async_playwright().start()
 
         self._context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=str(Path.home() / ".sureedu" / "chrome-profile"),
+            user_data_dir=str(self._profile_dir),
             headless=self._headless,
         )
 
         self._browser = self._context.browser
+        # Tabs opened by the page itself (e.g. a link with target="_blank")
+        # become the active tab, because that is where the user's attention goes.
+        self._context.on("page", self._on_new_page)
 
         if self._context.pages:
             self._page = self._context.pages[0]
@@ -238,10 +271,168 @@ class BrowserManager:
             await page.keyboard.press(key)
             return {"key": key, "url": page.url}
 
+    # ------------------------------------------------------------------
+    # Tab management
+    # ------------------------------------------------------------------
+
+    async def list_tabs(self) -> dict[str, object]:
+        """Return every open tab with its number, title, URL and active flag."""
+        await self._get_page()
+
+        async with self._lock:
+            tabs = []
+            for number, page in enumerate(self._open_pages(), start=1):
+                tabs.append(
+                    {
+                        "number": number,
+                        "title": await self._safe_title(page),
+                        "url": page.url,
+                        "active": page is self._page,
+                    }
+                )
+            return {"tab_count": len(tabs), "tabs": tabs}
+
+    async def switch_tab(self, number: int) -> dict[str, object]:
+        """Make tab `number` (1-based) the active tab and bring it to the front."""
+        await self._get_page()
+
+        async with self._lock:
+            page = self._page_by_number(number)
+            self._page = page
+            if not self._headless:
+                await _bring_page_window_to_front(page)
+            return {"number": number, **await self._page_summary(page)}
+
+    async def open_tab(self, url: str | None = None) -> dict[str, object]:
+        """Open a new tab, optionally at `url`, and make it the active tab."""
+        if url:
+            self._validate_url(url)
+        await self._get_page()
+
+        async with self._lock:
+            assert self._context is not None
+            page = await self._context.new_page()
+            page.set_default_timeout(self._timeout_ms)
+            self._page = page
+            if url:
+                try:
+                    await page.goto(url, wait_until="domcontentloaded")
+                except PlaywrightTimeoutError as exc:
+                    raise BrowserError("The new tab took too long to load.") from exc
+                except Exception as exc:
+                    raise BrowserError(f"I could not open that page: {exc}") from exc
+            if not self._headless:
+                await _bring_page_window_to_front(page)
+            number = self._open_pages().index(page) + 1
+            return {"number": number, **await self._page_summary(page)}
+
+    async def close_tab(
+        self, number: int | None = None, *, confirmed: bool = False
+    ) -> dict[str, object]:
+        """Close tab `number` (default: the active tab).
+
+        If the tab contains typed-but-unsent text, nothing is closed and the
+        result has needs_confirmation=True, so the user can be asked first.
+        The last remaining tab is never closed.
+        """
+        await self._get_page()
+
+        async with self._lock:
+            pages = self._open_pages()
+            page = self._page if number is None else self._page_by_number(number)
+            assert page is not None
+            number = pages.index(page) + 1
+
+            if len(pages) == 1:
+                raise BrowserError("That is the only open tab, so I will keep it open.")
+
+            if not confirmed and await self._has_unsaved_input(page):
+                return {
+                    "closed": False,
+                    "needs_confirmation": True,
+                    "number": number,
+                    "title": await self._safe_title(page),
+                    "reason": "The tab contains typed text that has not been sent or saved.",
+                }
+
+            title = await self._safe_title(page)
+            try:
+                await page.close()
+            except Exception as exc:
+                raise BrowserError(f"I could not close that tab: {exc}") from exc
+
+            remaining = self._open_pages()
+            if self._page is page or self._page not in remaining:
+                # Activate the neighbour to the left, like a normal browser.
+                self._page = remaining[max(0, number - 2)]
+                if not self._headless:
+                    await _bring_page_window_to_front(self._page)
+
+            return {
+                "closed": True,
+                "closed_title": title,
+                "active_tab": remaining.index(self._page) + 1,
+                "active_title": await self._safe_title(self._page),
+            }
+
+    async def reload(self) -> dict[str, str]:
+        """Reload the active tab."""
+        page = await self._get_page()
+
+        async with self._lock:
+            try:
+                await page.reload(wait_until="domcontentloaded")
+                return await self._page_summary(page)
+            except PlaywrightTimeoutError as exc:
+                raise BrowserError("The page took too long to reload.") from exc
+            except Exception as exc:
+                raise BrowserError(f"I could not reload the page: {exc}") from exc
+
+    def _on_new_page(self, page: Page) -> None:
+        page.set_default_timeout(self._timeout_ms)
+        self._page = page
+
+    def _open_pages(self) -> list[Page]:
+        if self._context is None:
+            return []
+        return [page for page in self._context.pages if not page.is_closed()]
+
+    def _page_by_number(self, number: int) -> Page:
+        pages = self._open_pages()
+        if not isinstance(number, int) or not 1 <= number <= len(pages):
+            raise BrowserError(
+                f"There is no tab {number}. There are {len(pages)} tabs open."
+            )
+        return pages[number - 1]
+
+    @staticmethod
+    async def _safe_title(page: Page) -> str:
+        try:
+            return await page.title()
+        except Exception:
+            return ""
+
+    @staticmethod
+    async def _has_unsaved_input(page: Page) -> bool:
+        try:
+            return bool(await page.evaluate(_UNSAVED_INPUT_SCRIPT))
+        except Exception:
+            # If the page cannot be checked, err on the side of asking.
+            return True
+
     async def _get_page(self) -> Page:
-        if self._page is None:
+        if self._context is None:
             await self.start()
-        assert self._page is not None
+        if self._page is None or self._page.is_closed():
+            # The active tab was closed (by the user or the page): fall back to
+            # the right-most open tab, or open a fresh one.
+            pages = self._open_pages()
+            if pages:
+                self._page = pages[-1]
+            else:
+                assert self._context is not None
+                self._page = await self._context.new_page()
+                self._page.set_default_timeout(self._timeout_ms)
         return self._page
 
     @staticmethod

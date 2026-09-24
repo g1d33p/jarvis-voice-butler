@@ -3,7 +3,10 @@ from prompts import AGENT_INSTRUCTIONS
 
 def test_named_websites_are_opened_directly() -> None:
     assert "If the user names a website, service, or domain" in AGENT_INSTRUCTIONS
-    assert "Do not unnecessarily route a request through a general search engine" in AGENT_INSTRUCTIONS
+    assert (
+        "Do not unnecessarily route a request through a general search engine"
+        in AGENT_INSTRUCTIONS
+    )
 
 
 def test_assistant_identity_is_sureedu() -> None:
@@ -18,3 +21,8 @@ def test_tools_are_not_used_for_questions_about_itself() -> None:
 
 def test_accent_is_consistent() -> None:
     assert "consistent British English accent" in AGENT_INSTRUCTIONS
+
+
+def test_tab_rules_are_present() -> None:
+    assert "# Browser Tabs" in AGENT_INSTRUCTIONS
+    assert "Do not reopen a site that is already open in a tab" in AGENT_INSTRUCTIONS
