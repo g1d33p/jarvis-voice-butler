@@ -44,3 +44,23 @@ def test_window_versus_tab_is_explained() -> None:
         in AGENT_INSTRUCTIONS
     )
     assert 'Never say "Anything else I can help with?"' in AGENT_INSTRUCTIONS
+
+
+def test_side_conversations_and_invented_errors() -> None:
+    assert (
+        "stay silent and do nothing until the user addresses you again"
+        in AGENT_INSTRUCTIONS
+    )
+    assert (
+        "Only report a problem, such as a missing permission, when a tool actually returned it"
+        in AGENT_INSTRUCTIONS
+    )
+
+
+def test_greeting_is_brief() -> None:
+    assert "Do not add an offer of help" in AGENT_INSTRUCTIONS
+
+
+def test_approval_flow_is_described() -> None:
+    assert "It performs the waiting action itself" in AGENT_INSTRUCTIONS
+    assert "call approve_draft" in AGENT_INSTRUCTIONS

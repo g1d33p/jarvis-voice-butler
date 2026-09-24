@@ -22,6 +22,31 @@ _PROTECTED_NAMES = {
 }
 
 
+# Opening these would run a program or installer, so open_path only reveals them.
+_RUNNABLE_SUFFIXES = {
+    ".app",
+    ".command",
+    ".sh",
+    ".zsh",
+    ".bash",
+    ".tool",
+    ".pkg",
+    ".mpkg",
+    ".dmg",
+    ".scpt",
+    ".applescript",
+    ".workflow",
+    ".terminal",
+    ".jar",
+    ".py",
+}
+
+
+def _run_open(args: list[str]) -> subprocess.CompletedProcess:
+    """Run macOS `open`. Kept separate so tests can replace it."""
+    return subprocess.run(["open", *args], capture_output=True, text=True, timeout=15)
+
+
 def _run_osascript(script: str) -> subprocess.CompletedProcess:
     """Run AppleScript. Kept separate so tests can replace it."""
     return subprocess.run(
@@ -83,6 +108,7 @@ class FileTools:
             self.move_path,
             self.copy_path,
             self.move_to_trash,
+            self.open_path,
         ]
 
     @function_tool()
@@ -381,3 +407,45 @@ class FileTools:
             raise ToolError("Finder reported success, but the item is still there.")
 
         return {"moved": True, "restorable": True, **details}
+
+    @function_tool()
+    async def open_path(
+        self,
+        context: RunContext,
+        path: str,
+        reveal_in_finder: bool = False,
+    ) -> dict[str, object]:
+        """Open a folder in Finder, or open a file in its usual app.
+
+        Use this when the user says "open that folder" or "show me the file".
+        With reveal_in_finder true, Finder opens the containing folder with the
+        item selected instead. Programs and scripts are only revealed, never run.
+
+        Args:
+            path: Full path of the file or folder, e.g. ~/Documents/Sureedu.
+            reveal_in_finder: True to show the item in Finder rather than open it.
+        """
+        target = Path(path).expanduser()
+        if not target.exists():
+            raise ToolError(f"Nothing exists at {target}.")
+
+        runnable = target.suffix.lower() in _RUNNABLE_SUFFIXES
+        reveal = reveal_in_finder or runnable
+        args = ["-R", str(target)] if reveal else [str(target)]
+        try:
+            result = _run_open(args)
+        except subprocess.TimeoutExpired as exc:
+            raise ToolError("Opening that timed out.") from exc
+        if result.returncode != 0:
+            raise ToolError(result.stderr.strip() or "macOS could not open that.")
+
+        opened = {
+            "opened": True,
+            "path": str(target),
+            "shown_in_finder": reveal,
+        }
+        if runnable and not reveal_in_finder:
+            opened["note"] = (
+                "This is a program or script, so it was only shown in Finder."
+            )
+        return opened

@@ -382,26 +382,6 @@ async def test_plain_numbers_are_treated_as_text_not_ids(chat_browser) -> None:
     assert result["title"] == "Opened Team"
 
 
-@pytest.mark.asyncio
-async def test_send_button_clicked_by_id_still_requires_confirmation(
-    chat_browser,
-) -> None:
-    from livekit.agents.llm import ToolError
-
-    manager = chat_browser
-    tools = BrowserTools(manager)
-    send = _find((await manager.inspect_page())["elements"], "Send")
-
-    assert await manager.element_label(send["id"]) == "Send"
-    with pytest.raises(ToolError, match="confirm clicking 'Send'"):
-        await tools.click(None, send["id"])
-
-    await tools.confirm_browser_action(None, send["id"], "Yes, send it")
-    await tools.click(None, send["id"])  # now allowed, exactly once
-    with pytest.raises(ToolError):
-        await tools.click(None, send["id"])  # approval was used up
-
-
 # ----------------------------------------------------------------------
 # Approval hardening (from the live WhatsApp test)
 # ----------------------------------------------------------------------
@@ -425,59 +405,6 @@ def test_unclear_or_negative_replies_are_not_approval(reply: str) -> None:
     from tools import is_clear_approval
 
     assert not is_clear_approval(reply)
-
-
-@pytest.mark.asyncio
-async def test_garbled_reply_does_not_approve(chat_browser) -> None:
-    from livekit.agents.llm import ToolError
-
-    tools = BrowserTools(chat_browser)
-    send = _find((await chat_browser.inspect_page())["elements"], "Send")
-
-    with pytest.raises(ToolError, match="not a clear yes"):
-        await tools.confirm_browser_action(None, send["id"], "Est-ce que")
-    with pytest.raises(ToolError):
-        await tools.click(None, send["id"])
-
-
-@pytest.mark.asyncio
-async def test_unused_approval_does_not_carry_over_to_a_new_message(
-    chat_browser,
-) -> None:
-    """The live bug: approval for message 1 was silently reused for message 2."""
-    from livekit.agents.llm import ToolError
-
-    tools = BrowserTools(chat_browser)
-    elements = (await chat_browser.inspect_page())["elements"]
-    send = _find(elements, "Send")
-    composer = _find(elements, "Type a message")
-
-    await tools.confirm_browser_action(None, send["id"], "yes")
-    # Approval never used; then a different message is typed.
-    await tools.type_text(None, composer["id"], "A different message")
-
-    with pytest.raises(ToolError, match="not approved"):
-        await tools.click(None, send["id"])
-
-
-@pytest.mark.asyncio
-async def test_approval_expires(chat_browser, monkeypatch) -> None:
-    from livekit.agents.llm import ToolError
-
-    import tools as tools_module
-
-    tools = BrowserTools(chat_browser)
-    send = _find((await chat_browser.inspect_page())["elements"], "Send")
-    await tools.confirm_browser_action(None, send["id"], "yes")
-
-    real_monotonic = tools_module.time.monotonic
-    monkeypatch.setattr(
-        tools_module.time,
-        "monotonic",
-        lambda: real_monotonic() + tools_module.APPROVAL_TTL_SECONDS + 1,
-    )
-    with pytest.raises(ToolError):
-        await tools.click(None, send["id"])
 
 
 @pytest.mark.asyncio
@@ -510,21 +437,6 @@ async def test_web_search_opens_in_a_new_tab(monkeypatch) -> None:
 
     await BrowserTools(manager).search_the_web(None, "weather")
     assert calls and "duckduckgo.com" in calls[0]
-
-
-@pytest.mark.asyncio
-async def test_switching_chats_cancels_an_earlier_approval(chat_browser) -> None:
-    from livekit.agents.llm import ToolError
-
-    tools = BrowserTools(chat_browser)
-    elements = (await chat_browser.inspect_page())["elements"]
-    other_chat = _find(elements, "Team Group")
-
-    await tools.confirm_browser_action(None, "Send", "yes")
-    await tools.click(None, other_chat["id"])  # user's approval was for another chat
-
-    with pytest.raises(ToolError, match="not approved"):
-        await tools.click(None, "Send")
 
 
 # ----------------------------------------------------------------------
@@ -579,35 +491,6 @@ async def test_type_text_reports_which_field_was_filled(chat_browser) -> None:
     result = await chat_browser.type_text(composer["id"], "hi")
 
     assert result["typed_into"] == "Type a message"
-
-
-@pytest.mark.asyncio
-async def test_approval_uses_the_real_transcript_not_the_models_retelling(
-    chat_browser,
-) -> None:
-    from types import SimpleNamespace
-
-    from livekit.agents.llm import ToolError
-
-    def context_with_last_user_words(text: str):
-        message = SimpleNamespace(type="message", role="user", text_content=text)
-        history = SimpleNamespace(items=[message])
-        return SimpleNamespace(session=SimpleNamespace(history=history))
-
-    tools = BrowserTools(chat_browser)
-    send = _find((await chat_browser.inspect_page())["elements"], "Send")
-
-    # The user actually said "research"; the model claims they said "yes".
-    with pytest.raises(ToolError, match="not a clear yes"):
-        await tools.confirm_browser_action(
-            context_with_last_user_words("research"), send["id"], "yes"
-        )
-
-    # The user actually said "Yes, send it."
-    await tools.confirm_browser_action(
-        context_with_last_user_words("Yes, send it."), send["id"], "yes and then"
-    )
-    await tools.click(None, send["id"])
 
 
 def test_close_browser_tool_is_registered() -> None:
@@ -666,21 +549,6 @@ def _yes_context():
 
 
 @pytest.mark.asyncio
-async def test_enter_in_message_box_needs_approval(enter_browser) -> None:
-    from livekit.agents.llm import ToolError
-
-    tools = BrowserTools(enter_browser)
-    composer = _find((await enter_browser.inspect_page())["elements"], "Type a message")
-    await tools.type_text(None, composer["id"], "Hi")
-
-    with pytest.raises(ToolError, match="would send or submit"):
-        await tools.press_key(None, "Enter")
-
-    await tools.confirm_browser_action(_yes_context(), "Enter", "yes")
-    await tools.press_key(None, "Enter")  # approved once
-
-
-@pytest.mark.asyncio
 async def test_enter_in_search_box_is_free(enter_browser) -> None:
     tools = BrowserTools(enter_browser)
     search = _find((await enter_browser.inspect_page())["elements"], "Search")
@@ -697,7 +565,7 @@ async def test_enter_on_focused_send_button_needs_approval(enter_browser) -> Non
     page = await enter_browser._get_page()
     await page.focus("button[aria-label='Send']")
 
-    with pytest.raises(ToolError, match="would send or submit"):
+    with pytest.raises(ToolError, match="needs the user's approval"):
         await tools.press_key(None, "Enter")
 
 
@@ -751,7 +619,7 @@ async def test_one_instruction_sends_at_most_one_message(chat_browser) -> None:
     await tools.type_text(context, composer["id"], "Hi")
     await tools.click(context, send["id"])
     await tools.type_text(context, composer["id"], "Hi")
-    with pytest.raises(ToolError, match="not approved"):
+    with pytest.raises(ToolError, match="needs the user's approval"):
         await tools.click(context, send["id"])
 
 
@@ -766,7 +634,7 @@ async def test_composed_message_still_needs_approval(chat_browser) -> None:
     context = _said("send him a friendly greeting")
 
     await tools.type_text(context, composer["id"], "Hey! Hope you're doing well")
-    with pytest.raises(ToolError, match="not approved"):
+    with pytest.raises(ToolError, match="needs the user's approval"):
         await tools.click(context, send["id"])
 
 
@@ -781,9 +649,182 @@ async def test_enter_follows_the_same_policy(chat_browser) -> None:
     await tools.type_text(
         _said("send code 482913", "u1"), composer["id"], "code 482913"
     )
-    with pytest.raises(ToolError, match="not approved"):
+    with pytest.raises(ToolError, match="needs the user's approval"):
         await tools.press_key(_said("send code 482913", "u1"), "Enter")
 
     # Simple dictated text: Enter goes through.
     await tools.type_text(_said("send hello", "u2"), composer["id"], "hello")
     await tools.press_key(_said("send hello", "u2"), "Enter")
+
+
+# ----------------------------------------------------------------------
+# Approval flow: one question, and the yes performs the action
+# (replays of the live test on 24 Sep 2026)
+# ----------------------------------------------------------------------
+
+
+async def _typed(tools, browser, text, context=None):
+    composer = _find((await browser.inspect_page())["elements"], "Type a message")
+    await tools.type_text(context, composer["id"], text)
+    return composer
+
+
+async def _send_id(browser):
+    page = await browser._get_page()
+    return await page.evaluate(
+        "() => document.querySelector('[aria-label=\"Send\"]')"
+        ".getAttribute('data-sureedu-id')"
+    )
+
+
+async def test_yes_performs_the_waiting_send(chat_browser) -> None:
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(chat_browser)
+    await _typed(tools, chat_browser, "Hope the meeting went well")
+    send = "#" + await _send_id(chat_browser)
+
+    with pytest.raises(ToolError, match="needs the user's approval"):
+        await tools.click(_said("send it to him", "u1"), send)
+
+    result = await tools.confirm_browser_action(_said("Yes.", "u2"), "yes")
+
+    assert result["done"] is True
+    assert result["sent"] == "Hope the meeting went well"
+    # Nothing is left approved afterwards.
+    with pytest.raises(ToolError, match="Nothing is waiting"):
+        await tools.confirm_browser_action(_said("yes", "u3"), "yes")
+
+
+async def test_send_command_counts_as_yes_while_a_message_waits(chat_browser) -> None:
+    """Live run: 'What are you waiting for? Send a message.' was rejected."""
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(chat_browser)
+    await _typed(tools, chat_browser, "Good morning! Hope you have a brilliant day.")
+    with pytest.raises(ToolError):
+        await tools.press_key(_said("type it", "u1"), "Enter")
+
+    result = await tools.confirm_browser_action(
+        _said("What are you waiting for? Send a message.", "u2"), "send it already"
+    )
+    assert result["done"] is True
+
+
+async def test_garbled_or_negative_replies_do_not_send(chat_browser) -> None:
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(chat_browser)
+    await _typed(tools, chat_browser, "Call me later")
+    with pytest.raises(ToolError):
+        await tools.press_key(_said("type call me later", "u1"), "Enter")
+
+    for reply in ("Est-ce que", "ready", "don't send that"):
+        with pytest.raises(ToolError):
+            await tools.confirm_browser_action(_said(reply, "u2"), "yes")
+
+
+async def test_approved_draft_sends_without_a_second_question(chat_browser) -> None:
+    """Live run: the user approved the wording, then had to confirm 3 more times."""
+    tools = BrowserTools(chat_browser)
+    draft = "Good morning! Hope you have a brilliant day."
+
+    await tools.approve_draft(_said("That works, go ahead.", "u1"), draft, "that works")
+    await _typed(tools, chat_browser, draft)
+    await tools.press_key(_said("That works, go ahead.", "u1"), "Enter")  # sends
+
+
+async def test_approved_draft_does_not_cover_different_text(chat_browser) -> None:
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(chat_browser)
+    await tools.approve_draft(_said("yes", "u1"), "Good morning!", "yes")
+    await _typed(tools, chat_browser, "Good morning! Also, I quit.")
+
+    with pytest.raises(ToolError, match="needs the user's approval"):
+        await tools.press_key(_said("yes", "u1"), "Enter")
+
+
+async def test_message_edited_after_the_question_is_not_sent(chat_browser) -> None:
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(chat_browser)
+    await _typed(tools, chat_browser, "See you at six")
+    with pytest.raises(ToolError):
+        await tools.press_key(_said("type see you at six", "u1"), "Enter")
+
+    # The text changes behind the user's back (typing clears the pending send).
+    await _typed(tools, chat_browser, "See you at seven")
+    with pytest.raises(ToolError, match="Nothing is waiting"):
+        await tools.confirm_browser_action(_said("yes", "u2"), "yes")
+
+
+async def test_switching_chats_cancels_a_waiting_send(chat_browser) -> None:
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(chat_browser)
+    await _typed(tools, chat_browser, "Running late, sorry")
+    with pytest.raises(ToolError):
+        await tools.press_key(_said("type running late", "u1"), "Enter")
+
+    other_chat = _find((await chat_browser.inspect_page())["elements"], "Team Group")
+    await tools.click(None, other_chat["id"])
+
+    with pytest.raises(ToolError, match="Nothing is waiting"):
+        await tools.confirm_browser_action(_said("yes", "u2"), "yes")
+
+
+async def test_waiting_send_expires(chat_browser, monkeypatch) -> None:
+    from livekit.agents.llm import ToolError
+
+    import tools as tools_module
+
+    tools = BrowserTools(chat_browser)
+    await _typed(tools, chat_browser, "Call me")
+    with pytest.raises(ToolError):
+        await tools.press_key(_said("type call me", "u1"), "Enter")
+
+    real = tools_module.time.monotonic
+    monkeypatch.setattr(
+        tools_module.time,
+        "monotonic",
+        lambda: real() + tools_module.APPROVAL_TTL_SECONDS + 1,
+    )
+    with pytest.raises(ToolError, match="Nothing is waiting"):
+        await tools.confirm_browser_action(_said("yes", "u2"), "yes")
+
+
+async def test_approval_judges_the_real_transcript(chat_browser) -> None:
+    """The user said 'research'; the model claims they said 'yes'."""
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(chat_browser)
+    await _typed(tools, chat_browser, "Meeting moved")
+    with pytest.raises(ToolError):
+        await tools.press_key(_said("type meeting moved", "u1"), "Enter")
+
+    with pytest.raises(ToolError, match="not a clear yes"):
+        await tools.confirm_browser_action(_said("research", "u2"), "yes")
+
+
+async def test_click_reports_what_was_clicked(chat_browser) -> None:
+    tools = BrowserTools(chat_browser)
+    team = _find((await chat_browser.inspect_page())["elements"], "Team Group")
+
+    result = await tools.click(None, team["id"])
+
+    assert "Team Group" in result["clicked"]
+
+
+@pytest.mark.parametrize(
+    ("current", "new", "replace"),
+    [
+        ("about:blank", "https://web.whatsapp.com/", True),
+        ("https://web.whatsapp.com/", "https://www.google.com/search?q=pizza", False),
+        ("https://duckduckgo.com/?q=weather", "https://www.youtube.com/", True),
+        ("https://www.youtube.com/watch?v=1", "https://youtube.com/", True),
+        ("https://outlook.live.com/mail/", "https://www.amazon.com/", False),
+    ],
+)
+def test_pages_in_use_are_not_replaced(current: str, new: str, replace: bool) -> None:
+    assert browser_module._may_replace(current, new) is replace

@@ -5,8 +5,9 @@ from pathlib import Path
 from livekit.agents import RunContext, function_tool
 from livekit.agents.llm import ToolError
 
-SCREENSHOT_DIR = Path.home() / ".sureedu" / "screenshots"
-KEEP_SCREENSHOTS = 20
+# Screenshots the user asks for are theirs, so they go somewhere visible and
+# are never deleted automatically.
+SCREENSHOT_DIR = Path.home() / "Documents" / "Sureedu" / "Screenshots"
 CLIPBOARD_MAX_CHARS = 4_000
 
 _ACTIVE_APP_SCRIPT = """
@@ -23,6 +24,10 @@ tell application "System Events"
 end tell
 return appName & linefeed & titleStatus & linefeed & winTitle
 """
+
+
+# Playwright's bundled browser shows up under these names.
+_OWN_BROWSER_NAMES = {"Google Chrome for Testing", "Chromium"}
 
 
 def _run(
@@ -160,6 +165,12 @@ class MacTools:
 
         app, status, title = [*result.stdout.rstrip("\n").split("\n", 2), "", ""][:3]
         info: dict[str, object] = {"app": app.strip(), "window_title": title.strip()}
+        if app.strip() in _OWN_BROWSER_NAMES:
+            info["app"] = "Sureedu's browser"
+            info["note"] = (
+                "This is Sureedu's own browser window, not the user's Google Chrome."
+            )
+            return info
         if status.strip() != "ok":
             info["window_title"] = ""
             info["note"] = (
@@ -213,9 +224,9 @@ class MacTools:
     async def capture_screen(self, context: RunContext) -> dict[str, object]:
         """Take a screenshot of the whole Mac screen and save it to a file.
 
-        Returns the file path only; the image itself is not sent anywhere. Use
-        this when the user asks for a screenshot of their screen. For the
-        browser page, use the browser screenshot tool instead.
+        It is saved in the user's Documents, Sureedu, Screenshots folder, and the
+        image itself is not sent anywhere. Tell the user the folder name, not the
+        full path. For the browser page, use the browser screenshot tool instead.
         """
         return capture_screen_to_file()
 
@@ -224,7 +235,13 @@ def capture_screen_to_file(directory: Path | None = None) -> dict[str, object]:
     """Save a full-screen screenshot and keep only the most recent ones."""
     directory = directory or SCREENSHOT_DIR
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"screen-{datetime.now():%Y%m%d-%H%M%S-%f}.png"
+    # Same naming style as macOS's own screenshots.
+    now = datetime.now()
+    path = directory / f"Screenshot {now:%Y-%m-%d at %H.%M.%S}.png"
+    counter = 2
+    while path.exists():
+        path = directory / f"Screenshot {now:%Y-%m-%d at %H.%M.%S} ({counter}).png"
+        counter += 1
 
     try:
         # -x: no camera sound.
@@ -238,8 +255,9 @@ def capture_screen_to_file(directory: Path | None = None) -> dict[str, object]:
             "be needed in System Settings, Privacy and Security, Screen Recording."
         )
 
-    old = sorted(directory.glob("screen-*.png"))[:-KEEP_SCREENSHOTS]
-    for stale in old:
-        stale.unlink(missing_ok=True)
-
-    return {"saved": True, "path": str(path), "bytes": path.stat().st_size}
+    return {
+        "saved": True,
+        "path": str(path),
+        "folder": "Documents, Sureedu, Screenshots",
+        "bytes": path.stat().st_size,
+    }

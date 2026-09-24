@@ -64,7 +64,7 @@ async def test_write_clipboard_sends_text_on_stdin(monkeypatch) -> None:
     assert "11 characters" in message
 
 
-def test_screenshot_is_saved_and_old_ones_pruned(tmp_path, monkeypatch) -> None:
+def test_screenshots_are_kept_with_readable_names(tmp_path, monkeypatch) -> None:
     def fake_screencapture(command, **kwargs):
         from pathlib import Path
 
@@ -72,14 +72,25 @@ def test_screenshot_is_saved_and_old_ones_pruned(tmp_path, monkeypatch) -> None:
         return _completed()
 
     monkeypatch.setattr(mac_tools, "_run", fake_screencapture)
-    monkeypatch.setattr(mac_tools, "KEEP_SCREENSHOTS", 3)
 
-    for _ in range(5):
-        result = capture_screen_to_file(tmp_path)
+    results = [capture_screen_to_file(tmp_path) for _ in range(3)]
 
-    assert result["saved"] is True
-    assert result["path"].endswith(".png")
-    assert len(list(tmp_path.glob("screen-*.png"))) == 3
+    # Never auto-deleted, never overwritten, and named like macOS screenshots.
+    assert len(list(tmp_path.glob("Screenshot *.png"))) == 3
+    assert len({r["path"] for r in results}) == 3
+    assert results[0]["folder"] == "Documents, Sureedu, Screenshots"
+
+
+async def test_own_browser_is_reported_as_sureedus(monkeypatch) -> None:
+    monkeypatch.setattr(
+        mac_tools,
+        "_run",
+        lambda *a, **k: _completed("Google Chrome for Testing\nok\nWhatsApp\n"),
+    )
+
+    info = await MacTools().get_active_app(None)
+
+    assert info["app"] == "Sureedu's browser"
 
 
 def test_screenshot_failure_mentions_permission(tmp_path, monkeypatch) -> None:

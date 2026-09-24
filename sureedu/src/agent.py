@@ -1,3 +1,5 @@
+from datetime import datetime
+
 from dotenv import load_dotenv
 from google.genai import types as genai_types
 from livekit.agents import (
@@ -19,6 +21,16 @@ from mac_tools import MacTools
 from tools import BrowserTools
 
 load_dotenv(".env.local")
+
+
+def _current_time_note() -> str:
+    """Tell the model the local date and time, for greetings and scheduling."""
+    now = datetime.now().astimezone()
+    return (
+        "\n\n# Current Time\n\n"
+        f"When this conversation started it was {now:%A, %d %B %Y, %I:%M %p} "
+        f"({now.tzname()}) on the user's Mac."
+    )
 
 
 class Assistant(Agent):
@@ -54,7 +66,7 @@ class Assistant(Agent):
             # 3. Add `from livekit.plugins import openai` to the top of this file
             # 4. Replace the llm argument with:
             #     llm=openai.realtime.RealtimeModel(voice="marin")
-            instructions=AGENT_INSTRUCTIONS,
+            instructions=AGENT_INSTRUCTIONS + _current_time_note(),
             tools=[
                 *self.browser_tools.tools,
                 *self.mac_tools.tools,
@@ -97,7 +109,7 @@ async def my_agent(ctx: JobContext):
         # emits inline delivery tags (emotion, pacing, non-verbal sounds) that the TTS renders and
         # the transcript never shows. Requires a TTS model that supports markup, such as the Fish
         # Audio model above.
-        # expressive=True, 
+        # expressive=True,
     )
 
     # Start the session, which initializes the voice pipeline and warms up the models
@@ -112,7 +124,7 @@ async def my_agent(ctx: JobContext):
             ),
         ),
     )
-    
+
     # Join the room and connect to the user
     await ctx.connect()
 

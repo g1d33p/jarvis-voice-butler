@@ -158,6 +158,28 @@ _ELEMENT_LABEL_SCRIPT = """el => (el.getAttribute('aria-label') || el.getAttribu
   el.innerText || el.value || '').trim().replace(/\\s+/g, ' ').slice(0, 100)"""
 
 
+_SEARCH_HOSTS = ("duckduckgo.com", "google.", "bing.com", "search.yahoo.com")
+
+
+def _host(url: str) -> str:
+    host = urlparse(url).netloc.casefold()
+    return host[4:] if host.startswith("www.") else host
+
+
+def _may_replace(current_url: str, new_url: str) -> bool:
+    """True if opening `new_url` may replace the page at `current_url`.
+
+    Replacing is fine for a blank tab, a search results page, or another page
+    of the same site. Anything else stays open, and the new site gets its own tab.
+    """
+    if not current_url or current_url.startswith(("about:", "chrome:")):
+        return True
+    current = _host(current_url)
+    if not current or current == _host(new_url):
+        return True
+    return any(current.startswith(h) or f".{h}" in f".{current}" for h in _SEARCH_HOSTS)
+
+
 class BrowserManager:
     """Own one isolated, visible browser for a LiveKit room.
 
@@ -240,6 +262,16 @@ class BrowserManager:
                 **result,
                 "opened_in_new_tab": True,
                 "reason": "The current tab has unsent text, so it was left untouched.",
+            }
+        if not _may_replace(page.url, url):
+            # Don't navigate away from something the user is using (WhatsApp,
+            # email, a document): open the new site beside it instead.
+            kept = await self._safe_title(page)
+            result = await self.open_tab(url)
+            return {
+                **result,
+                "opened_in_new_tab": True,
+                "reason": f"Kept the current tab ({kept}) open.",
             }
 
         async with self._lock:

@@ -1,5 +1,6 @@
 import re
 import time
+from dataclasses import dataclass
 from urllib.parse import urlencode
 
 from livekit.agents import RunContext, function_tool
@@ -8,8 +9,10 @@ from livekit.agents.llm import ToolError
 from browser import BrowserError, BrowserManager
 from policy import can_send_without_asking
 
-# How long a user's approval stays valid before the click must happen.
+# How long a blocked action waits for the user's yes.
 APPROVAL_TTL_SECONDS = 60
+# How long an approved draft message stays valid while it is typed and sent.
+DRAFT_TTL_SECONDS = 120
 
 _AFFIRMATIVE = {
     "yes",
@@ -34,7 +37,19 @@ _AFFIRMATIVE = {
     "cheyyi",
     "pampu",
 }
-_AFFIRMATIVE_PHRASES = ("go ahead", "do it", "send it", "please do", "go for it")
+_AFFIRMATIVE_PHRASES = (
+    "go ahead",
+    "do it",
+    "send it",
+    "please do",
+    "go for it",
+    "that works",
+    "sounds good",
+    "looks good",
+)
+# While a message is waiting to be sent, a plain instruction to send it
+# ("send the message", "what are you waiting for, send it") is also a yes.
+_SEND_COMMANDS = {"send", "pampu", "bhejo"}
 _NEGATIVE = {
     "no",
     "nope",
@@ -52,15 +67,35 @@ _NEGATIVE = {
 }
 
 
-def is_clear_approval(reply: str) -> bool:
-    """True only for an unambiguous yes; anything unclear counts as no."""
+def is_clear_approval(reply: str, *, sending: bool = False) -> bool:
+    """True only for an unambiguous yes; anything unclear counts as no.
+
+    With sending=True, a direct instruction to send also counts as a yes.
+    """
     words = re.findall(r"[a-z']+", reply.casefold())
     if not words or _NEGATIVE.intersection(words):
         return False
     text = " ".join(words)
+    if sending and _SEND_COMMANDS.intersection(words):
+        return True
     return bool(_AFFIRMATIVE.intersection(words)) or any(
         phrase in text for phrase in _AFFIRMATIVE_PHRASES
     )
+
+
+def _normalize_message(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip().rstrip(".!").casefold()
+
+
+@dataclass
+class PendingAction:
+    """A consequential action that was stopped to ask the user first."""
+
+    kind: str  # "click" or "enter"
+    target: str
+    label: str
+    message: str  # the text that would be sent, if any
+    expires_at: float
 
 
 def _latest_user_message(context: object) -> tuple[str, str] | None:
@@ -90,9 +125,12 @@ def duckduckgo_search_url(query: str) -> str:
 class BrowserTools:
     def __init__(self, browser: BrowserManager) -> None:
         self.browser = browser
-        # One pending approval: (target, label, expiry time). It is used by
-        # exactly one click, and revoked by anything that changes the page.
-        self._approval: tuple[str, str, float] | None = None
+        # The consequential action waiting for the user's yes. confirming it
+        # performs it; anything that changes the page cancels it.
+        self._pending: PendingAction | None = None
+        # A drafted message the user approved before it was typed:
+        # (normalized text, expiry time).
+        self._approved_draft: tuple[str, float] | None = None
         # The user utterance that already sent a message without asking, so one
         # instruction can never send more than one message.
         self._auto_sent_for: str | None = None
@@ -108,6 +146,7 @@ class BrowserTools:
             self.take_screenshot,
             self.click,
             self.confirm_browser_action,
+            self.approve_draft,
             self.type_text,
             self.scroll,
             self.press_key,
@@ -135,7 +174,7 @@ class BrowserTools:
         Args:
             query: A concise DuckDuckGo search query containing all relevant context.
         """
-        self._revoke_approval()
+        self._page_changed()
         try:
             # Search in a new tab so the page the user was on stays intact.
             return await self.browser.open_tab(duckduckgo_search_url(query))
@@ -152,7 +191,7 @@ class BrowserTools:
         Args:
             url: A complete http or https URL to open.
         """
-        self._revoke_approval()
+        self._page_changed()
         try:
             return await self.browser.open_url(url)
         except BrowserError as exc:
@@ -174,7 +213,7 @@ class BrowserTools:
         pass that id to click or type_text. Ids change whenever the page changes,
         so inspect again after navigating or if an id is reported missing.
         """
-        self._revoke_approval()
+        self._pending = None
         try:
             return await self.browser.inspect_page()
         except BrowserError as exc:
@@ -183,7 +222,7 @@ class BrowserTools:
     @function_tool()
     async def go_back(self, context: RunContext) -> dict[str, str]:
         """Go back to the previous page in the agent-controlled browser."""
-        self._revoke_approval()
+        self._page_changed()
         try:
             return await self.browser.go_back()
         except BrowserError as exc:
@@ -203,67 +242,99 @@ class BrowserTools:
 
         Prefer the element id from inspect_page, written like "#12". A visible or
         accessible name also works for simple pages. Never pass a CSS selector.
+        The result's clicked field names what was actually clicked, such as the
+        chat that opened; use it when telling the user what happened.
 
         Args:
             target: An element id such as "#12", or the control's visible name.
         """
         label = await self.browser.element_label(target)
-        needs_approval = self._requires_confirmation(
-            target
-        ) or self._requires_confirmation(label)
-        if not needs_approval:
+        if self._requires_confirmation(target) or self._requires_confirmation(label):
+            message = ""
+            if label.casefold().strip() == "send":
+                message = await self.browser.pending_message_text()
+            await self._gate(context, "click", target, label, message)
+        else:
             # Any other click (e.g. opening a different chat) could change what
-            # an earlier approval referred to, so it cancels that approval.
-            self._revoke_approval()
-        elif not self._consume_approval(target, label) and not (
-            label.casefold().strip() == "send"
-            and await self._may_send_without_asking(context)
-        ):
-            raise ToolError(
-                f"This action may be consequential and is not approved. Ask the "
-                f"user to confirm clicking {label!r}, stating exactly what will "
-                f"happen, then call confirm_browser_action with their reply."
-            )
+            # an approval referred to, so it cancels it.
+            self._page_changed()
 
         try:
-            return await self.browser.click(target)
+            result = await self.browser.click(target)
         except BrowserError as exc:
             raise ToolError(str(exc)) from exc
+        return {"clicked": label, **result}
 
     @function_tool()
     async def confirm_browser_action(
-        self, context: RunContext, target: str, user_reply: str
-    ) -> str:
-        """Record the user's approval for one consequential click, such as Send.
+        self, context: RunContext, user_reply: str
+    ) -> dict[str, object]:
+        """Carry out the action that was stopped for approval, now that the user agreed.
 
-        Call this only after asking the user and hearing their answer. This does
-        NOT perform the click: call click with the same target right afterwards,
-        and only report success once click returns.
+        Call this right after the user answers your confirmation question. It
+        performs the waiting click or Enter itself, so do not click Send or press
+        Enter again afterwards. Only report success if this returns done.
 
         Args:
-            target: The exact target you will pass to click, e.g. "#12" or "Send".
-            user_reply: The user's exact words in reply to your confirmation question.
+            user_reply: The user's exact words in reply to your question.
         """
-        # Judge the user's real words (the speech transcript) when available,
-        # rather than the model's retelling of them.
-        heard = _latest_user_text(context) or user_reply
-        if not is_clear_approval(heard):
-            self._approval = None
+        pending, self._pending = self._pending, None
+        if pending is None or time.monotonic() > pending.expires_at:
             raise ToolError(
-                "That reply is not a clear yes. Nothing was approved. Ask the user "
-                "again, and do not click."
+                "Nothing is waiting for approval any more. Try the action again; "
+                "it will say whether approval is needed."
             )
-        label = await self.browser.element_label(target)
-        self._approval = (
-            target.casefold(),
-            label.casefold(),
-            time.monotonic() + APPROVAL_TTL_SECONDS,
+        heard = _latest_user_text(context) or user_reply
+        if not is_clear_approval(heard, sending=bool(pending.message)):
+            raise ToolError(
+                "That reply is not a clear yes, so nothing was done. Ask the user "
+                "again."
+            )
+        if pending.message:
+            current = await self.browser.pending_message_text()
+            if _normalize_message(current) != _normalize_message(pending.message):
+                raise ToolError(
+                    "The message changed after the user was asked, so it was not "
+                    "sent. Ask again with the new text."
+                )
+
+        try:
+            if pending.kind == "enter":
+                result = await self.browser.press_key("Enter")
+            else:
+                result = await self.browser.click(pending.target)
+        except BrowserError as exc:
+            raise ToolError(str(exc)) from exc
+        return {
+            "done": True,
+            "action": pending.label,
+            "sent": pending.message,
+            **result,
+        }
+
+    @function_tool()
+    async def approve_draft(
+        self, context: RunContext, message: str, user_reply: str
+    ) -> str:
+        """Record that the user approved a message you drafted for them.
+
+        Use this when you proposed the wording and the user agreed ("that works",
+        "yes, send that"). Then type exactly that text and send it; it will go
+        through without asking a second time. Any different text still needs
+        approval.
+
+        Args:
+            message: The exact message text the user approved.
+            user_reply: The user's exact words agreeing to it.
+        """
+        heard = _latest_user_text(context) or user_reply
+        if not is_clear_approval(heard, sending=True):
+            raise ToolError("That reply is not a clear yes. Nothing was approved.")
+        self._approved_draft = (
+            _normalize_message(message),
+            time.monotonic() + DRAFT_TTL_SECONDS,
         )
-        return (
-            f"Approved for one click on {label!r} within {APPROVAL_TTL_SECONDS} "
-            f"seconds. The action has NOT happened yet: call click with target "
-            f"{target!r} now."
-        )
+        return "Approved. Type exactly this text, then send it."
 
     @function_tool()
     async def type_text(
@@ -283,7 +354,7 @@ class BrowserTools:
             target: An element id such as "#7", or the field's label or placeholder.
             text: The text to enter.
         """
-        self._revoke_approval()
+        self._pending = None
         try:
             return await self.browser.type_text(target, text)
         except BrowserError as exc:
@@ -306,8 +377,7 @@ class BrowserTools:
         """Press a safe navigation key in the current browser page.
 
         Pressing Enter in a message box sends the message, and in a form submits
-        it, so Enter then needs the user's approval exactly like clicking Send:
-        ask, call confirm_browser_action with target "Enter", then press Enter.
+        it, so it follows the same approval rules as clicking Send.
 
         Args:
             key: One of Enter, Escape, Tab, an arrow key, or Backspace.
@@ -319,26 +389,15 @@ class BrowserTools:
             if consequential == "button":
                 # Enter on a focused button is a click on that button.
                 consequential = self._requires_confirmation(label)
-            if (
-                consequential
-                and not self._consume_approval("Enter", "enter")
-                and not (
-                    consequential == "send"
-                    and await self._may_send_without_asking(
-                        context, str(effect.get("text") or "")
-                    )
+            if consequential:
+                message = str(effect.get("text") or "")
+                await self._gate(
+                    context, "enter", "Enter", "Send" if message else label, message
                 )
-            ):
-                raise ToolError(
-                    "Pressing Enter here would send or submit it, and it is not "
-                    "approved. Tell the user exactly what will be sent or "
-                    "submitted, ask for confirmation, then call "
-                    'confirm_browser_action with target "Enter" and their reply.'
-                )
-            if not consequential:
-                self._revoke_approval()
+            else:
+                self._page_changed()
         else:
-            self._revoke_approval()
+            self._page_changed()
 
         try:
             return await self.browser.press_key(key)
@@ -366,7 +425,7 @@ class BrowserTools:
         Args:
             tab_number: The tab's number from list_tabs, counting from 1 on the left.
         """
-        self._revoke_approval()
+        self._page_changed()
         try:
             return await self.browser.switch_tab(tab_number)
         except BrowserError as exc:
@@ -382,7 +441,7 @@ class BrowserTools:
         Args:
             url: Optional complete http or https URL to load in the new tab.
         """
-        self._revoke_approval()
+        self._page_changed()
         try:
             return await self.browser.open_tab(url or None)
         except BrowserError as exc:
@@ -405,7 +464,7 @@ class BrowserTools:
             tab_number: The tab's number from list_tabs. Use 0 for the active tab.
             user_confirmed: True only after the user explicitly approved losing unsaved text.
         """
-        self._revoke_approval()
+        self._page_changed()
         try:
             return await self.browser.close_tab(
                 tab_number or None, confirmed=user_confirmed
@@ -428,7 +487,7 @@ class BrowserTools:
         Args:
             user_confirmed: True only after the user approved losing unsent text.
         """
-        self._revoke_approval()
+        self._page_changed()
         try:
             return await self.browser.close_browser(confirmed=user_confirmed)
         except BrowserError as exc:
@@ -437,7 +496,7 @@ class BrowserTools:
     @function_tool()
     async def reload_page(self, context: RunContext) -> dict[str, str]:
         """Reload the active browser tab."""
-        self._revoke_approval()
+        self._page_changed()
         try:
             return await self.browser.reload()
         except BrowserError as exc:
@@ -460,19 +519,40 @@ class BrowserTools:
         self._auto_sent_for = key
         return True
 
-    def _revoke_approval(self) -> None:
-        self._approval = None
+    async def _gate(
+        self, context: object, kind: str, target: str, label: str, message: str
+    ) -> None:
+        """Allow a consequential action, or stop it and ask the user first."""
+        if message:
+            draft, self._approved_draft = self._approved_draft, None
+            if (
+                draft is not None
+                and time.monotonic() <= draft[1]
+                and _normalize_message(message) == draft[0]
+            ):
+                return
+            if await self._may_send_without_asking(context, message):
+                return
 
-    def _consume_approval(self, target: str, label: str) -> bool:
-        approval, self._approval = self._approval, None
-        if approval is None:
-            return False
-        approved_target, approved_label, expires_at = approval
-        if time.monotonic() > expires_at:
-            return False
-        return approved_target == target.casefold() or (
-            approved_label == label.casefold() and approved_label != ""
+        self._pending = PendingAction(
+            kind=kind,
+            target=target,
+            label=label,
+            message=message,
+            expires_at=time.monotonic() + APPROVAL_TTL_SECONDS,
         )
+        what = f"send {message!r}" if message else f"click {label!r}"
+        raise ToolError(
+            f"Not done yet: this needs the user's approval. Ask once, naturally, "
+            f"whether to {what}, naming the recipient if there is one. When they "
+            f"agree, call confirm_browser_action with their reply; that performs "
+            f"it. Do not click or press Enter again yourself."
+        )
+
+    def _page_changed(self) -> None:
+        """Cancel anything approved or waiting, because the context changed."""
+        self._pending = None
+        self._approved_draft = None
 
     @staticmethod
     def _requires_confirmation(target: str) -> bool:

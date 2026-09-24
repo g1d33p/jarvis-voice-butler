@@ -140,3 +140,32 @@ def test_no_permanent_delete_tool_exists() -> None:
     ids = [tool.id for tool in FileTools().tools]
     assert "move_to_trash" in ids
     assert not any("delete" in tool_id or "empty" in tool_id for tool_id in ids)
+
+
+async def test_open_path_opens_folders_and_reveals_programs(
+    tmp_path, monkeypatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_open(args):
+        calls.append(args)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(file_tools, "_run_open", fake_open)
+    folder = tmp_path / "Screenshots"
+    folder.mkdir()
+    script = tmp_path / "danger.command"
+    script.write_text("echo hi")
+
+    opened = await FileTools().open_path(None, str(folder))
+    assert calls[-1] == [str(folder)]
+    assert opened["shown_in_finder"] is False
+
+    revealed = await FileTools().open_path(None, str(script))
+    assert calls[-1] == ["-R", str(script)]  # never executed
+    assert revealed["shown_in_finder"] is True
+
+
+async def test_open_path_missing_item_is_clear(tmp_path) -> None:
+    with pytest.raises(ToolError, match="Nothing exists"):
+        await FileTools().open_path(None, str(tmp_path / "nope"))
