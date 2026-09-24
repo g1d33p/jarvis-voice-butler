@@ -310,6 +310,12 @@ VOICE_TOOL_NAMES = {
     "correct_memory",
     "forget_memory",
     "export_memories",
+    # Outlook reads are quick; sending goes through the approval gate.
+    "read_inbox",
+    "search_email",
+    "read_email",
+    "check_calendar",
+    "send_email",
 }
 
 

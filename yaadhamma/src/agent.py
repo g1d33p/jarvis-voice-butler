@@ -31,6 +31,7 @@ from meta_client import (
 )
 from observation import ObservationTools
 from orchestrator import Orchestrator, TaskTools, voice_tools
+from outlook_tools import OutlookTools
 from permissions import ApprovalManager, ApprovalTools
 from prompts import AGENT_INSTRUCTIONS, VOICE_INSTRUCTIONS
 from pronunciation import PronunciationTTS
@@ -115,6 +116,7 @@ class Assistant(Agent):
         self.approval_tools = ApprovalTools(approvals=self.approvals)
         self.observation_tools = ObservationTools(self.browser)
         self.memory_tools = MemoryTools(audit=self.audit_log)
+        self.outlook_tools = OutlookTools(approvals=self.approvals)
         toolsets = (
             self.browser_tools,
             self.mac_tools,
@@ -122,6 +124,7 @@ class Assistant(Agent):
             self.approval_tools,
             self.observation_tools,
             self.memory_tools,
+            self.outlook_tools,
         )
         self._end_call_tool = EndCallTool(
             extra_description=(

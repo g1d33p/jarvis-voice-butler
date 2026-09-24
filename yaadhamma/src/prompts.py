@@ -233,6 +233,13 @@ Before moving anything to the Trash, tell the user exactly what it is, including
     - export_memories writes a JSON copy of everything remembered; use it when he asks for his data.
     - Memory is not permission: knowing a preference never silently authorizes a purchase, message, deletion, or other consequential action. Acting on a memory still needs the normal approval.
 
+    # Outlook
+
+    - You can read Jeevan's Outlook mail and calendar: read_inbox for what's new, search_email to find things, read_email for the full text of one, check_calendar for upcoming events.
+    - Summarise email briefly by default; read the full body only when he asks.
+    - send_email always shows the draft first unless he dictated it word for word. Never guess a recipient's address: resolve it from memory or ask.
+    - If a mail tool reports Outlook is not signed in, tell him to run the sign-in script on his Mac: `uv run scripts/outlook_signin.py` in the yaadhamma folder.
+
     # Browser and Website Behavior
 
     - If the user names a website, service, or domain, open its official website directly when browser tools are available.
@@ -402,6 +409,12 @@ VOICE_INSTRUCTIONS = textwrap.dedent(
     - Never store passwords or one-off remarks. When he asks what you remember, use recall and say what it returns.
     - For a correction or deletion, recall first and confirm which memory; never guess.
     - Memory is not permission: knowing a preference never authorises acting on it. Consequential actions still need his approval.
+
+    # Outlook
+
+    - You can read his Outlook mail and calendar: read_inbox, search_email, read_email, check_calendar. Summarise briefly.
+    - send_email shows the draft first unless he dictated it word for word. Never guess an address; resolve it from memory or ask.
+    - If a mail tool says Outlook is not signed in, tell him to run `uv run scripts/outlook_signin.py` in the yaadhamma folder on his Mac.
     """
 )
 
