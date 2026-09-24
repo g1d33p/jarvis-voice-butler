@@ -150,23 +150,39 @@ class BrowserManager:
 
     async def close(self) -> None:
         async with self._lock:
-            # On Ctrl+C the Playwright driver can exit before this runs,
-            # so shutdown is best-effort and must never raise.
-            if self._context is not None:
-                with contextlib.suppress(Exception):
-                    await self._context.close()
-            if self._playwright is not None:
-                with contextlib.suppress(Exception):
-                    await self._playwright.stop()
+            await self._shutdown_unlocked()
 
-            self._page = None
-            self._context = None
-            self._browser = None
-            self._playwright = None
+    async def _shutdown_unlocked(self) -> None:
+        # On Ctrl+C the Playwright driver can exit before this runs,
+        # so shutdown is best-effort and must never raise.
+        if self._context is not None:
+            with contextlib.suppress(Exception):
+                await self._context.close()
+        if self._playwright is not None:
+            with contextlib.suppress(Exception):
+                await self._playwright.stop()
 
-    async def open_url(self, url: str) -> dict[str, str]:
+        self._page = None
+        self._context = None
+        self._browser = None
+        self._playwright = None
+
+    async def open_url(self, url: str) -> dict[str, object]:
+        """Open `url` in the active tab.
+
+        If the active tab holds typed-but-unsent text, the URL opens in a new
+        tab instead, so the draft is never silently thrown away.
+        """
         self._validate_url(url)
         page = await self._get_page()
+
+        if await self._has_unsaved_input(page):
+            result = await self.open_tab(url)
+            return {
+                **result,
+                "opened_in_new_tab": True,
+                "reason": "The current tab has unsent text, so it was left untouched.",
+            }
 
         async with self._lock:
             try:
@@ -372,7 +388,8 @@ class BrowserManager:
 
         If the tab contains typed-but-unsent text, nothing is closed and the
         result has needs_confirmation=True, so the user can be asked first.
-        The last remaining tab is never closed.
+        Closing the last tab closes the browser window; it reopens (with the
+        same logged-in sessions) the next time a page is needed.
         """
         await self._get_page()
 
@@ -381,9 +398,6 @@ class BrowserManager:
             page = self._page if number is None else self._page_by_number(number)
             assert page is not None
             number = pages.index(page) + 1
-
-            if len(pages) == 1:
-                raise BrowserError("That is the only open tab, so I will keep it open.")
 
             if not confirmed and await self._has_unsaved_input(page):
                 return {
@@ -395,6 +409,14 @@ class BrowserManager:
                 }
 
             title = await self._safe_title(page)
+            if len(pages) == 1:
+                await self._shutdown_unlocked()
+                return {
+                    "closed": True,
+                    "closed_title": title,
+                    "browser_closed": True,
+                }
+
             try:
                 await page.close()
             except Exception as exc:

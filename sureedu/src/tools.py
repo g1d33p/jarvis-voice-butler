@@ -1,9 +1,65 @@
+import re
+import time
 from urllib.parse import urlencode
 
 from livekit.agents import RunContext, function_tool
 from livekit.agents.llm import ToolError
 
 from browser import BrowserError, BrowserManager
+
+# How long a user's approval stays valid before the click must happen.
+APPROVAL_TTL_SECONDS = 60
+
+_AFFIRMATIVE = {
+    "yes",
+    "yeah",
+    "yep",
+    "yup",
+    "sure",
+    "ok",
+    "okay",
+    "confirm",
+    "confirmed",
+    "proceed",
+    "absolutely",
+    "definitely",
+    "correct",
+    "affirmative",
+    # Telugu / Hindi
+    "avunu",
+    "sare",
+    "sari",
+    "haan",
+    "cheyyi",
+    "pampu",
+}
+_AFFIRMATIVE_PHRASES = ("go ahead", "do it", "send it", "please do", "go for it")
+_NEGATIVE = {
+    "no",
+    "nope",
+    "not",
+    "don't",
+    "dont",
+    "wait",
+    "stop",
+    "cancel",
+    "hold",
+    "never",
+    "vaddu",
+    "ledu",
+    "nahi",
+}
+
+
+def is_clear_approval(reply: str) -> bool:
+    """True only for an unambiguous yes; anything unclear counts as no."""
+    words = re.findall(r"[a-z']+", reply.casefold())
+    if not words or _NEGATIVE.intersection(words):
+        return False
+    text = " ".join(words)
+    return bool(_AFFIRMATIVE.intersection(words)) or any(
+        phrase in text for phrase in _AFFIRMATIVE_PHRASES
+    )
 
 
 def duckduckgo_search_url(query: str) -> str:
@@ -16,7 +72,9 @@ def duckduckgo_search_url(query: str) -> str:
 class BrowserTools:
     def __init__(self, browser: BrowserManager) -> None:
         self.browser = browser
-        self._confirmed_target: str | None = None
+        # One pending approval: (target, label, expiry time). It is used by
+        # exactly one click, and revoked by anything that changes the page.
+        self._approval: tuple[str, str, float] | None = None
 
     @property
     def tools(self) -> list:
@@ -49,14 +107,16 @@ class BrowserTools:
 
         Use this only when the user needs a general internet search and did not name a
         website, service, or domain. If the user names a destination, open its official
-        URL directly with open_url instead. Read or inspect the resulting page before
-        answering the user.
+        URL directly with open_url instead. Results open in a new tab. Read or
+        inspect the results before answering the user.
 
         Args:
             query: A concise DuckDuckGo search query containing all relevant context.
         """
+        self._revoke_approval()
         try:
-            return await self.browser.open_url(duckduckgo_search_url(query))
+            # Search in a new tab so the page the user was on stays intact.
+            return await self.browser.open_tab(duckduckgo_search_url(query))
         except (BrowserError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
 
@@ -70,6 +130,7 @@ class BrowserTools:
         Args:
             url: A complete http or https URL to open.
         """
+        self._revoke_approval()
         try:
             return await self.browser.open_url(url)
         except BrowserError as exc:
@@ -91,6 +152,7 @@ class BrowserTools:
         pass that id to click or type_text. Ids change whenever the page changes,
         so inspect again after navigating or if an id is reported missing.
         """
+        self._revoke_approval()
         try:
             return await self.browser.inspect_page()
         except BrowserError as exc:
@@ -99,6 +161,7 @@ class BrowserTools:
     @function_tool()
     async def go_back(self, context: RunContext) -> dict[str, str]:
         """Go back to the previous page in the agent-controlled browser."""
+        self._revoke_approval()
         try:
             return await self.browser.go_back()
         except BrowserError as exc:
@@ -123,13 +186,19 @@ class BrowserTools:
             target: An element id such as "#12", or the control's visible name.
         """
         label = await self.browser.element_label(target)
-        if self._requires_confirmation(target) or self._requires_confirmation(label):
-            if self._confirmed_target not in {target.casefold(), label.casefold()}:
-                raise ToolError(
-                    f"This action may be consequential. Ask the user to confirm "
-                    f"clicking {label!r} before retrying."
-                )
-            self._confirmed_target = None
+        needs_approval = self._requires_confirmation(
+            target
+        ) or self._requires_confirmation(label)
+        if not needs_approval:
+            # Any other click (e.g. opening a different chat) could change what
+            # an earlier approval referred to, so it cancels that approval.
+            self._revoke_approval()
+        elif not self._consume_approval(target, label):
+            raise ToolError(
+                f"This action may be consequential and is not approved. Ask the "
+                f"user to confirm clicking {label!r}, stating exactly what will "
+                f"happen, then call confirm_browser_action with their reply."
+            )
 
         try:
             return await self.browser.click(target)
@@ -137,16 +206,36 @@ class BrowserTools:
             raise ToolError(str(exc)) from exc
 
     @function_tool()
-    async def confirm_browser_action(self, context: RunContext, target: str) -> str:
-        """Authorize one previously discussed consequential browser click.
+    async def confirm_browser_action(
+        self, context: RunContext, target: str, user_reply: str
+    ) -> str:
+        """Record the user's approval for one consequential click, such as Send.
 
-        Call this only after the user explicitly confirms the exact action.
+        Call this only after asking the user and hearing their answer. This does
+        NOT perform the click: call click with the same target right afterwards,
+        and only report success once click returns.
 
         Args:
             target: The exact target you will pass to click, e.g. "#12" or "Send".
+            user_reply: The user's exact words in reply to your confirmation question.
         """
-        self._confirmed_target = target.casefold()
-        return f"The user confirmed clicking {target!r}."
+        if not is_clear_approval(user_reply):
+            self._approval = None
+            raise ToolError(
+                "That reply is not a clear yes. Nothing was approved. Ask the user "
+                "again, and do not click."
+            )
+        label = await self.browser.element_label(target)
+        self._approval = (
+            target.casefold(),
+            label.casefold(),
+            time.monotonic() + APPROVAL_TTL_SECONDS,
+        )
+        return (
+            f"Approved for one click on {label!r} within {APPROVAL_TTL_SECONDS} "
+            f"seconds. The action has NOT happened yet: call click with target "
+            f"{target!r} now."
+        )
 
     @function_tool()
     async def type_text(
@@ -164,6 +253,7 @@ class BrowserTools:
             target: An element id such as "#7", or the field's label or placeholder.
             text: The text to enter.
         """
+        self._revoke_approval()
         try:
             return await self.browser.type_text(target, text)
         except BrowserError as exc:
@@ -214,6 +304,7 @@ class BrowserTools:
         Args:
             tab_number: The tab's number from list_tabs, counting from 1 on the left.
         """
+        self._revoke_approval()
         try:
             return await self.browser.switch_tab(tab_number)
         except BrowserError as exc:
@@ -229,6 +320,7 @@ class BrowserTools:
         Args:
             url: Optional complete http or https URL to load in the new tab.
         """
+        self._revoke_approval()
         try:
             return await self.browser.open_tab(url or None)
         except BrowserError as exc:
@@ -251,6 +343,7 @@ class BrowserTools:
             tab_number: The tab's number from list_tabs. Use 0 for the active tab.
             user_confirmed: True only after the user explicitly approved losing unsaved text.
         """
+        self._revoke_approval()
         try:
             return await self.browser.close_tab(
                 tab_number or None, confirmed=user_confirmed
@@ -261,10 +354,25 @@ class BrowserTools:
     @function_tool()
     async def reload_page(self, context: RunContext) -> dict[str, str]:
         """Reload the active browser tab."""
+        self._revoke_approval()
         try:
             return await self.browser.reload()
         except BrowserError as exc:
             raise ToolError(str(exc)) from exc
+
+    def _revoke_approval(self) -> None:
+        self._approval = None
+
+    def _consume_approval(self, target: str, label: str) -> bool:
+        approval, self._approval = self._approval, None
+        if approval is None:
+            return False
+        approved_target, approved_label, expires_at = approval
+        if time.monotonic() > expires_at:
+            return False
+        return approved_target == target.casefold() or (
+            approved_label == label.casefold() and approved_label != ""
+        )
 
     @staticmethod
     def _requires_confirmation(target: str) -> bool:

@@ -223,12 +223,17 @@ async def test_close_tab_activates_left_neighbour(tab_browser) -> None:
 
 
 @pytest.mark.asyncio
-async def test_last_tab_is_never_closed(tab_browser) -> None:
+async def test_closing_last_tab_closes_browser_and_it_reopens(tab_browser) -> None:
     manager, base = tab_browser
     await manager.open_url(f"{base}/one")
 
-    with pytest.raises(BrowserError, match="only open tab"):
-        await manager.close_tab()
+    result = await manager.close_tab()
+    assert result["closed"] is True
+    assert result["browser_closed"] is True
+
+    # The next request simply starts the browser again.
+    reopened = await manager.open_url(f"{base}/two")
+    assert reopened["title"] == "Page Two"
 
 
 @pytest.mark.asyncio
@@ -391,5 +396,132 @@ async def test_send_button_clicked_by_id_still_requires_confirmation(
     with pytest.raises(ToolError, match="confirm clicking 'Send'"):
         await tools.click(None, send["id"])
 
-    await tools.confirm_browser_action(None, send["id"])
+    await tools.confirm_browser_action(None, send["id"], "Yes, send it")
     await tools.click(None, send["id"])  # now allowed, exactly once
+    with pytest.raises(ToolError):
+        await tools.click(None, send["id"])  # approval was used up
+
+
+# ----------------------------------------------------------------------
+# Approval hardening (from the live WhatsApp test)
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "reply",
+    ["yes", "Yeah, send it", "go ahead", "okay", "Avunu", "haan, pampu"],
+)
+def test_clear_approvals(reply: str) -> None:
+    from tools import is_clear_approval
+
+    assert is_clear_approval(reply)
+
+
+@pytest.mark.parametrize(
+    "reply",
+    ["Est-ce que", "", "the step", "no", "wait", "don't send it", "not sure", "hmm"],
+)
+def test_unclear_or_negative_replies_are_not_approval(reply: str) -> None:
+    from tools import is_clear_approval
+
+    assert not is_clear_approval(reply)
+
+
+@pytest.mark.asyncio
+async def test_garbled_reply_does_not_approve(chat_browser) -> None:
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(chat_browser)
+    send = _find((await chat_browser.inspect_page())["elements"], "Send")
+
+    with pytest.raises(ToolError, match="not a clear yes"):
+        await tools.confirm_browser_action(None, send["id"], "Est-ce que")
+    with pytest.raises(ToolError):
+        await tools.click(None, send["id"])
+
+
+@pytest.mark.asyncio
+async def test_unused_approval_does_not_carry_over_to_a_new_message(
+    chat_browser,
+) -> None:
+    """The live bug: approval for message 1 was silently reused for message 2."""
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(chat_browser)
+    elements = (await chat_browser.inspect_page())["elements"]
+    send = _find(elements, "Send")
+    composer = _find(elements, "Type a message")
+
+    await tools.confirm_browser_action(None, send["id"], "yes")
+    # Approval never used; then a different message is typed.
+    await tools.type_text(None, composer["id"], "A different message")
+
+    with pytest.raises(ToolError, match="not approved"):
+        await tools.click(None, send["id"])
+
+
+@pytest.mark.asyncio
+async def test_approval_expires(chat_browser, monkeypatch) -> None:
+    from livekit.agents.llm import ToolError
+
+    import tools as tools_module
+
+    tools = BrowserTools(chat_browser)
+    send = _find((await chat_browser.inspect_page())["elements"], "Send")
+    await tools.confirm_browser_action(None, send["id"], "yes")
+
+    real_monotonic = tools_module.time.monotonic
+    monkeypatch.setattr(
+        tools_module.time,
+        "monotonic",
+        lambda: real_monotonic() + tools_module.APPROVAL_TTL_SECONDS + 1,
+    )
+    with pytest.raises(ToolError):
+        await tools.click(None, send["id"])
+
+
+@pytest.mark.asyncio
+async def test_opening_a_url_never_discards_an_unsent_draft(tab_browser) -> None:
+    manager, base = tab_browser
+    await manager.open_url(f"{base}/draft")
+    await manager.type_text("Message", "Unsent draft")
+
+    result = await manager.open_url(f"{base}/one")
+
+    assert result["opened_in_new_tab"] is True
+    tabs = (await manager.list_tabs())["tabs"]
+    assert [tab["title"] for tab in tabs] == ["Draft Page", "Page One"]
+
+
+@pytest.mark.asyncio
+async def test_web_search_opens_in_a_new_tab(monkeypatch) -> None:
+    manager = BrowserManager(headless=True)
+    calls: list[str] = []
+
+    async def fake_open_tab(url=None):
+        calls.append(url)
+        return {"number": 2, "url": url, "title": "Results"}
+
+    async def fail_open_url(url):
+        raise AssertionError("search must not replace the current page")
+
+    monkeypatch.setattr(manager, "open_tab", fake_open_tab)
+    monkeypatch.setattr(manager, "open_url", fail_open_url)
+
+    await BrowserTools(manager).search_the_web(None, "weather")
+    assert calls and "duckduckgo.com" in calls[0]
+
+
+@pytest.mark.asyncio
+async def test_switching_chats_cancels_an_earlier_approval(chat_browser) -> None:
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(chat_browser)
+    elements = (await chat_browser.inspect_page())["elements"]
+    other_chat = _find(elements, "Team Group")
+
+    await tools.confirm_browser_action(None, "Send", "yes")
+    await tools.click(None, other_chat["id"])  # user's approval was for another chat
+
+    with pytest.raises(ToolError, match="not approved"):
+        await tools.click(None, "Send")

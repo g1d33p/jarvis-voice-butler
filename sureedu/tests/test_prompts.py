@@ -26,3 +26,13 @@ def test_accent_is_consistent() -> None:
 def test_tab_rules_are_present() -> None:
     assert "# Browser Tabs" in AGENT_INSTRUCTIONS
     assert "Do not reopen a site that is already open in a tab" in AGENT_INSTRUCTIONS
+
+
+def test_conversation_is_natural_not_scripted() -> None:
+    assert "Do not end replies with a question or an offer" in AGENT_INSTRUCTIONS
+    assert "Never guess an action" in AGENT_INSTRUCTIONS
+
+
+def test_send_confirmation_names_recipient_and_text() -> None:
+    assert "say who it goes to and the exact text" in AGENT_INSTRUCTIONS
+    assert "One approval covers one action" in AGENT_INSTRUCTIONS
