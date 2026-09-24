@@ -30,8 +30,8 @@ Audio only: camera and screen-share input are disabled.
 ## Project structure
 
 ```
-jarvis-voice-butler/
-├── jarvis_new/                 # Main project
+jarvis-voice-butler/        # repository root
+├── sureedu/                # Main project (Python agent + web frontend)
 │   ├── src/
 │   │   ├── agent.py            # Entrypoint — AgentServer, Assistant class
 │   │   ├── browser.py          # BrowserManager (Playwright Chromium)
@@ -50,22 +50,22 @@ jarvis-voice-butler/
 Prerequisites: Python ≥ 3.10, [uv](https://docs.astral.sh/uv/), Node.js ≥ 20, pnpm.
 
 ```bash
-cd jarvis_new
+cd sureedu
 uv sync
 uv run playwright install chromium
 cp .env.example .env.local          # then fill in credentials
 ```
 
-Required in `jarvis_new/.env.local`: `LIVEKIT_URL`, `LIVEKIT_API_KEY`,
+Required in `sureedu/.env.local`: `LIVEKIT_URL`, `LIVEKIT_API_KEY`,
 `LIVEKIT_API_SECRET`, `GOOGLE_API_KEY`.
 
 The web frontend needs the same LiveKit values plus `AGENT_NAME=sureedu` in
-`jarvis_new/frontend/.env.local`.
+`sureedu/frontend/.env.local`.
 
 ## Running
 
 ```bash
-cd jarvis_new
+cd sureedu
 uv run src/agent.py console     # terminal voice chat
 uv run src/agent.py dev         # for the web frontend
 ```
@@ -73,7 +73,7 @@ uv run src/agent.py dev         # for the web frontend
 Web frontend (start the agent first):
 
 ```bash
-cd jarvis_new/frontend
+cd sureedu/frontend
 pnpm install && pnpm dev        # http://localhost:3000
 ```
 
