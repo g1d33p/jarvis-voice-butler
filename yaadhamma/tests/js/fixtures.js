@@ -8,10 +8,14 @@
 
 const { El, docWith } = require("./dom_fake");
 
-function chatRow({ name, nameTestid = true, unread = 0, preview = "", time = "" }) {
+function chatRow({ name, nameTestid = true, unread = 0, preview = "", time = "", titleText = null }) {
   const kids = [];
   if (nameTestid) {
-    kids.push(new El("span", { "data-testid": "cell-frame-title" }, [name]));
+    // titleText lets a test reproduce the live bug where the unread badge
+    // nested inside the title container, so textContent included it.
+    kids.push(
+      new El("span", { "data-testid": "cell-frame-title" }, [titleText !== null ? titleText : name])
+    );
   } else {
     kids.push(new El("span", { title: name }, [name]));
   }

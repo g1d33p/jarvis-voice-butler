@@ -23,10 +23,14 @@ semantics layered on top:
   when it succeeds the circuit closes and traffic fails back silently.
   Each backend attempt gets YAADHAMMA_FAILOVER_TIMEOUT seconds (default 5),
   so a hung primary fails over in ~5s instead of ~90s.
-- One spoken notice per failover episode: the adapter emits
-  FAILOVER_NOTICE_EVENT ("primary_unavailable", or "forced_test" for the
-  test switch). agent.py subscribes and speaks it via session.say; STT and
-  TTS are untouched so the voice stays Sarah throughout.
+- Failover is SILENT per Jeevan's explicit instruction: no spoken notice,
+  ever. The switch (and the switch back) is recorded in structured logs
+  only. Each backup-served turn carries an invisible developer-context
+  note in the backup's copy of the chat context -- never added to the
+  session history, never spoken -- so the assistant can answer truthfully
+  if Jeevan explicitly asks what happened, and never volunteers it
+  otherwise. STT and TTS are untouched so the voice stays Sarah
+  throughout.
 - Backend differences are isolated here: the primary is constructed with
   _strict_tool_schema=False (Meta rejects strict schemas); the backup is a
   plain livekit.plugins.google.LLM text model. The voice pipeline passes the
@@ -41,11 +45,13 @@ Configuration (all optional, in .env.local):
   YAADHAMMA_FAILOVER_TIMEOUT    per-attempt seconds before trying the backup
                               (default 5.0).
   YAADHAMMA_FAILOVER_MODEL      Gemini text model for the backup
-                              (default "gemini-2.5-flash").
+                              (default "gemini-3.8-flash"). Google retired
+                              gemini-2.5-flash for new API keys on
+                              2026-09-24; do not go back to it.
   YAADHAMMA_FORCE_FAILOVER=1    test switch: routes the next turn to the
-                              backup (one-shot) and emits the notice, so
-                              Jeevan can verify failover live without a real
-                              outage.
+                              backup (one-shot) so Jeevan can verify
+                              failover live without a real outage. Silent,
+                              like a real failover.
 
 Cost: Gemini bills only for turns actually served by the backup (plus a
 small background probe per turn while the primary is down). Normal turns
@@ -56,7 +62,6 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
 from typing import Any
 
 from livekit.agents._exceptions import APIConnectionError, APIError
@@ -82,19 +87,27 @@ from livekit.plugins import google
 
 logger = logging.getLogger("yaadhamma.failover")
 
-FAILOVER_NOTICE_EVENT = "yaadhamma_failover_notice"
-"""Event name emitted once per failover episode for the spoken notice."""
-
 DEFAULT_THRESHOLD = 2
 DEFAULT_ATTEMPT_TIMEOUT = 5.0
-DEFAULT_BACKUP_MODEL = "gemini-2.5-flash"
+DEFAULT_BACKUP_MODEL = "gemini-3.8-flash"
+# 2026-09-24: Google retired gemini-2.5-flash for new API keys; their 404
+# names gemini-3.8-flash as the replacement. Kept here (not hard-coded in
+# maybe_wrap_with_failover) so tests can assert the exact default.
 
+BACKUP_CONTEXT_NOTE = (
+    "Developer note (not for the user): this turn is being answered by "
+    "Yaadhamma's backup language model because the primary model (Muse "
+    "Spark) was unreachable or timed out. Continue the conversation "
+    "normally. NEVER mention the backup, the failover, or model names, "
+    "and never volunteer that anything changed, unless Jeevan explicitly "
+    "asks what happened or which model answered -- then answer truthfully."
+)
+"""Invisible context note appended to the backup's copy of the chat context.
 
-@dataclass
-class FailoverNotice:
-    reason: str
-    """Why the notice fired: "primary_unavailable" or "forced_test"."""
-    detail: str
+It is provider-visible only: never added to the session history, never
+spoken, never surfaced. Its only purpose is truthfulness if Jeevan asks
+"what just happened?". See _FailoverLLMStream._run.
+"""
 
 
 def _env_int(name: str, default: int) -> int:
@@ -136,12 +149,29 @@ class _FailoverLLMStream(FallbackLLMStream):
         if all_failed:
             logger.error("all LLMs are unavailable, retrying..")
 
+        # The session's context stays untouched: the backup sees a per-turn
+        # copy with the invisible developer note appended (so it can answer
+        # truthfully if Jeevan asks what happened); the primary always sees
+        # the original. The note never enters session history and is never
+        # spoken -- failover is silent by Jeevan's instruction.
+        base_ctx = self._chat_ctx
+        backup_ctx: ChatContext | None = None
+
         for i, llm in enumerate(instances):
             llm_status = statuses[i]
             if self._force_backup and llm is adapter.primary:
                 # Test switch: skip the primary for this one turn.
                 continue
             if llm_status.available or all_failed:
+                if llm is adapter.primary:
+                    self._chat_ctx = base_ctx
+                else:
+                    if backup_ctx is None:
+                        backup_ctx = base_ctx.copy()
+                        backup_ctx.add_message(
+                            role="system", content=BACKUP_CONTEXT_NOTE
+                        )
+                    self._chat_ctx = backup_ctx
                 text_sent: str = ""
                 tool_calls_sent: list[str] = []
                 try:
@@ -174,15 +204,10 @@ class _FailoverLLMStream(FallbackLLMStream):
                                 "llm_availability_changed",
                                 AvailabilityChangedEvent(llm=llm, available=False),
                             )
-                            adapter.emit(
-                                FAILOVER_NOTICE_EVENT,
-                                FailoverNotice(
-                                    reason="primary_unavailable",
-                                    detail=(
-                                        f"{adapter.failover_threshold} "
-                                        "consecutive primary failures"
-                                    ),
-                                ),
+                            logger.warning(
+                                "failover: circuit opened, routing to backup "
+                                f"({adapter.failover_threshold} consecutive "
+                                "primary failures); switching silently"
                             )
                     elif llm_status.available:
                         llm_status.available = False
@@ -225,8 +250,9 @@ class FailoverLLM(FallbackAdapter):
     voice. Implements the LiveKit LLM interface, so it drops into
     Agent(llm=...) wherever the plain primary was used.
 
-    Emits the stock "llm_availability_changed" events plus
-    FAILOVER_NOTICE_EVENT (see module docstring).
+    Emits the stock "llm_availability_changed" events; all failover
+    transitions are also written to the structured log. There is no spoken
+    notice: failover is silent by Jeevan's explicit instruction.
     """
 
     def __init__(
@@ -276,17 +302,11 @@ class FailoverLLM(FallbackAdapter):
             and os.environ.get("YAADHAMMA_FORCE_FAILOVER") == "1"
         ):
             # One-shot test switch: this turn goes to the backup.
+            # Silent, like a real failover: the forced turn is logged only.
             self._force_consumed = True
             force_backup = True
             logger.warning(
                 "YAADHAMMA_FORCE_FAILOVER=1: routing this turn to the backup LLM"
-            )
-            self.emit(
-                FAILOVER_NOTICE_EVENT,
-                FailoverNotice(
-                    reason="forced_test",
-                    detail="YAADHAMMA_FORCE_FAILOVER=1",
-                ),
             )
         return _FailoverLLMStream(
             llm=self,

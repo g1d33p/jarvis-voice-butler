@@ -7,6 +7,7 @@ scripted fakes implementing the LiveKit LLM interface.
 """
 
 import asyncio
+from pathlib import Path
 
 import pytest
 from livekit.agents import function_tool
@@ -25,8 +26,9 @@ from livekit.agents.llm import (
 )
 from livekit.agents.types import DEFAULT_API_CONNECT_OPTIONS
 
+import failover_llm
 from failover_llm import (
-    FAILOVER_NOTICE_EVENT,
+    BACKUP_CONTEXT_NOTE,
     FailoverLLM,
     maybe_wrap_with_failover,
 )
@@ -79,6 +81,7 @@ class ScriptedLLM(LLM):
         self._behaviors = list(behaviors)
         self.chat_calls = 0
         self.last_tools = None
+        self.last_chat_ctx = None
 
     @property
     def model(self) -> str:
@@ -96,6 +99,7 @@ class ScriptedLLM(LLM):
     ) -> LLMStream:
         self.chat_calls += 1
         self.last_tools = tools
+        self.last_chat_ctx = chat_ctx
         behavior = self._behaviors.pop(0) if self._behaviors else []
         return ScriptedStream(
             self,
@@ -197,6 +201,18 @@ async def test_circuit_opens_after_k_failures_and_skips_primary():
         assert backup.chat_calls == 3
 
 
+def _backup_note_present(ctx: ChatContext) -> bool:
+    """Whether the invisible backup-turn note is in the given context."""
+    for item in ctx.items:
+        if getattr(item, "type", "") != "message":
+            continue
+        for content in item.content:
+            text = content if isinstance(content, str) else getattr(content, "text", "")
+            if BACKUP_CONTEXT_NOTE in str(text or ""):
+                return True
+    return False
+
+
 async def test_circuit_fails_back_silently_after_recovery():
     primary = ScriptedLLM(
         "primary",
@@ -212,15 +228,15 @@ async def test_circuit_fails_back_silently_after_recovery():
     )
     backup = ScriptedLLM("backup", [[_text_chunk(f"b{i}")] for i in range(1, 4)])
     llm = FailoverLLM(primary, backup=backup, failover_threshold=2)
-    notices = []
-    llm.on(FAILOVER_NOTICE_EVENT, notices.append)
 
     assert _text(await _collect(llm)) == "b1"
     assert _text(await _collect(llm)) == "b2"
     # The first recovery probe already ran (and failed) during turn 2, so the
     # circuit is still open here.
     assert llm.primary_available is False
-    assert len(notices) == 1  # one notice for the episode
+    # Every backup-served turn carries the invisible context note; it is
+    # never spoken and never added to the session history.
+    assert _backup_note_present(backup.last_chat_ctx)
 
     # Turn 3 goes to the backup; its recovery probe succeeds, so the circuit
     # closes silently afterwards.
@@ -228,9 +244,10 @@ async def test_circuit_fails_back_silently_after_recovery():
     await asyncio.sleep(0.3)
     assert llm.primary_available is True
 
-    # Next turn goes back to the primary, with no further notice.
+    # Next turn goes back to the primary with the untouched context: no
+    # note, no announcement.
     assert _text(await _collect(llm)) == "primary back"
-    assert len(notices) == 1
+    assert not _backup_note_present(primary.last_chat_ctx)
 
 
 async def test_tools_flow_through_backup_path():
@@ -269,15 +286,71 @@ async def test_force_failover_routes_next_turn_to_backup(monkeypatch):
     primary = ScriptedLLM("primary", [[_text_chunk("primary")]])
     backup = ScriptedLLM("backup", [[_text_chunk("backup")]])
     llm = FailoverLLM(primary, backup=backup)
-    notices = []
-    llm.on(FAILOVER_NOTICE_EVENT, notices.append)
 
-    # Forced turn: backup answers without the primary being tried.
+    # Forced turn: backup answers without the primary being tried, silently.
     assert _text(await _collect(llm)) == "backup"
     assert primary.chat_calls == 0
-    assert len(notices) == 1
-    assert notices[0].reason == "forced_test"
+    assert _backup_note_present(backup.last_chat_ctx)
 
-    # One-shot: the following turn goes back to the primary.
+    # One-shot: the following turn goes back to the primary with the
+    # untouched context.
     assert _text(await _collect(llm)) == "primary"
     assert primary.chat_calls == 1
+    assert not _backup_note_present(primary.last_chat_ctx)
+
+
+# ---------------------------------------------------------------------------
+# Silence: failover must never be announced out loud (2026-09-24).
+# ---------------------------------------------------------------------------
+
+
+def test_no_failover_notice_mechanism():
+    assert not hasattr(failover_llm, "FAILOVER_NOTICE_EVENT"), (
+        "failover must be silent: the spoken-notice event was removed"
+    )
+
+
+def test_failover_module_contains_no_speech_calls():
+    src = Path(__file__).resolve().parent.parent / "src" / "failover_llm.py"
+    assert ".say(" not in src.read_text()
+
+
+def test_agent_does_not_wire_a_failover_announcement():
+    agent_src = Path(__file__).resolve().parent.parent / "src" / "agent.py"
+    text = agent_src.read_text()
+    assert "FAILOVER_NOTICE_EVENT" not in text
+    assert "session.say" not in text
+
+
+# ---------------------------------------------------------------------------
+# Backup model: gemini-2.5-flash was retired for new keys on 2026-09-24.
+# ---------------------------------------------------------------------------
+
+
+def _capture_google_llm(monkeypatch):
+    captured = {}
+
+    def fake_llm(**kwargs):
+        captured.update(kwargs)
+        return ScriptedLLM("fake-backup", [])
+
+    monkeypatch.setattr(failover_llm.google, "LLM", fake_llm)
+    return captured
+
+
+def test_default_backup_model_is_current(monkeypatch):
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.delenv("YAADHAMMA_FAILOVER_MODEL", raising=False)
+    captured = _capture_google_llm(monkeypatch)
+    wrapped = maybe_wrap_with_failover(ScriptedLLM("primary", []))
+    assert isinstance(wrapped, FailoverLLM)
+    assert captured.get("model") == "gemini-3.8-flash"
+    assert failover_llm.DEFAULT_BACKUP_MODEL == "gemini-3.8-flash"
+
+
+def test_failover_model_env_override_still_works(monkeypatch):
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.setenv("YAADHAMMA_FAILOVER_MODEL", "gemini-x-custom")
+    captured = _capture_google_llm(monkeypatch)
+    maybe_wrap_with_failover(ScriptedLLM("primary", []))
+    assert captured.get("model") == "gemini-x-custom"

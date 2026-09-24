@@ -6,7 +6,7 @@
 
 const assert = require("node:assert/strict");
 const ex = require("../../src/whatsapp_extractors.js");
-const { loggedInDoc, qrDoc, loadingDoc } = require("./fixtures.js");
+const { loggedInDoc, qrDoc, loadingDoc, chatRow } = require("./fixtures.js");
 
 let passed = 0;
 function test(name, fn) {
@@ -34,7 +34,8 @@ test("login state: still loading", () => {
 
 test("list chats parses names, unread, preview, time", () => {
   const { chats } = ex.waListChats(loggedInDoc());
-  assert.equal(chats.length, 3);
+  // Priya's row has no title element and is excluded rather than guessed.
+  assert.equal(chats.length, 2);
   const ravi = chats[0];
   assert.equal(ravi.name, "Ravi Kumar");
   assert.equal(ravi.unread, 2);
@@ -44,10 +45,41 @@ test("list chats parses names, unread, preview, time", () => {
   assert.equal(chats[1].time, "Yesterday");
 });
 
-test("list chats falls back to [title] when the title testid is missing", () => {
+test("list chats ignores rows without a title element instead of guessing", () => {
   const { chats } = ex.waListChats(loggedInDoc());
-  assert.equal(chats[2].name, "Priya");
-  assert.equal(chats[2].unread, 1);
+  assert.deepEqual(
+    chats.map((c) => c.name),
+    ["Ravi Kumar", "Family Group"]
+  );
+});
+
+test("unread badge text never leaks into the chat name (live regression)", () => {
+  // 2026-09-24: the live run produced "No WhatsApp chat named
+  // '1 unread message+1 (972) 897-4377' found." The title must come only
+  // from the title element; the count only from the badge.
+  const { El, docWith } = require("./dom_fake");
+  const rows = [
+    chatRow({
+      name: "+1 (972) 897-4377",
+      unread: 1,
+      titleText: "1 unread message+1 (972) 897-4377", // badge nested in title container
+    }),
+    chatRow({
+      name: "Ravi Kumar",
+      unread: 2,
+      titleText: "2 unread messages Ravi Kumar",
+    }),
+  ];
+  const scroller = new El("div", { class: "chat-scroller" }, rows);
+  scroller.scrollHeight = 600;
+  scroller.clientHeight = 600;
+  const doc = docWith([new El("div", { id: "pane-side" }, [scroller])]);
+  const { chats } = ex.waListChats(doc);
+  assert.equal(chats.length, 2);
+  assert.equal(chats[0].name, "+1 (972) 897-4377");
+  assert.equal(chats[0].unread, 1);
+  assert.equal(chats[1].name, "Ravi Kumar");
+  assert.equal(chats[1].unread, 2);
 });
 
 test("list chats with no pane returns empty", () => {
@@ -74,12 +106,31 @@ test("click chat misses unknown names without clicking", () => {
   }
 });
 
-test("scroll chats reports row count and scrolls the list", () => {
+test("waScrollTop resets the list to the top (newest chats first)", () => {
   const doc = loggedInDoc();
-  const r = ex.waScrollChats(doc);
-  assert.equal(r.before, 3);
   const scroller = doc.querySelector(".chat-scroller");
-  assert.equal(scroller.scrollTop, scroller.scrollHeight);
+  scroller.scrollTop = 1400; // simulate a list left sitting at the bottom
+  const r = ex.waScrollTop(doc);
+  assert.equal(r.ok, true);
+  assert.equal(scroller.scrollTop, 0);
+});
+
+test("waScrollChats walks down one viewport and reports when it stops", () => {
+  const doc = loggedInDoc();
+  const scroller = doc.querySelector(".chat-scroller"); // 2000 tall, 600 viewport
+  let r = ex.waScrollChats(doc);
+  assert.equal(r.before, 3);
+  assert.equal(r.advanced, true);
+  assert.equal(scroller.scrollTop, 600);
+  r = ex.waScrollChats(doc);
+  assert.equal(r.advanced, true);
+  assert.equal(scroller.scrollTop, 1200);
+  r = ex.waScrollChats(doc);
+  assert.equal(r.advanced, true);
+  assert.equal(scroller.scrollTop, 1400); // clamped: scrollHeight - clientHeight
+  r = ex.waScrollChats(doc);
+  assert.equal(r.advanced, false); // bottom reached: traversal stops
+  assert.equal(scroller.scrollTop, 1400);
 });
 
 test("read messages parses sender, text and direction", () => {

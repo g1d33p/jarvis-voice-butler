@@ -42,14 +42,19 @@ function waChatRows(doc) {
 }
 
 function waRowTitle(row) {
+  // The chat name comes ONLY from the dedicated title element -- never from
+  // a generic [title] attribute. WhatsApp puts badge/ARIA text like
+  // "1 unread message" on nearby elements, and that text once leaked into a
+  // chat name ("No WhatsApp chat named '1 unread message+1 (972) 897-4377'
+  // found"). The unread count comes ONLY from the badge (waRowUnread).
   var t = row.querySelector('[data-testid="cell-frame-title"]');
-  if (t && (t.textContent || "").trim()) return t.textContent.trim();
-  var titled = row.querySelector("[title]");
-  if (titled) {
-    var v = titled.getAttribute("title");
-    if (v && v.trim()) return v.trim();
-  }
-  return "";
+  if (!t) return "";
+  var text = (t.textContent || "").trim();
+  // Defensive: in some layouts the unread badge nests inside the title
+  // container, so its text lands in textContent. Strip a leading
+  // "N unread message(s)" prefix; the count itself still comes only from
+  // the badge.
+  return text.replace(/^\d+\s+unread\s+messages?\s*/i, "");
 }
 
 function waRowUnread(row) {
@@ -132,19 +137,43 @@ function waClickChat(doc, name) {
   return { opened: false, reason: "not-visible" };
 }
 
-function waScrollChats(doc) {
-  // Scroll the chat list's scrollable ancestor to the bottom so WhatsApp
-  // renders more rows (the list is virtualized).
+function _chatScroller(doc) {
+  // Find the scrollable ancestor of the chat list (the virtualized pane).
   var rows = waChatRows(doc);
   var anchor = rows.length ? rows[rows.length - 1] : doc.querySelector("#pane-side");
-  if (!anchor) return { before: 0 };
+  if (!anchor) return null;
   var el = anchor;
   while (el && el !== doc.body) {
     if (el.scrollHeight > el.clientHeight + 4) break;
     el = el.parentElement;
   }
-  if (el && el !== doc.body) el.scrollTop = el.scrollHeight;
-  return { before: rows.length };
+  return el && el !== doc.body ? el : null;
+}
+
+function waScrollTop(doc) {
+  // Reset to the top of the chat list. The list is ordered newest-first,
+  // so traversal must always start here: unread badges on the newest chats
+  // are captured first.
+  var el = _chatScroller(doc);
+  if (!el) return { ok: false };
+  el.scrollTop = 0;
+  return { ok: true };
+}
+
+function waScrollChats(doc) {
+  // Scroll DOWN by exactly one viewport so the next window of virtualized
+  // rows renders. Returns whether the view actually advanced: once the
+  // bottom is reached nothing moves and traversal stops. (A previous
+  // version jumped straight to the bottom, which walked past the newest
+  // chats and reported "no unread" while 3-4 unread chats sat at the top.)
+  var rows = waChatRows(doc);
+  var el = _chatScroller(doc);
+  if (!el) return { before: rows.length, advanced: false };
+  var max = Math.max(0, el.scrollHeight - el.clientHeight);
+  var next = Math.min(el.scrollTop + el.clientHeight, max);
+  var advanced = next > el.scrollTop;
+  el.scrollTop = next;
+  return { before: rows.length, advanced: advanced };
 }
 
 function waReadMessages(doc, limit) {
@@ -212,6 +241,7 @@ if (typeof module !== "undefined" && module.exports) {
     waListChats: waListChats,
     waClickChat: waClickChat,
     waScrollChats: waScrollChats,
+    waScrollTop: waScrollTop,
     waReadMessages: waReadMessages,
     waTypeAndSend: waTypeAndSend,
     waLastMessage: waLastMessage,

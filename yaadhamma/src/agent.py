@@ -20,12 +20,7 @@ import config
 from actions import ActionRegistry
 from audit import AuditLog
 from browser import BrowserManager
-from failover_llm import (
-    FAILOVER_NOTICE_EVENT,
-    FailoverLLM,
-    FailoverNotice,
-    maybe_wrap_with_failover,
-)
+from failover_llm import FailoverLLM, maybe_wrap_with_failover
 from file_tools import FileTools
 from gmail_tools import GmailTools
 from mac_tools import MacTools
@@ -210,27 +205,15 @@ async def my_agent(ctx: JobContext):
             stt=assistant.voice_stt,
             tts=assistant.voice_tts,
         )
-        # One spoken notice per failover episode: the FailoverLLM emits
-        # FAILOVER_NOTICE_EVENT when the primary goes down (or when the
-        # YAADHAMMA_FORCE_FAILOVER test switch fires). session.say speaks it
-        # through the normal TTS path without an LLM call and without adding
-        # it to the conversation context; STT/TTS are untouched so the voice
-        # stays Sarah throughout.
+        # Failover is silent by Jeevan's explicit instruction: no spoken
+        # "main brain is unreachable" message, ever. The FailoverLLM logs
+        # every switch and switch-back structurally, and each backup-served
+        # turn carries an invisible developer-context note (never spoken,
+        # never in session history) so the assistant can answer truthfully
+        # if Jeevan explicitly asks what happened. Nothing to wire here.
         voice_llm = assistant._voice_llm
         if isinstance(voice_llm, FailoverLLM):
-
-            def _speak_failover_notice(notice: FailoverNotice) -> None:
-                text = (
-                    "Failover test: answering from my backup brain."
-                    if notice.reason == "forced_test"
-                    else "My main brain is unreachable, answering from backup."
-                )
-                try:
-                    session.say(text, add_to_chat_ctx=False)
-                except Exception:
-                    logger.warning("Could not speak failover notice", exc_info=True)
-
-            voice_llm.on(FAILOVER_NOTICE_EVENT, _speak_failover_notice)
+            logger.info("LLM failover active and silent")
 
     # Start the session, which initializes the voice pipeline and warms up the models
     await session.start(

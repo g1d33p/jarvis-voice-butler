@@ -57,9 +57,18 @@ class FakeBrowser:
     async def evaluate(self, script):
         self.scripts.append(script)
         if "return waLoginState(document" in script:
+            # A list of states simulates a page that is still loading and
+            # then resolves (the last state sticks).
+            if isinstance(self.login, list):
+                state = self.login[0]
+                if len(self.login) > 1:
+                    self.login.pop(0)
+                return {"state": state}
             return {"state": self.login}
         if "return waListChats(document" in script:
             return {"chats": self.chats}
+        if "return waScrollTop(document" in script:
+            return {"ok": True}
         if "return waScrollChats(document" in script:
             return {"before": len(self.chats)}
         if "return waClickChat(document" in script:
@@ -152,6 +161,27 @@ async def test_operations_require_login_qr_gives_pairing_error() -> None:
         await client.list_chats()
 
 
+async def test_require_login_waits_while_page_is_loading() -> None:
+    # 2026-09-24: the old one-shot check fired during WhatsApp Web's loading
+    # screen and reported "not paired"; ~20s later the tab read chats fine.
+    browser = FakeBrowser(login=["loading", "loading", "logged_in"])
+    client = WhatsAppClient(browser=browser)
+    await client._require_login(timeout_s=5, poll_s=0.01)  # must not raise
+
+
+async def test_require_login_qr_raises_immediately() -> None:
+    # A definitive "not paired" state never waits.
+    client = _client(login="qr")
+    with pytest.raises(WhatsAppNotPairedError, match="not paired"):
+        await client._require_login(timeout_s=5, poll_s=0.01)
+
+
+async def test_require_login_loading_timeout_mentions_pairing() -> None:
+    client = _client(login="loading")
+    with pytest.raises(WhatsAppNotPairedError, match="not paired"):
+        await client._require_login(timeout_s=0.05, poll_s=0.01)
+
+
 async def test_wait_for_login_returns_once_paired() -> None:
     browser = FakeBrowser(login="qr")
     client = WhatsAppClient(browser=browser)
@@ -202,6 +232,25 @@ async def test_list_all_chats_dedupes_by_name() -> None:
     client = WhatsAppClient(browser=browser)
     chats = await client.list_all_chats(max_rounds=3)
     assert [c["name"] for c in chats] == ["A", "B"]
+
+
+async def test_chat_windows_reset_to_top_before_scrolling_down() -> None:
+    # 2026-09-24: traversal started at the bottom and reported "no unread"
+    # while 3-4 unread chats sat at the top (list is newest-first).
+    browser = FakeBrowser(chats=[_chat("A")])
+    client = WhatsAppClient(browser=browser)
+    windows = [w async for w in client._chat_windows(max_rounds=3)]
+    top_idx = next(
+        i for i, s in enumerate(browser.scripts) if "return waScrollTop(document" in s
+    )
+    list_idx = next(
+        i for i, s in enumerate(browser.scripts) if "return waListChats(document" in s
+    )
+    scroll_idx = next(
+        i for i, s in enumerate(browser.scripts) if "return waScrollChats(document" in s
+    )
+    assert top_idx < list_idx < scroll_idx
+    assert windows and windows[0] == [_chat("A")]
 
 
 # ---------------------------------------------------------------------------

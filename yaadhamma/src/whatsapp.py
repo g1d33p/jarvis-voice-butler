@@ -145,9 +145,28 @@ class WhatsAppClient:
         result = await self._evaluate("waLoginState")
         return result.get("state", "loading")
 
-    async def _require_login(self) -> None:
-        if await self._login_state() != "logged_in":
-            raise WhatsAppNotPairedError(_SIGNIN_HINT)
+    async def _require_login(self, timeout_s: float = 8.0, poll_s: float = 1.0) -> None:
+        """Require a paired session, tolerating WhatsApp Web's loading screen.
+
+        On 2026-09-24 the old one-shot check fired while the page was still
+        loading and reported "not paired"; ~20 seconds later the same tab
+        read chats fine. So a "loading" state now polls for a few seconds
+        before we declare the session unpaired. A definitive "qr" state
+        still raises immediately.
+        """
+        deadline = time.monotonic() + timeout_s
+        while True:
+            state = await self._login_state()
+            if state == "logged_in":
+                return
+            if state == "qr":
+                raise WhatsAppNotPairedError(_SIGNIN_HINT)
+            if time.monotonic() >= deadline:
+                raise WhatsAppNotPairedError(
+                    f"WhatsApp Web is still loading after {timeout_s:.0f}s. "
+                    + _SIGNIN_HINT
+                )
+            await asyncio.sleep(poll_s)
 
     # ------------------------------------------------------------------
     # Pairing
@@ -180,33 +199,46 @@ class WhatsAppClient:
         result = await self._evaluate("waListChats")
         return result.get("chats", [])[:limit]
 
-    async def list_all_chats(self, max_rounds: int = 6) -> list[dict]:
-        """Every chat, scrolling the (virtualized) list until it stabilizes."""
-        await self._require_login()
-        seen: dict[str, dict] = {}
+    async def _chat_windows(self, max_rounds: int):
+        """Yield the rendered chat window, top first, walking downward.
+
+        The chat list is virtualized and ordered newest-first. Traversal
+        resets to the top first (so unread badges on the newest chats are
+        captured before anything else), then scrolls down one viewport per
+        round until the tail stops changing or the bottom is reached.
+        """
+        await self._evaluate("waScrollTop")
+        await asyncio.sleep(0.5)
         last_tail: str | None = None
         for _ in range(max_rounds):
             chats = (await self._evaluate("waListChats")).get("chats", [])
-            for chat in chats:
-                seen.setdefault(chat.get("name", ""), chat)
+            yield chats
             tail = chats[-1].get("name") if chats else None
             if tail == last_tail:
-                break
+                return
             last_tail = tail
-            await self._evaluate("waScrollChats")
+            scrolled = await self._evaluate("waScrollChats")
+            if not scrolled.get("advanced", True):
+                return
             await asyncio.sleep(1.0)
+
+    async def list_all_chats(self, max_rounds: int = 8) -> list[dict]:
+        """Every chat, scrolling the (virtualized) list top-down until stable."""
+        await self._require_login()
+        seen: dict[str, dict] = {}
+        async for chats in self._chat_windows(max_rounds):
+            for chat in chats:
+                seen.setdefault(chat.get("name", ""), chat)
         return [c for c in seen.values() if c.get("name")]
 
-    async def find_chat(self, name: str, max_rounds: int = 6) -> str:
+    async def find_chat(self, name: str, max_rounds: int = 8) -> str:
         """Resolve `name` to the exact chat title, scrolling to find it.
 
         Raises WhatsAppError naming candidates when ambiguous, or saying
         plainly when nothing matches. Never guesses.
         """
         await self._require_login()
-        last_tail: str | None = None
-        for _ in range(max_rounds):
-            chats = (await self._evaluate("waListChats")).get("chats", [])
+        async for chats in self._chat_windows(max_rounds):
             matches = find_chats(name, chats)
             if len(matches) == 1:
                 return matches[0]["name"]
@@ -216,12 +248,6 @@ class WhatsAppClient:
                     f"Several WhatsApp chats match {name!r}: {candidates}. "
                     "Which one did you mean?"
                 )
-            tail = chats[-1].get("name") if chats else None
-            if tail == last_tail:
-                break
-            last_tail = tail
-            await self._evaluate("waScrollChats")
-            await asyncio.sleep(1.0)
         raise WhatsAppError(
             f"No WhatsApp chat named {name!r} found. "
             "Check the name, or list the chats first."
