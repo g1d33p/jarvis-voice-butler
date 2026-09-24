@@ -316,6 +316,12 @@ VOICE_TOOL_NAMES = {
     "read_email",
     "check_calendar",
     "send_email",
+    # Gmail is the primary daily inbox; reads merge every linked account
+    # newest-first, and sending goes through the approval gate.
+    "gmail_read_inbox",
+    "gmail_search_email",
+    "gmail_read_email",
+    "gmail_send_email",
 }
 
 
