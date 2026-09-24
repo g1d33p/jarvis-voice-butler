@@ -20,12 +20,13 @@ import asyncio
 import json
 import logging
 import os
+import time
 import uuid
 from dataclasses import dataclass
 
 import httpx
 from livekit import rtc
-from livekit.agents import stt
+from livekit.agents import APIError, stt
 from livekit.agents.language import LanguageCode
 from livekit.agents.types import (
     DEFAULT_API_CONNECT_OPTIONS,
@@ -43,6 +44,13 @@ META_STT_WS_URL = "wss://api.meta.ai/v1/asr/realtime"
 # The recipe's audio contract: 16-bit little-endian mono PCM at 24 kHz.
 _STT_SAMPLE_RATE = 24_000
 _STT_AUDIO_ENCODING = "PCM_24KHZ"
+# Meta closes the session once received audio falls ~10 s behind its wall
+# clock ("ingress audio slower than real-time"), which on a Mac almost always
+# means the microphone isn't delivering (permission prompt missed/denied).
+# Warn loudly if no audio arrives shortly after the handshake so the cause is
+# obvious instead of a bare server error.
+_NO_AUDIO_WARN_AFTER_S = 5.0
+_NO_AUDIO_WARN_THROTTLE_S = 60.0
 
 
 class MetaConfigError(RuntimeError):
@@ -176,10 +184,17 @@ def _language(code: str) -> LanguageCode:
 
 
 def _parse_message(raw: object) -> tuple[stt.SpeechEventType, str] | str | None:
-    """Turn one websocket frame into (event type, text), "end", or None.
+    """Turn one websocket frame into (event type, text), "start"/"end", or None.
 
-    Accepts Meta's {"type": "transcript", "text", "final"} shape plus a couple
-    of common provider shapes, defensively — unknown frames return None.
+    Meta's live protocol (observed 2026-09-24):
+      {"type": "speechStart", ...}                    -> "start"
+      {"type": "transcript", "transcript", "final"}    -> interim/final transcript
+      {"type": "speechEnd", ...}                      -> "end"
+      {"type": "speechComplete", "transcript": ...}    -> FINAL_TRANSCRIPT
+    The finished utterance text arrives on "speechComplete", not as
+    "final": true, so that frame must map to FINAL_TRANSCRIPT or LiveKit
+    never commits the user turn and the agent never replies.
+    Unknown frames (e.g. "audioProgress") return None.
     """
     try:
         msg = json.loads(raw) if isinstance(raw, (str, bytes, bytearray)) else None
@@ -188,22 +203,32 @@ def _parse_message(raw: object) -> tuple[stt.SpeechEventType, str] | str | None:
     if not isinstance(msg, dict):
         return None
     kind = str(msg.get("type", "")).lower()
-    if kind in ("end_of_speech", "speech_end", "endpoint"):
+    if kind in ("speechstart", "start_of_speech"):
+        return "start"
+    if kind in ("speechend", "end_of_speech", "speech_end", "endpoint"):
         return "end"
-    text = msg.get("text") or msg.get("transcript")
-    final = bool(msg.get("final", msg.get("is_final", False)))
-    alternatives = msg.get("alternatives")
-    if not text and isinstance(alternatives, list) and alternatives:
-        first = alternatives[0] or {}
-        text = first.get("transcript", first.get("text"))
+
+    def _text() -> str | None:
+        text = msg.get("text") or msg.get("transcript")
+        alternatives = msg.get("alternatives")
+        if not text and isinstance(alternatives, list) and alternatives:
+            first = alternatives[0] or {}
+            text = first.get("transcript", first.get("text"))
+        return str(text) if text else None
+
+    if kind in ("speechcomplete", "utterance_end"):
+        # Meta's end-of-utterance frame carries the complete text.
+        return (stt.SpeechEventType.FINAL_TRANSCRIPT, _text() or "")
+    text = _text()
     if not text:
         return None
+    final = bool(msg.get("final", msg.get("is_final", False)))
     event = (
         stt.SpeechEventType.FINAL_TRANSCRIPT
         if final
         else stt.SpeechEventType.INTERIM_TRANSCRIPT
     )
-    return (event, str(text))
+    return (event, text)
 
 
 class MetaRealtimeSTT(stt.STT):
@@ -214,6 +239,7 @@ class MetaRealtimeSTT(stt.STT):
             capabilities=stt.STTCapabilities(streaming=True, interim_results=True)
         )
         self._cfg = cfg or MetaConfig.from_env()
+        self._last_no_audio_warn = 0.0
 
     @property
     def model(self) -> str:
@@ -233,6 +259,27 @@ class MetaRealtimeSTT(stt.STT):
     def _ws_url(self) -> str:
         """Realtime URL with a fresh session id, per Meta's recipe."""
         return f"{self._cfg.stt_ws_url}?sessionId=stream-{uuid.uuid4()}"
+
+    async def _no_audio_watchdog(self, first_audio: asyncio.Event) -> None:
+        """Warn loudly if the mic delivers nothing after the handshake.
+
+        Meta kills the stream ~10 s later ("ingress audio slower than
+        real-time"); on a Mac that almost always means the microphone
+        permission prompt was missed or denied.
+        """
+        try:
+            await asyncio.wait_for(first_audio.wait(), timeout=_NO_AUDIO_WARN_AFTER_S)
+        except TimeoutError:
+            now = time.monotonic()
+            if now - self._last_no_audio_warn >= _NO_AUDIO_WARN_THROTTLE_S:
+                self._last_no_audio_warn = now
+                logger.warning(
+                    "Meta STT: no microphone audio arrived %ss after connecting. "
+                    "If macOS asked for microphone permission, allow it (System "
+                    "Settings > Privacy & Security > Microphone); otherwise check "
+                    "the input device. The stream will keep retrying.",
+                    _NO_AUDIO_WARN_AFTER_S,
+                )
 
     async def _ws_connect(self):
         """Open the realtime websocket. A seam so tests can inject a fake."""
@@ -286,13 +333,22 @@ class MetaRealtimeSTT(stt.STT):
 
 
 def _raise_for_stt_error(raw: object) -> None:
-    """Fail fast on Meta ``{"type": "error"}`` frames (bad key, bad audio...)."""
+    """Surface Meta ``{"type": "error"}`` frames as a retryable APIError.
+
+    LiveKit's STT pump recreates the stream after a short backoff on
+    APIError instead of killing the voice session, so a transient failure
+    (e.g. the "ingress audio slower than real-time" close) heals itself.
+    """
     try:
         msg = json.loads(raw) if isinstance(raw, str) else None
     except (json.JSONDecodeError, ValueError, TypeError):
         return
     if isinstance(msg, dict) and str(msg.get("type", "")).lower() == "error":
-        raise RuntimeError(f"Meta STT error: {msg.get('message', msg)}")
+        raise APIError(
+            f"Meta STT error: {msg.get('message', msg)}",
+            body=msg,
+            retryable=True,
+        )
 
 
 class _Pcm24kConverter:
@@ -354,10 +410,13 @@ class MetaRecognizeStream(stt.RecognizeStream):
         self._cfg = cfg
         self._speaking = False
 
-    async def _send_audio(self, ws) -> None:
+    async def _send_audio(self, ws, first_audio: asyncio.Event) -> None:
         convert = _Pcm24kConverter()
         async for data in self._input_ch:
             if isinstance(data, rtc.AudioFrame):
+                if not first_audio.is_set():
+                    first_audio.set()
+                    logger.debug("Meta STT: first audio frame sent to websocket")
                 for frame in convert.push(data):
                     await ws.send(bytes(frame.data))
             elif isinstance(data, stt.RecognizeStream._FlushSentinel):
@@ -380,7 +439,9 @@ class MetaRecognizeStream(stt.RecognizeStream):
                     }
                 )
             )
-            send_task = asyncio.create_task(self._send_audio(ws))
+            first_audio = asyncio.Event()
+            send_task = asyncio.create_task(self._send_audio(ws, first_audio))
+            watchdog = asyncio.create_task(self._stt._no_audio_watchdog(first_audio))
             try:
                 async for raw in ws:
                     if isinstance(raw, (bytes, bytearray)):
@@ -388,6 +449,15 @@ class MetaRecognizeStream(stt.RecognizeStream):
                     _raise_for_stt_error(raw)
                     parsed = _parse_message(raw)
                     if parsed is None:
+                        continue
+                    if parsed == "start":
+                        if not self._speaking:
+                            self._speaking = True
+                            self._event_ch.send_nowait(
+                                stt.SpeechEvent(
+                                    type=stt.SpeechEventType.START_OF_SPEECH
+                                )
+                            )
                         continue
                     if parsed == "end":
                         self._event_ch.send_nowait(
@@ -411,6 +481,7 @@ class MetaRecognizeStream(stt.RecognizeStream):
                     )
             finally:
                 send_task.cancel()
-                await asyncio.gather(send_task, return_exceptions=True)
+                watchdog.cancel()
+                await asyncio.gather(send_task, watchdog, return_exceptions=True)
         finally:
             await ws.close()

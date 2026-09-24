@@ -52,6 +52,17 @@ def test_pipeline_selected_with_meta_key(monkeypatch, _fake_realtime_model):
     assert llm is not None
 
 
+def test_pipeline_llm_disables_strict_tool_schema(monkeypatch, _fake_realtime_model):
+    # Meta's OpenAI-compatible API rejects strict tool schemas (and non-"auto"
+    # tool_choice) with a 400, so the pipeline LLM must not send them.
+    _env(monkeypatch, key="k")
+    monkeypatch.setenv("LIVEKIT_API_KEY", "dummy-livekit-key")
+    monkeypatch.setenv("LIVEKIT_API_SECRET", "dummy-livekit-secret")
+    llm, _stt, _tts, mode = agent.voice_components()
+    assert mode == "pipeline"
+    assert llm._strict_tool_schema is False  # private escape hatch, by design
+
+
 def test_realtime_forced_by_env(monkeypatch, _fake_realtime_model):
     _env(monkeypatch, key="k", mode="realtime")
     llm, stt, tts, mode = agent.voice_components()

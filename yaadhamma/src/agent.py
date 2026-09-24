@@ -60,7 +60,13 @@ def voice_components():
     cfg = MetaConfig.from_env()
     if cfg.voice_mode != "realtime" and cfg.api_key:
         client = create_async_client(cfg)
-        llm = lk_openai.LLM(model=cfg.voice_model, client=client)
+        # Meta is OpenAI-compatible but not OpenAI: it rejects strict tool
+        # schemas and non-"auto" tool_choice (400s). _strict_tool_schema=False
+        # is the same escape hatch the plugin's third-party provider
+        # constructors (SambaNova, Fireworks, ...) use.
+        llm = lk_openai.LLM(
+            model=cfg.voice_model, client=client, _strict_tool_schema=False
+        )
         stt = MetaRealtimeSTT(cfg)
         tts = inference.TTS(model=cfg.tts_model, voice=cfg.tts_voice)
         return llm, stt, tts, "pipeline"
@@ -181,6 +187,27 @@ async def my_agent(ctx: JobContext):
 
     # Join the room and connect to the user
     await ctx.connect()
+
+    if assistant.voice_mode != "realtime":
+        # Pipeline mode only speaks after the user does; greet on connect so
+        # Jeevan knows she's listening. This also exercises the TTS path
+        # immediately instead of failing silently later.
+        handle = session.generate_reply(
+            # Meta rejects turns with no user/tool message, so the call
+            # connecting doubles as the user message for this greeting.
+            user_input="The call just connected.",
+            instructions=(
+                "Greet Jeevan briefly, suited to the time of day, "
+                'for example "Evening, Sir." Nothing more. '
+                # Meta's API only supports tool_choice="auto"; keep tools
+                # quiet through instructions instead.
+                "Do not call any tools for this greeting."
+            ),
+            allow_interruptions=True,
+        )
+        await handle
+        if handle.exception() is not None:
+            logger.error("Opening greeting failed: %r", handle.exception())
 
 
 if __name__ == "__main__":

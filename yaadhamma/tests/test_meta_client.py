@@ -2,11 +2,13 @@
 
 import asyncio
 import json
+import logging
 import os
 from types import SimpleNamespace
 
 import pytest
 from livekit import rtc
+from livekit.agents import APIError
 from livekit.agents import stt as lk_stt
 
 from meta_client import (
@@ -283,8 +285,11 @@ def test_stt_ws_url_carries_fresh_session_id() -> None:
 
 
 def test_stt_error_frame_raises_loudly() -> None:
-    with pytest.raises(RuntimeError, match="bad key"):
+    # APIError (not RuntimeError): LiveKit's STT pump recreates the stream
+    # after a backoff on APIError instead of killing the voice session.
+    with pytest.raises(APIError, match="bad key") as exc_info:
         _raise_for_stt_error(json.dumps({"type": "error", "message": "bad key"}))
+    assert exc_info.value.retryable
     # Anything else is ignored, never raised.
     _raise_for_stt_error(json.dumps({"type": "transcript", "transcript": "hi"}))
     _raise_for_stt_error("not json at all")
@@ -334,3 +339,59 @@ def test_stt_config_reads_mode_from_env(monkeypatch) -> None:
     monkeypatch.setenv("YAADHAMMA_STT_MODE", "push_to_talk")
     cfg = MetaConfig.from_env()
     assert cfg.stt_mode == "PUSH_TO_TALK"
+
+
+def test_no_audio_watchdog_warns(monkeypatch, caplog) -> None:
+    import meta_client as mc
+
+    monkeypatch.setattr(mc, "_NO_AUDIO_WARN_AFTER_S", 0.01)
+    stt = MetaRealtimeSTT(MetaConfig(api_key="k"))
+
+    async def go() -> None:
+        await stt._no_audio_watchdog(asyncio.Event())  # never set: mic is dead
+
+    with caplog.at_level(logging.WARNING, logger="yaadhamma.meta"):
+        asyncio.run(go())
+    assert "no microphone audio" in caplog.text
+    assert "Microphone" in caplog.text  # points at the macOS permission pane
+
+
+def test_no_audio_watchdog_quiet_when_audio_flows(monkeypatch, caplog) -> None:
+    import meta_client as mc
+
+    monkeypatch.setattr(mc, "_NO_AUDIO_WARN_AFTER_S", 0.01)
+    stt = MetaRealtimeSTT(MetaConfig(api_key="k"))
+    first_audio = asyncio.Event()
+    first_audio.set()
+
+    async def go() -> None:
+        await stt._no_audio_watchdog(first_audio)
+
+    with caplog.at_level(logging.WARNING, logger="yaadhamma.meta"):
+        asyncio.run(go())
+    assert "no microphone audio" not in caplog.text
+
+
+def test_parse_meta_speech_frames() -> None:
+    """Meta's live STT frame shapes (captured 2026-09-24) must map to the
+    events LiveKit needs: START_OF_SPEECH, FINAL_TRANSCRIPT, END_OF_SPEECH."""
+    from meta_client import _parse_message
+
+    assert _parse_message(json.dumps({"type": "speechStart"})) == "start"
+    assert _parse_message(json.dumps({"type": "speechEnd"})) == "end"
+
+    final = _parse_message(
+        json.dumps({"type": "speechComplete", "transcript": "Hey, can you hear me?"})
+    )
+    assert final == (lk_stt.SpeechEventType.FINAL_TRANSCRIPT, "Hey, can you hear me?")
+
+    interim = _parse_message(
+        json.dumps({"type": "transcript", "transcript": "Hey,", "final": False})
+    )
+    assert interim == (lk_stt.SpeechEventType.INTERIM_TRANSCRIPT, "Hey,")
+
+    # progress heartbeats carry no transcript
+    assert _parse_message(json.dumps({"type": "audioProgress"})) is None
+    # speechComplete without text still ends the utterance, not a transcript
+    empty_final = _parse_message(json.dumps({"type": "speechComplete"}))
+    assert empty_final == (lk_stt.SpeechEventType.FINAL_TRANSCRIPT, "")
