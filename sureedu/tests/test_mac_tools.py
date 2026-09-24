@@ -19,7 +19,7 @@ async def test_active_app_with_window_title(monkeypatch) -> None:
         lambda *a, **k: _completed("Safari\nok\nApple — Start Page\n"),
     )
 
-    info = await MacTools().get_active_app(None)
+    info = mac_tools.read_active_app()
 
     assert info == {"app": "Safari", "window_title": "Apple — Start Page"}
 
@@ -30,7 +30,7 @@ async def test_active_app_without_accessibility_permission(monkeypatch) -> None:
         mac_tools, "_run", lambda *a, **k: _completed("Finder\nunavailable\n\n")
     )
 
-    info = await MacTools().get_active_app(None)
+    info = mac_tools.read_active_app()
 
     assert info["app"] == "Finder"
     assert info["window_title"] == ""
@@ -88,7 +88,7 @@ async def test_own_browser_is_reported_as_sureedus(monkeypatch) -> None:
         lambda *a, **k: _completed("Google Chrome for Testing\nok\nWhatsApp\n"),
     )
 
-    info = await MacTools().get_active_app(None)
+    info = mac_tools.read_active_app()
 
     assert info["app"] == "Sureedu's browser"
 
@@ -103,9 +103,13 @@ def test_screenshot_failure_mentions_permission(tmp_path, monkeypatch) -> None:
 def test_new_mac_tools_are_registered() -> None:
     ids = [tool.id for tool in MacTools().tools]
     for name in (
-        "get_active_app",
         "read_clipboard",
         "write_clipboard",
         "capture_screen",
     ):
         assert name in ids
+
+
+def test_active_app_is_no_longer_a_separate_tool() -> None:
+    ids = [tool.id for tool in MacTools().tools]
+    assert "get_active_app" not in ids  # replaced by observe_state

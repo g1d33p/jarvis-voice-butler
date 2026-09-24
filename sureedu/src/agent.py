@@ -18,6 +18,7 @@ from browser import BrowserManager
 from prompts import AGENT_INSTRUCTIONS
 from file_tools import FileTools
 from mac_tools import MacTools
+from observation import ObservationTools
 from tools import BrowserTools
 
 load_dotenv(".env.local")
@@ -39,6 +40,7 @@ class Assistant(Agent):
         self.browser_tools = BrowserTools(self.browser)
         self.mac_tools = MacTools()
         self.file_tools = FileTools()
+        self.observation_tools = ObservationTools(self.browser)
         self._end_call_tool = EndCallTool(
             extra_description=(
                 "Only end the call after the user clearly says they are finished, "
@@ -71,6 +73,7 @@ class Assistant(Agent):
                 *self.browser_tools.tools,
                 *self.mac_tools.tools,
                 *self.file_tools.tools,
+                *self.observation_tools.tools,
                 *self._end_call_tool.tools,
             ],
         )

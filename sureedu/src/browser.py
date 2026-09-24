@@ -180,6 +180,27 @@ def _may_replace(current_url: str, new_url: str) -> bool:
     return any(current.startswith(h) or f".{h}" in f".{current}" for h in _SEARCH_HOSTS)
 
 
+def compact_elements(elements: list[dict]) -> list[str]:
+    """Turn inspected elements into short lines such as "#12 button: Send".
+
+    One short line per element instead of a JSON object roughly halves what
+    is sent to the model on every inspection, and exact duplicates (the same
+    name and kind listed twice) are dropped.
+    """
+    lines: list[str] = []
+    seen: set[tuple[str, str]] = set()
+    for element in elements:
+        kind = element.get("role") or element.get("tag") or "element"
+        if element.get("type") in {"editable", "text", "search", "email"}:
+            kind = f"{kind}, {element['type']}" if kind != element["type"] else kind
+        name = element.get("name") or "(unnamed)"
+        if (kind, name) in seen:
+            continue
+        seen.add((kind, name))
+        lines.append(f"{element['id']} {kind}: {name}")
+    return lines
+
+
 class BrowserManager:
     """Own one isolated, visible browser for a LiveKit room.
 
@@ -283,7 +304,7 @@ class BrowserManager:
             except Exception as exc:
                 raise BrowserError(f"I could not open that page: {exc}") from exc
 
-    async def read_page(self, *, max_chars: int = 12_000) -> dict[str, str | bool]:
+    async def read_page(self, *, max_chars: int = 8_000) -> dict[str, str | bool]:
         page = await self._get_page()
 
         async with self._lock:
@@ -303,7 +324,7 @@ class BrowserManager:
                 "truncated": truncated,
             }
 
-    async def inspect_page(self, *, max_chars: int = 8_000) -> dict[str, object]:
+    async def inspect_page(self, *, max_chars: int = 4_000) -> dict[str, object]:
         """Return readable text plus a numbered inventory of interactive elements.
 
         Each element gets an id such as "#12" that click and type_text accept.
@@ -326,7 +347,8 @@ class BrowserManager:
                 "url": page.url,
                 "title": await page.title(),
                 "text": text[:max_chars],
-                "elements": elements,
+                "text_truncated": len(text) > max_chars,
+                "elements": compact_elements(elements),
             }
 
     async def go_back(self) -> dict[str, str]:
@@ -450,6 +472,28 @@ class BrowserManager:
     # ------------------------------------------------------------------
     # Tab management
     # ------------------------------------------------------------------
+
+    async def snapshot(self) -> dict[str, object] | None:
+        """Describe the browser's tabs without starting it.
+
+        Returns None when Sureedu's browser is not running. Used by the
+        observation layer, which must never open a window just to look.
+        """
+        if self._context is None:
+            return None
+        async with self._lock:
+            tabs = []
+            active = None
+            for number, page in enumerate(self._open_pages(), start=1):
+                tab = {
+                    "number": number,
+                    "title": await self._safe_title(page),
+                    "url": page.url,
+                }
+                tabs.append(tab)
+                if page is self._page:
+                    active = tab
+            return {"tab_count": len(tabs), "active_tab": active, "tabs": tabs}
 
     async def list_tabs(self) -> dict[str, object]:
         """Return every open tab with its number, title, URL and active flag."""

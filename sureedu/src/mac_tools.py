@@ -48,7 +48,6 @@ class MacTools:
             self.list_running_apps,
             self.open_application,
             self.quit_application,
-            self.get_active_app,
             self.read_clipboard,
             self.write_clipboard,
             self.capture_screen,
@@ -148,39 +147,6 @@ class MacTools:
         return f"Quit {application!r}."
 
     @function_tool()
-    async def get_active_app(self, context: RunContext) -> dict[str, object]:
-        """Find out which Mac application is in front and its window title.
-
-        Use this when the user asks what they are looking at, which app is open,
-        or refers to "this window" or "this app".
-        """
-        try:
-            result = _run(["osascript", "-e", _ACTIVE_APP_SCRIPT])
-        except subprocess.TimeoutExpired as exc:
-            raise ToolError("Checking the active application timed out.") from exc
-        if result.returncode != 0:
-            raise ToolError(
-                result.stderr.strip() or "macOS could not report the active app."
-            )
-
-        app, status, title = [*result.stdout.rstrip("\n").split("\n", 2), "", ""][:3]
-        info: dict[str, object] = {"app": app.strip(), "window_title": title.strip()}
-        if app.strip() in _OWN_BROWSER_NAMES:
-            info["app"] = "Sureedu's browser"
-            info["note"] = (
-                "This is Sureedu's own browser window, not the user's Google Chrome."
-            )
-            return info
-        if status.strip() != "ok":
-            info["window_title"] = ""
-            info["note"] = (
-                "The window title is unavailable. The app may have no window, or "
-                "Accessibility permission is needed in System Settings, Privacy "
-                "and Security, Accessibility."
-            )
-        return info
-
-    @function_tool()
     async def read_clipboard(self, context: RunContext) -> dict[str, object]:
         """Read the text currently on the Mac clipboard.
 
@@ -261,3 +227,36 @@ def capture_screen_to_file(directory: Path | None = None) -> dict[str, object]:
         "folder": "Documents, Sureedu, Screenshots",
         "bytes": path.stat().st_size,
     }
+
+
+def read_active_app() -> dict[str, object]:
+    """Return the frontmost Mac app and its window title.
+
+    Used by the observation layer (observe_state). Raises ToolError if macOS
+    cannot report it.
+    """
+    try:
+        result = _run(["osascript", "-e", _ACTIVE_APP_SCRIPT])
+    except subprocess.TimeoutExpired as exc:
+        raise ToolError("Checking the active application timed out.") from exc
+    if result.returncode != 0:
+        raise ToolError(
+            result.stderr.strip() or "macOS could not report the active app."
+        )
+
+    app, status, title = [*result.stdout.rstrip("\n").split("\n", 2), "", ""][:3]
+    info: dict[str, object] = {"app": app.strip(), "window_title": title.strip()}
+    if app.strip() in _OWN_BROWSER_NAMES:
+        info["app"] = "Sureedu's browser"
+        info["note"] = (
+            "This is Sureedu's own browser window, not the user's Google Chrome."
+        )
+        return info
+    if status.strip() != "ok":
+        info["window_title"] = ""
+        info["note"] = (
+            "The window title is unavailable. The app may have no window, or "
+            "Accessibility permission is needed in System Settings, Privacy "
+            "and Security, Accessibility."
+        )
+    return info

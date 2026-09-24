@@ -101,8 +101,8 @@ async def test_inspect_and_interact_with_local_page(tmp_path) -> None:
         elements = inspected["elements"]
 
         assert isinstance(elements, list)
-        assert any(element["name"] == "Search" for element in elements)
-        assert any(element["name"] == "Go" for element in elements)
+        assert any(line.endswith(": Search") for line in elements)
+        assert any(line.endswith(": Go") for line in elements)
 
         await manager.type_text("Search", "LiveKit")
         await manager.click("Go")
@@ -334,7 +334,10 @@ async def chat_browser(tmp_path):
 
 
 def _find(elements: list, name_part: str) -> dict:
-    return next(e for e in elements if name_part in e["name"])
+    """Find an inspected element line such as "#12 button: Send"."""
+    line = next(e for e in elements if name_part in e.split(": ", 1)[1])
+    element_id, rest = line.split(" ", 1)
+    return {"id": element_id, "name": rest.split(": ", 1)[1], "line": line}
 
 
 @pytest.mark.asyncio
@@ -828,3 +831,42 @@ async def test_click_reports_what_was_clicked(chat_browser) -> None:
 )
 def test_pages_in_use_are_not_replaced(current: str, new: str, replace: bool) -> None:
     assert browser_module._may_replace(current, new) is replace
+
+
+def test_elements_are_compact_lines_without_duplicates() -> None:
+    raw = [
+        {"id": "#1", "tag": "button", "role": "", "name": "Send", "type": ""},
+        {
+            "id": "#2",
+            "tag": "div",
+            "role": "textbox",
+            "name": "Type a message",
+            "type": "editable",
+        },
+        {"id": "#3", "tag": "button", "role": "", "name": "Send", "type": ""},
+        {"id": "#4", "tag": "a", "role": "", "name": "", "type": ""},
+    ]
+
+    assert browser_module.compact_elements(raw) == [
+        "#1 button: Send",
+        "#2 textbox, editable: Type a message",
+        "#4 a: (unnamed)",
+    ]
+
+
+async def test_snapshot_never_starts_the_browser() -> None:
+    manager = BrowserManager(headless=True)
+
+    assert await manager.snapshot() is None
+    assert manager._context is None
+
+
+async def test_snapshot_describes_tabs(tab_browser) -> None:
+    manager, base = tab_browser
+    await manager.open_url(f"{base}/one")
+    await manager.open_tab(f"{base}/two")
+
+    snap = await manager.snapshot()
+
+    assert snap["tab_count"] == 2
+    assert snap["active_tab"]["title"] == "Page Two"
