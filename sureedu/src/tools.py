@@ -62,6 +62,17 @@ def is_clear_approval(reply: str) -> bool:
     )
 
 
+def _latest_user_text(context: object) -> str | None:
+    """Return the most recent thing the user actually said, if available."""
+    try:
+        for item in reversed(context.session.history.items):  # type: ignore[attr-defined]
+            if getattr(item, "type", "") == "message" and item.role == "user":
+                return item.text_content
+    except Exception:
+        return None
+    return None
+
+
 def duckduckgo_search_url(query: str) -> str:
     query = query.strip()
     if not query:
@@ -95,6 +106,7 @@ class BrowserTools:
             self.open_tab,
             self.close_tab,
             self.reload_page,
+            self.close_browser,
         ]
 
     @function_tool()
@@ -180,7 +192,7 @@ class BrowserTools:
         """Click a visible control.
 
         Prefer the element id from inspect_page, written like "#12". A visible or
-        accessible name also works for simple pages.
+        accessible name also works for simple pages. Never pass a CSS selector.
 
         Args:
             target: An element id such as "#12", or the control's visible name.
@@ -219,7 +231,10 @@ class BrowserTools:
             target: The exact target you will pass to click, e.g. "#12" or "Send".
             user_reply: The user's exact words in reply to your confirmation question.
         """
-        if not is_clear_approval(user_reply):
+        # Judge the user's real words (the speech transcript) when available,
+        # rather than the model's retelling of them.
+        heard = _latest_user_text(context) or user_reply
+        if not is_clear_approval(heard):
             self._approval = None
             raise ToolError(
                 "That reply is not a clear yes. Nothing was approved. Ask the user "
@@ -247,7 +262,9 @@ class BrowserTools:
         """Type into a visible text field without sending or submitting anything.
 
         Prefer the element id from inspect_page, written like "#7". A label,
-        placeholder, or accessible name also works.
+        placeholder, or accessible name also works. Never pass a CSS selector.
+        The result's typed_into field says which field was actually filled;
+        check it before telling the user where the text went.
 
         Args:
             target: An element id such as "#7", or the field's label or placeholder.
@@ -348,6 +365,27 @@ class BrowserTools:
             return await self.browser.close_tab(
                 tab_number or None, confirmed=user_confirmed
             )
+        except BrowserError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @function_tool()
+    async def close_browser(
+        self, context: RunContext, user_confirmed: bool = False
+    ) -> dict[str, object]:
+        """Close Sureedu's entire browser window, including all of its tabs.
+
+        Use this when the user says "close the window" or "close the browser".
+        To close only one page, use close_tab. Logins are kept, and the browser
+        reopens automatically when next needed. If the result says
+        needs_confirmation, tell the user which tabs have unsent text and only
+        retry with user_confirmed set to true after they clearly agree.
+
+        Args:
+            user_confirmed: True only after the user approved losing unsent text.
+        """
+        self._revoke_approval()
+        try:
+            return await self.browser.close_browser(confirmed=user_confirmed)
         except BrowserError as exc:
             raise ToolError(str(exc)) from exc
 

@@ -525,3 +525,91 @@ async def test_switching_chats_cancels_an_earlier_approval(chat_browser) -> None
 
     with pytest.raises(ToolError, match="not approved"):
         await tools.click(None, "Send")
+
+
+# ----------------------------------------------------------------------
+# Closing the whole window; guarding against invented selectors
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_close_browser_closes_every_tab(tab_browser) -> None:
+    manager, base = tab_browser
+    await manager.open_url(f"{base}/one")
+    await manager.open_tab(f"{base}/two")
+
+    result = await manager.close_browser()
+
+    assert result == {"closed": True, "tabs_closed": 2}
+    assert manager._context is None
+    # Reopens on demand.
+    assert (await manager.open_url(f"{base}/one"))["title"] == "Page One"
+
+
+@pytest.mark.asyncio
+async def test_close_browser_asks_first_when_a_tab_has_a_draft(tab_browser) -> None:
+    manager, base = tab_browser
+    await manager.open_url(f"{base}/draft")
+    await manager.type_text("Message", "Unsent")
+    await manager.open_tab(f"{base}/one")
+
+    first = await manager.close_browser()
+    assert first["closed"] is False
+    assert first["tabs_with_unsent_text"] == ["Draft Page"]
+
+    second = await manager.close_browser(confirmed=True)
+    assert second["closed"] is True
+
+
+@pytest.mark.asyncio
+async def test_css_selectors_are_rejected_with_guidance(chat_browser) -> None:
+    await chat_browser.inspect_page()
+
+    with pytest.raises(BrowserError, match="CSS selectors are not supported"):
+        await chat_browser.click('button[aria-label="Send"]')
+    with pytest.raises(BrowserError, match="CSS selectors are not supported"):
+        await chat_browser.type_text('input[role="textbox"]', "hello")
+
+
+@pytest.mark.asyncio
+async def test_type_text_reports_which_field_was_filled(chat_browser) -> None:
+    elements = (await chat_browser.inspect_page())["elements"]
+    composer = _find(elements, "Type a message")
+
+    result = await chat_browser.type_text(composer["id"], "hi")
+
+    assert result["typed_into"] == "Type a message"
+
+
+@pytest.mark.asyncio
+async def test_approval_uses_the_real_transcript_not_the_models_retelling(
+    chat_browser,
+) -> None:
+    from types import SimpleNamespace
+
+    from livekit.agents.llm import ToolError
+
+    def context_with_last_user_words(text: str):
+        message = SimpleNamespace(type="message", role="user", text_content=text)
+        history = SimpleNamespace(items=[message])
+        return SimpleNamespace(session=SimpleNamespace(history=history))
+
+    tools = BrowserTools(chat_browser)
+    send = _find((await chat_browser.inspect_page())["elements"], "Send")
+
+    # The user actually said "research"; the model claims they said "yes".
+    with pytest.raises(ToolError, match="not a clear yes"):
+        await tools.confirm_browser_action(
+            context_with_last_user_words("research"), send["id"], "yes"
+        )
+
+    # The user actually said "Yes, send it."
+    await tools.confirm_browser_action(
+        context_with_last_user_words("Yes, send it."), send["id"], "yes and then"
+    )
+    await tools.click(None, send["id"])
+
+
+def test_close_browser_tool_is_registered() -> None:
+    ids = [tool.id for tool in BrowserTools(BrowserManager(headless=True)).tools]
+    assert "close_browser" in ids

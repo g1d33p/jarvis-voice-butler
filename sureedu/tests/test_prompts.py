@@ -36,3 +36,11 @@ def test_conversation_is_natural_not_scripted() -> None:
 def test_send_confirmation_names_recipient_and_text() -> None:
     assert "say who it goes to and the exact text" in AGENT_INSTRUCTIONS
     assert "One approval covers one action" in AGENT_INSTRUCTIONS
+
+
+def test_window_versus_tab_is_explained() -> None:
+    assert (
+        '"Close the window" or "close the browser" means close_browser'
+        in AGENT_INSTRUCTIONS
+    )
+    assert 'Never say "Anything else I can help with?"' in AGENT_INSTRUCTIONS

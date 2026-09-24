@@ -48,6 +48,12 @@ _UNSAVED_INPUT_SCRIPT = """() => {
 }"""
 
 
+# Targets that look like CSS selectors, e.g. 'button[aria-label="Send"]'.
+_CSS_LIKE = re.compile(
+    r"[\[\]]|=\s*[\"']|^(a|button|input|textarea|select|div|span|li)[.#:\[]",
+    re.IGNORECASE,
+)
+
 # Matches element ids returned by inspect_page, e.g. "#12".
 _ELEMENT_ID = re.compile(r"^\s*#(\d+)\s*$")
 
@@ -290,11 +296,17 @@ class BrowserManager:
         async with self._lock:
             locator = await self._resolve_textbox(page, target)
             try:
+                field = await locator.evaluate(_ELEMENT_LABEL_SCRIPT)
+            except Exception:
+                field = ""
+            try:
                 await locator.fill(text)
             except Exception as exc:
                 raise BrowserError(f"I could not type into {target!r}: {exc}") from exc
 
-            return {"target": target, "url": page.url}
+            # Report which field was actually filled, so the assistant can tell
+            # the user accurately (e.g. "the search box", not "the message box").
+            return {"target": target, "typed_into": field, "url": page.url}
 
     async def scroll(self, direction: Literal["up", "down"]) -> dict[str, str]:
         if direction not in {"up", "down"}:
@@ -436,6 +448,34 @@ class BrowserManager:
                 "active_title": await self._safe_title(self._page),
             }
 
+    async def close_browser(self, *, confirmed: bool = False) -> dict[str, object]:
+        """Close Sureedu's whole browser window, with every tab in it.
+
+        Logged-in sessions are kept in the profile, and the browser reopens the
+        next time a page is needed. Asks first if any tab holds unsent text.
+        """
+        async with self._lock:
+            pages = self._open_pages()
+            if not pages:
+                return {"closed": True, "tabs_closed": 0}
+
+            if not confirmed:
+                unsaved = [
+                    await self._safe_title(page)
+                    for page in pages
+                    if await self._has_unsaved_input(page)
+                ]
+                if unsaved:
+                    return {
+                        "closed": False,
+                        "needs_confirmation": True,
+                        "tabs_with_unsent_text": unsaved,
+                        "reason": "Some tabs contain typed text that has not been sent.",
+                    }
+
+            await self._shutdown_unlocked()
+            return {"closed": True, "tabs_closed": len(pages)}
+
     async def reload(self) -> dict[str, str]:
         """Reload the active tab."""
         page = await self._get_page()
@@ -529,6 +569,11 @@ class BrowserManager:
     async def _element_by_id(page: Page, target: str) -> Locator | None:
         match = _ELEMENT_ID.match(target)
         if not match:
+            if _CSS_LIKE.search(target):
+                raise BrowserError(
+                    "CSS selectors are not supported. Inspect the page and use an "
+                    "element id such as #12."
+                )
             return None
         locator = page.locator(f'[data-sureedu-id="{match.group(1)}"]')
         if await locator.count():
