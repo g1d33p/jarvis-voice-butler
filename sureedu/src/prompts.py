@@ -190,6 +190,7 @@ Do not delete files or folders unless an explicit deletion capability is availab
     - If the user asks to search or perform an action on a named website, use that website's own controls when possible.
     - Before clicking, typing, or interacting with a webpage, inspect the page when the available browser tools require inspection.
     - Use the actual elements returned by the browser inspection.
+    - Click and type using the element id from the inspection, written like "#12", rather than copying long visible text. Element ids change whenever the page changes, so inspect again after navigating or if an id is reported missing.
     - Before consequential browser actions such as sending, submitting, purchasing, deleting, or confirming, explain what will happen and ask for explicit confirmation.
     - Do not claim an action succeeded until the browser confirms that it succeeded.
 

@@ -48,6 +48,58 @@ _UNSAVED_INPUT_SCRIPT = """() => {
 }"""
 
 
+# Matches element ids returned by inspect_page, e.g. "#12".
+_ELEMENT_ID = re.compile(r"^\s*#(\d+)\s*$")
+
+_INSPECT_SELECTOR = (
+    "button, a, input, textarea, select, [role], [contenteditable='true']"
+)
+
+# Numbers every visible, meaningful interactive element and stamps it with a
+# data-sureedu-id attribute, so it can be clicked later by id even when its
+# visible text is split across many child elements (e.g. WhatsApp chat rows).
+_INSPECT_SCRIPT = r"""elements => {
+  document.querySelectorAll('[data-sureedu-id]')
+    .forEach(el => el.removeAttribute('data-sureedu-id'));
+  const nativeTags = new Set(['A', 'BUTTON', 'INPUT', 'TEXTAREA', 'SELECT']);
+  const layoutRoles = new Set(['presentation', 'none', 'img', 'separator',
+    'generic', 'heading', 'group', 'region', 'document', 'application', 'main',
+    'navigation', 'banner', 'complementary', 'contentinfo', 'status', 'log',
+    'tooltip', 'list', 'grid', 'rowgroup', 'toolbar', 'dialog']);
+  const results = [];
+  for (const el of elements) {
+    if (results.length >= 150) break;
+    const role = (el.getAttribute('role') || '').toLowerCase();
+    if (role && layoutRoles.has(role) && !nativeTags.has(el.tagName)) continue;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) continue;
+    const name = (el.getAttribute('aria-label') ||
+      el.getAttribute('title') ||
+      (el.labels && el.labels[0] && el.labels[0].innerText) ||
+      el.getAttribute('placeholder') ||
+      el.innerText || '').trim().replace(/\s+/g, ' ').slice(0, 100);
+    const isField = ['INPUT', 'TEXTAREA', 'SELECT'].includes(el.tagName) ||
+      el.isContentEditable;
+    if (!name && !isField) continue;
+    const id = results.length + 1;
+    el.setAttribute('data-sureedu-id', String(id));
+    results.push({
+      id: '#' + id,
+      tag: el.tagName.toLowerCase(),
+      role: role,
+      name: name,
+      type: el.getAttribute('type') || (el.isContentEditable ? 'editable' : ''),
+    });
+  }
+  return results;
+}"""
+
+_ELEMENT_LABEL_SCRIPT = """el => (el.getAttribute('aria-label') || el.getAttribute('title') ||
+  el.innerText || el.value || '').trim().replace(/\\s+/g, ' ').slice(0, 100)"""
+
+
 class BrowserManager:
     """Own one isolated, visible browser for a LiveKit room.
 
@@ -146,32 +198,19 @@ class BrowserManager:
             }
 
     async def inspect_page(self, *, max_chars: int = 8_000) -> dict[str, object]:
-        """Return readable text plus a compact inventory of interactive elements."""
+        """Return readable text plus a numbered inventory of interactive elements.
+
+        Each element gets an id such as "#12" that click and type_text accept.
+        Ids are reassigned on every inspection, so they are only valid until the
+        page changes.
+        """
         page = await self._get_page()
 
         async with self._lock:
             try:
                 text = await page.locator("body").inner_text(timeout=self._timeout_ms)
-                elements = await page.locator(
-                    "button, a, input, textarea, select, [role]"
-                ).evaluate_all(
-                    """elements => elements
-                      .filter(element => {
-                        const style = window.getComputedStyle(element);
-                        return style.display !== 'none' && style.visibility !== 'hidden';
-                      })
-                      .slice(0, 80)
-                      .map((element, index) => ({
-                        index,
-                        tag: element.tagName.toLowerCase(),
-                        role: element.getAttribute('role') || '',
-                        name: (element.getAttribute('aria-label') ||
-                          element.getAttribute('title') ||
-                          (element.labels && element.labels[0] && element.labels[0].innerText) ||
-                          element.getAttribute('placeholder') ||
-                          element.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 120),
-                        type: element.getAttribute('type') || '',
-                      }))"""
+                elements = await page.locator(_INSPECT_SELECTOR).evaluate_all(
+                    _INSPECT_SCRIPT
                 )
             except PlaywrightTimeoutError as exc:
                 raise BrowserError("The page could not be inspected in time.") from exc
@@ -447,7 +486,41 @@ class BrowserManager:
     async def _page_summary(page: Page) -> dict[str, str]:
         return {"url": page.url, "title": await page.title()}
 
+    async def element_label(self, target: str) -> str:
+        """Return the visible name of an element id like "#12", else `target`.
+
+        Used so safety checks see "Send" rather than an opaque "#12".
+        """
+        match = _ELEMENT_ID.match(target)
+        if not match:
+            return target
+        page = await self._get_page()
+        locator = page.locator(f'[data-sureedu-id="{match.group(1)}"]')
+        try:
+            if await locator.count():
+                return await locator.first.evaluate(_ELEMENT_LABEL_SCRIPT)
+        except Exception:
+            pass
+        return target
+
+    @staticmethod
+    async def _element_by_id(page: Page, target: str) -> Locator | None:
+        match = _ELEMENT_ID.match(target)
+        if not match:
+            return None
+        locator = page.locator(f'[data-sureedu-id="{match.group(1)}"]')
+        if await locator.count():
+            return locator.first
+        raise BrowserError(
+            f"Element {target.strip()} is no longer on the page. "
+            "Inspect the page again to get fresh element ids."
+        )
+
     async def _resolve_target(self, page: Page, target: str) -> Locator:
+        by_id = await self._element_by_id(page, target)
+        if by_id is not None:
+            return by_id
+
         for role in ("button", "link", "tab", "menuitem", "checkbox", "radio"):
             locator = page.get_by_role(role, name=target, exact=True)
             if await locator.count():
@@ -468,6 +541,10 @@ class BrowserManager:
         raise BrowserError(f"I could not find a visible control named {target!r}.")
 
     async def _resolve_textbox(self, page: Page, target: str) -> Locator:
+        by_id = await self._element_by_id(page, target)
+        if by_id is not None:
+            return by_id
+
         for locator in (
             page.get_by_role("textbox", name=target, exact=True),
             page.get_by_role("textbox", name=target, exact=False),

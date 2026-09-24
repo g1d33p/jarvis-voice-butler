@@ -85,10 +85,11 @@ class BrowserTools:
 
     @function_tool()
     async def inspect_page(self, context: RunContext) -> dict[str, object]:
-        """Inspect the current page, including readable text and interactive element names.
+        """Inspect the current page: readable text plus numbered interactive elements.
 
-        Use this before clicking or typing so you can choose a visible control by its
-        returned name or role.
+        Use this before clicking or typing. Each element has an id such as "#12";
+        pass that id to click or type_text. Ids change whenever the page changes,
+        so inspect again after navigating or if an id is reported missing.
         """
         try:
             return await self.browser.inspect_page()
@@ -113,15 +114,20 @@ class BrowserTools:
 
     @function_tool()
     async def click(self, context: RunContext, target: str) -> dict[str, str]:
-        """Click a visible control by its accessible name.
+        """Click a visible control.
+
+        Prefer the element id from inspect_page, written like "#12". A visible or
+        accessible name also works for simple pages.
 
         Args:
-            target: The visible or accessible name of the control to click.
+            target: An element id such as "#12", or the control's visible name.
         """
-        if self._requires_confirmation(target):
-            if self._confirmed_target != target.casefold():
+        label = await self.browser.element_label(target)
+        if self._requires_confirmation(target) or self._requires_confirmation(label):
+            if self._confirmed_target not in {target.casefold(), label.casefold()}:
                 raise ToolError(
-                    f"This action may be consequential. Ask the user to confirm clicking {target!r} before retrying."
+                    f"This action may be consequential. Ask the user to confirm "
+                    f"clicking {label!r} before retrying."
                 )
             self._confirmed_target = None
 
@@ -137,7 +143,7 @@ class BrowserTools:
         Call this only after the user explicitly confirms the exact action.
 
         Args:
-            target: The exact accessible name of the control the user approved.
+            target: The exact target you will pass to click, e.g. "#12" or "Send".
         """
         self._confirmed_target = target.casefold()
         return f"The user confirmed clicking {target!r}."
@@ -149,10 +155,13 @@ class BrowserTools:
         target: str,
         text: str,
     ) -> dict[str, str]:
-        """Fill a visible text field by its label, placeholder, or accessible name.
+        """Type into a visible text field without sending or submitting anything.
+
+        Prefer the element id from inspect_page, written like "#7". A label,
+        placeholder, or accessible name also works.
 
         Args:
-            target: The label, placeholder, or accessible name of the text field.
+            target: An element id such as "#7", or the field's label or placeholder.
             text: The text to enter.
         """
         try:

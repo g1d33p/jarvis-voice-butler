@@ -279,3 +279,117 @@ def test_tab_tools_are_registered() -> None:
     ids = [tool.id for tool in BrowserTools(BrowserManager(headless=True)).tools]
     for name in ("list_tabs", "switch_tab", "open_tab", "close_tab", "reload_page"):
         assert name in ids
+
+
+# ----------------------------------------------------------------------
+# Element ids (clicking rows whose text is split across child elements)
+# ----------------------------------------------------------------------
+
+_CHAT_PAGE = b"""
+<html><head><title>Chats</title></head><body>
+  <div role="list">
+    <div role="listitem" onclick="document.title='Opened Alice'">
+      <span>Alice</span> <span>Yesterday</span> <span>Voice call</span>
+    </div>
+    <div role="listitem" onclick="document.title='Opened Team'">
+      <span>Team Group</span> <span>1 unread message</span>
+    </div>
+  </div>
+  <div contenteditable="true" aria-label="Type a message"></div>
+  <button aria-label="Send">&gt;</button>
+</body></html>
+"""
+
+
+class _ChatPageHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(_CHAT_PAGE)))
+        self.end_headers()
+        self.wfile.write(_CHAT_PAGE)
+
+    def log_message(self, message_format: str, *args: object) -> None:
+        return
+
+
+@pytest.fixture
+async def chat_browser(tmp_path):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _ChatPageHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    manager = BrowserManager(headless=True, profile_dir=tmp_path / "profile")
+    try:
+        await manager.open_url(f"http://127.0.0.1:{server.server_port}/")
+        yield manager
+    finally:
+        await manager.close()
+        server.shutdown()
+        thread.join(timeout=2)
+
+
+def _find(elements: list, name_part: str) -> dict:
+    return next(e for e in elements if name_part in e["name"])
+
+
+@pytest.mark.asyncio
+async def test_row_with_split_text_is_clickable_by_id(chat_browser) -> None:
+    manager = chat_browser
+    elements = (await manager.inspect_page())["elements"]
+    alice = _find(elements, "Alice")
+    assert alice["id"].startswith("#")
+
+    result = await manager.click(alice["id"])
+    assert result["title"] == "Opened Alice"
+
+
+@pytest.mark.asyncio
+async def test_type_into_editable_by_id_then_close_asks_first(chat_browser) -> None:
+    manager = chat_browser
+    await manager.open_tab()
+    await manager.switch_tab(1)
+    elements = (await manager.inspect_page())["elements"]
+    composer = _find(elements, "Type a message")
+
+    await manager.type_text(composer["id"], "Hello, not sending this")
+    result = await manager.close_tab()
+
+    assert result["closed"] is False
+    assert result["needs_confirmation"] is True
+
+
+@pytest.mark.asyncio
+async def test_stale_element_id_gives_clear_error(chat_browser) -> None:
+    manager = chat_browser
+    await manager.inspect_page()
+
+    with pytest.raises(BrowserError, match="Inspect the page again"):
+        await manager.click("#999")
+
+
+@pytest.mark.asyncio
+async def test_plain_numbers_are_treated_as_text_not_ids(chat_browser) -> None:
+    manager = chat_browser
+    await manager.inspect_page()
+
+    # "1" is not an id (ids need "#"); it is matched as visible text instead.
+    result = await manager.click("1 unread message")
+    assert result["title"] == "Opened Team"
+
+
+@pytest.mark.asyncio
+async def test_send_button_clicked_by_id_still_requires_confirmation(
+    chat_browser,
+) -> None:
+    from livekit.agents.llm import ToolError
+
+    manager = chat_browser
+    tools = BrowserTools(manager)
+    send = _find((await manager.inspect_page())["elements"], "Send")
+
+    assert await manager.element_label(send["id"]) == "Send"
+    with pytest.raises(ToolError, match="confirm clicking 'Send'"):
+        await tools.click(None, send["id"])
+
+    await tools.confirm_browser_action(None, send["id"])
+    await tools.click(None, send["id"])  # now allowed, exactly once
