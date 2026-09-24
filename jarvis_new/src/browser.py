@@ -65,10 +65,14 @@ class BrowserManager:
 
     async def close(self) -> None:
         async with self._lock:
+            # On Ctrl+C the Playwright driver can exit before this runs,
+            # so shutdown is best-effort and must never raise.
             if self._context is not None:
-                await self._context.close()
+                with contextlib.suppress(Exception):
+                    await self._context.close()
             if self._playwright is not None:
-                await self._playwright.stop()
+                with contextlib.suppress(Exception):
+                    await self._playwright.stop()
 
             self._page = None
             self._context = None

@@ -7,7 +7,6 @@ from livekit.agents import (
     JobContext,
     TurnHandlingOptions,
     cli,
-    inference,
     room_io,
 )
 from livekit.agents.beta.tools import EndCallTool
@@ -89,18 +88,9 @@ async def my_agent(ctx: JobContext):
         # tts=inference.TTS(
         #   model="fishaudio/s2.1-pro", voice="fa4c9eb3dccc4806b382b40d61c6b10a"
         # ),
+        # Gemini Live does its own server-side turn detection and interruption
+        # handling, so only preemptive generation is configured here.
         turn_handling=TurnHandlingOptions(
-            # The LiveKit turn detector determines when the user is done speaking and the agent should respond.
-            # TurnDetector is an end-of-turn model that listens to the user's audio directly, combining
-            # semantic understanding with acoustic cues (intonation, pitch, rhythm) for state-of-the-art accuracy.
-            # AgentSession supplies the required VAD automatically.
-            # See more at https://docs.livekit.io/agents/build/turns
-            turn_detection=inference.TurnDetector(),
-            # Adaptive interruptions use the turn detector to tell a real interruption from a
-            # backchannel like "mhm" or "right", so the agent keeps talking through the latter.
-            interruption={"mode": "adaptive"},
-            # allow the LLM to generate a response while waiting for the end of turn
-            # See more at https://docs.livekit.io/agents/build/audio/#preemptive-generation
             preemptive_generation={"enabled": True},
         ),
         # Expressive mode injects the TTS provider's markup guide into the LLM prompt, so the model

@@ -108,3 +108,23 @@ async def test_inspect_and_interact_with_local_page() -> None:
         await manager.close()
         server.shutdown()
         thread.join(timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_close_survives_dead_playwright_driver() -> None:
+    class DeadContext:
+        async def close(self) -> None:
+            raise RuntimeError("Connection closed while reading from the driver")
+
+    class DeadPlaywright:
+        async def stop(self) -> None:
+            raise RuntimeError("driver already exited")
+
+    manager = browser_module.BrowserManager()
+    manager._context = DeadContext()
+    manager._playwright = DeadPlaywright()
+
+    await manager.close()  # must not raise
+
+    assert manager._context is None
+    assert manager._playwright is None
