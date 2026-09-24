@@ -169,11 +169,36 @@ async def test_require_login_waits_while_page_is_loading() -> None:
     await client._require_login(timeout_s=5, poll_s=0.01)  # must not raise
 
 
-async def test_require_login_qr_raises_immediately() -> None:
-    # A definitive "not paired" state never waits.
+async def test_require_login_tolerates_transient_qr_flash() -> None:
+    # 2026-09-24 (second session): the extractor reported "qr" once while
+    # WhatsApp Web was still restoring the session, and the old check raised
+    # "not paired" immediately. A single "qr" reading is not definitive.
+    browser = FakeBrowser(login=["qr", "loading", "logged_in"])
+    client = WhatsAppClient(browser=browser)
+    await client._require_login(timeout_s=5, poll_s=0.01)  # must not raise
+
+
+async def test_require_login_raises_when_qr_is_stable() -> None:
+    # A QR code that persists for qr_confirm_s really is "not paired".
     client = _client(login="qr")
     with pytest.raises(WhatsAppNotPairedError, match="not paired"):
-        await client._require_login(timeout_s=5, poll_s=0.01)
+        await client._require_login(timeout_s=5, poll_s=0.01, qr_confirm_s=0.05)
+
+
+async def test_require_login_qr_timeout_reports_not_paired() -> None:
+    # Stable QR on a tight deadline still reports not-paired (not "loading").
+    client = _client(login="qr")
+    with pytest.raises(WhatsAppNotPairedError, match="not paired"):
+        await client._require_login(timeout_s=0.05, poll_s=0.01, qr_confirm_s=0.01)
+
+
+async def test_not_paired_hint_clarifies_dedicated_browser() -> None:
+    # Jeevan saw WhatsApp open in his own Chrome and was confused: the agent
+    # never uses his Chrome, so the hint must say so.
+    client = _client(login="qr")
+    with pytest.raises(WhatsAppNotPairedError) as exc_info:
+        await client._require_login(timeout_s=0.05, poll_s=0.01, qr_confirm_s=0.01)
+    assert "regular Chrome" in str(exc_info.value)
 
 
 async def test_require_login_loading_timeout_mentions_pairing() -> None:

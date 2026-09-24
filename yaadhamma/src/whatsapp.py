@@ -33,7 +33,12 @@ WHATSAPP_URL = "https://web.whatsapp.com/"
 _JS_SRC = Path(__file__).with_name("whatsapp_extractors.js").read_text(encoding="utf-8")
 
 _SIGNIN_HINT = (
-    "WhatsApp is not paired yet. On the Mac, run "
+    "WhatsApp is not paired in Yaadhamma's own dedicated browser window. "
+    "WhatsApp being open in your regular Chrome does not count — Yaadhamma "
+    "never uses your Chrome, it drives its own separate browser with its "
+    "own saved login. If you already paired: close any other Yaadhamma "
+    "window that might be holding the browser profile (for example the "
+    "WhatsApp sign-in browser), then try again. To pair, on the Mac run "
     "`uv run scripts/whatsapp_signin.py` in the yaadhamma folder and scan "
     "the QR code with the phone (WhatsApp > Settings > Linked devices > "
     "Link a device), then try again."
@@ -145,23 +150,37 @@ class WhatsAppClient:
         result = await self._evaluate("waLoginState")
         return result.get("state", "loading")
 
-    async def _require_login(self, timeout_s: float = 8.0, poll_s: float = 1.0) -> None:
+    async def _require_login(
+        self, timeout_s: float = 8.0, poll_s: float = 1.0, qr_confirm_s: float = 4.0
+    ) -> None:
         """Require a paired session, tolerating WhatsApp Web's loading screen.
 
         On 2026-09-24 the old one-shot check fired while the page was still
         loading and reported "not paired"; ~20 seconds later the same tab
         read chats fine. So a "loading" state now polls for a few seconds
-        before we declare the session unpaired. A definitive "qr" state
-        still raises immediately.
+        before we declare the session unpaired.
+
+        The 17:58 session the same day showed the mirror image: the page
+        flashed the QR screen once while restoring the session, and the
+        check raised "not paired" on that single reading. A "qr" state is
+        therefore only trusted once it has persisted for `qr_confirm_s`
+        seconds — a transient flash is not a diagnosis.
         """
         deadline = time.monotonic() + timeout_s
+        qr_since: float | None = None
         while True:
             state = await self._login_state()
+            now = time.monotonic()
             if state == "logged_in":
                 return
             if state == "qr":
-                raise WhatsAppNotPairedError(_SIGNIN_HINT)
-            if time.monotonic() >= deadline:
+                if qr_since is None:
+                    qr_since = now
+                elif now - qr_since >= qr_confirm_s:
+                    raise WhatsAppNotPairedError(_SIGNIN_HINT)
+            else:
+                qr_since = None
+            if now >= deadline:
                 raise WhatsAppNotPairedError(
                     f"WhatsApp Web is still loading after {timeout_s:.0f}s. "
                     + _SIGNIN_HINT

@@ -44,6 +44,13 @@ Configuration (all optional, in .env.local):
                               circuit opens (default 2).
   YAADHAMMA_FAILOVER_TIMEOUT    per-attempt seconds before trying the backup
                               (default 5.0).
+  YAADHAMMA_FAILOVER_BACKUP_TIMEOUT
+                              the backup's own Google request deadline in
+                              seconds (default 30.0, floored at 10.0 because
+                              Google rejects shorter deadlines). This is
+                              separate from YAADHAMMA_FAILOVER_TIMEOUT: the
+                              short timeout kills a hung primary fast, while
+                              the backup gets a deadline Google accepts.
   YAADHAMMA_FAILOVER_MODEL      Gemini text model for the backup
                               (default "gemini-3.8-flash"). Google retired
                               gemini-2.5-flash for new API keys on
@@ -64,6 +71,7 @@ import logging
 import os
 from typing import Any
 
+from google.genai import types as genai_types
 from livekit.agents._exceptions import APIConnectionError, APIError
 from livekit.agents.llm import (
     LLM,
@@ -93,6 +101,16 @@ DEFAULT_BACKUP_MODEL = "gemini-3.8-flash"
 # 2026-09-24: Google retired gemini-2.5-flash for new API keys; their 404
 # names gemini-3.8-flash as the replacement. Kept here (not hard-coded in
 # maybe_wrap_with_failover) so tests can assert the exact default.
+DEFAULT_BACKUP_TIMEOUT_S = 30.0
+MIN_BACKUP_TIMEOUT_S = 10.0
+# 2026-09-24 (second live test): every backup turn died with 400
+# "Manually set deadline 5s is too short. Minimum allowed deadline is 10s."
+# The 5s attempt timeout was leaking into the backup request as the Google
+# request deadline. The backup therefore gets its OWN request deadline
+# (>= 10s) via http_options on the google.LLM instance: the LiveKit Google
+# plugin only fills the deadline from conn_options when http_options has no
+# explicit timeout (verified against livekit-plugins-google 1.6.10). The
+# primary keeps the short attempt timeout so failover still kicks in fast.
 
 BACKUP_CONTEXT_NOTE = (
     "Developer note (not for the user): this turn is being answered by "
@@ -122,6 +140,21 @@ def _env_float(name: str, default: float) -> float:
         return float(os.environ.get(name, default))
     except ValueError:
         return default
+
+
+def _backup_http_options() -> genai_types.HttpOptions:
+    """Request options for the backup LLM with a Google-legal deadline.
+
+    Google's generate_content API rejects manually set deadlines under 10s,
+    so the backup's own request deadline is floored there regardless of the
+    (shorter) primary attempt timeout. YAADHAMMA_FAILOVER_BACKUP_TIMEOUT
+    (seconds) raises it if Jeevan ever needs more headroom.
+    """
+    timeout_s = _env_float(
+        "YAADHAMMA_FAILOVER_BACKUP_TIMEOUT", DEFAULT_BACKUP_TIMEOUT_S
+    )
+    timeout_s = max(timeout_s, MIN_BACKUP_TIMEOUT_S)
+    return genai_types.HttpOptions(timeout=int(timeout_s * 1000))
 
 
 class _FailoverLLMStream(FallbackLLMStream):
@@ -269,7 +302,11 @@ class FailoverLLM(FallbackAdapter):
         self._consec_primary_failures = 0
         self._force_consumed = False
         if backup is None:
-            backup = google.LLM(model=backup_model)
+            # The backup gets its own long request deadline: the short
+            # attempt timeout (5s) is what kills the primary quickly, but it
+            # must never leak into the backup's Google request (Google
+            # rejects deadlines < 10s).
+            backup = google.LLM(model=backup_model, http_options=_backup_http_options())
         self.backup = backup
         super().__init__(
             [primary, backup],

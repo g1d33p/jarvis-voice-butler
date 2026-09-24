@@ -12,6 +12,11 @@ Run on the Mac, once:
 
 Close the Yaadhamma agent first if it is running: the browser profile can
 only be used by one window at a time.
+
+The window closes itself a few seconds after pairing is confirmed. This
+matters: while the window is open it holds an exclusive lock on the
+browser profile, and the agent's own browser cannot start until that lock
+is released.
 """
 
 import asyncio
@@ -22,6 +27,35 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from browser import BrowserError, BrowserManager
 from whatsapp import WhatsAppClient, WhatsAppNotPairedError
+
+# Seconds the sign-in window stays open after pairing is confirmed, so the
+# user sees the success message before it closes.
+POST_PAIRING_GRACE_S = 5.0
+
+
+async def pair_then_release(
+    client: WhatsAppClient,
+    browser: BrowserManager,
+    *,
+    grace_s: float = POST_PAIRING_GRACE_S,
+) -> None:
+    """Wait for the QR scan, then close the browser to release the profile.
+
+    Separated from main() so it is unit-testable without a real browser.
+    Raises WhatsAppNotPairedError if the scan never happens (the caller
+    closes the browser on that path).
+    """
+    await client.wait_for_login(timeout_s=300)
+    print()
+    print("Paired! The session is saved in ~/.yaadhamma/chrome-profile,")
+    print("so Yaadhamma stays logged in.")
+    print(
+        f"This window will close in {grace_s:.0f} seconds — Yaadhamma's own "
+        "browser takes over from here. It never uses your regular Chrome, "
+        "so WhatsApp staying open in your Chrome is unrelated."
+    )
+    await asyncio.sleep(grace_s)
+    await browser.close()
 
 
 async def main() -> int:
@@ -43,16 +77,11 @@ async def main() -> int:
     print("  WhatsApp > Settings > Linked devices > Link a device")
     print("Waiting up to 5 minutes...")
     try:
-        await client.wait_for_login(timeout_s=300)
+        await pair_then_release(client, browser)
     except WhatsAppNotPairedError:
         print("Timed out waiting for the scan. Run this script again when ready.")
         await browser.close()
         return 1
-
-    print()
-    print("Paired! The session is saved in ~/.yaadhamma/chrome-profile,")
-    print("so Yaadhamma stays logged in. You can close this window.")
-    await browser.close()
     return 0
 
 

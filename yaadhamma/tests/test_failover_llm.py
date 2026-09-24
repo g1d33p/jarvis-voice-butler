@@ -354,3 +354,38 @@ def test_failover_model_env_override_still_works(monkeypatch):
     captured = _capture_google_llm(monkeypatch)
     maybe_wrap_with_failover(ScriptedLLM("primary", []))
     assert captured.get("model") == "gemini-x-custom"
+
+
+# ---------------------------------------------------------------------------
+# Backup deadline: Google rejects generate_content deadlines under 10s.
+# On 2026-09-24 the 5s attempt timeout leaked into the backup request and
+# every failover turn died with 400 "Manually set deadline 5s is too short".
+# ---------------------------------------------------------------------------
+
+
+def test_backup_llm_gets_deadline_above_googles_minimum(monkeypatch):
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.delenv("YAADHAMMA_FAILOVER_MODEL", raising=False)
+    monkeypatch.delenv("YAADHAMMA_FAILOVER_BACKUP_TIMEOUT", raising=False)
+    captured = _capture_google_llm(monkeypatch)
+    maybe_wrap_with_failover(ScriptedLLM("primary", []))
+    timeout_ms = captured["http_options"].timeout
+    assert timeout_ms is not None and timeout_ms >= 10_000, (
+        f"backup deadline {timeout_ms}ms would be rejected by Google (< 10s)"
+    )
+
+
+def test_backup_timeout_knob_is_floored_at_google_minimum(monkeypatch):
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.setenv("YAADHAMMA_FAILOVER_BACKUP_TIMEOUT", "2")
+    captured = _capture_google_llm(monkeypatch)
+    maybe_wrap_with_failover(ScriptedLLM("primary", []))
+    assert captured["http_options"].timeout >= 10_000
+
+
+def test_backup_timeout_knob_accepts_larger_values(monkeypatch):
+    monkeypatch.setenv("GOOGLE_API_KEY", "test-key")
+    monkeypatch.setenv("YAADHAMMA_FAILOVER_BACKUP_TIMEOUT", "45")
+    captured = _capture_google_llm(monkeypatch)
+    maybe_wrap_with_failover(ScriptedLLM("primary", []))
+    assert captured["http_options"].timeout == 45_000

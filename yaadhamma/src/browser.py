@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import re
 from pathlib import Path
 from typing import Literal
@@ -31,6 +32,60 @@ async def _bring_page_window_to_front(page: Page) -> None:
 
 
 DEFAULT_PROFILE_DIR = Path.home() / ".yaadhamma" / "chrome-profile"
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # process exists; we just cannot signal it
+    return True
+
+
+def _another_process_holds_profile(profile_dir: Path) -> bool:
+    """Best-effort check: does another Chromium own this profile right now?
+
+    Chromium's process-singleton lock is a symlink named SingletonLock
+    pointing at "<host>-<pid>" while a browser owns the profile. If it
+    points at a live pid (other than our own), the profile is genuinely in
+    use — e.g. the WhatsApp sign-in browser left open after pairing. A
+    stale lock (pid dead after a crash) is ignored: Chromium cleans those
+    up itself on launch. If the lock file is not a readable symlink, fall
+    back to the presence of SingletonSocket.
+
+    This is a pre-flight check only; the launch itself still catches
+    Playwright's own "already in use" error as a backstop for the race.
+    """
+    lock = profile_dir / "SingletonLock"
+    try:
+        is_link = lock.is_symlink()
+    except OSError:
+        is_link = False
+    if is_link:
+        try:
+            target = os.readlink(lock)
+        except OSError:
+            target = ""
+        pid_part = target.rsplit("-", 1)[-1]
+        if pid_part.isdigit():
+            pid = int(pid_part)
+            # A stale lock (pid dead after a crash) or our own pid is not
+            # a conflict; Chromium cleans stale locks itself on launch.
+            return pid != os.getpid() and _pid_alive(pid)
+        # Unparseable target: fall through to the socket check.
+    try:
+        return (profile_dir / "SingletonSocket").exists()
+    except OSError:
+        return False
+
+
+_PROFILE_IN_USE_HINT = (
+    "Yaadhamma's browser profile is in use by another window — probably "
+    "the WhatsApp sign-in browser if you ran the pairing script. Close "
+    "that window and try again."
+)
 
 # Detects typed-but-unsent work (drafts, form entries) before a tab is closed.
 _UNSAVED_INPUT_SCRIPT = """() => {
@@ -243,6 +298,13 @@ class BrowserManager:
             await self._launch()
 
     async def _launch(self) -> None:
+        if _another_process_holds_profile(self._profile_dir):
+            # Fail fast with a clear, actionable message instead of letting
+            # the launch half-succeed and surfacing a confusing downstream
+            # error (on 2026-09-24 this ambiguity surfaced as WhatsApp "not
+            # paired"). The Playwright error catch below stays as a backstop
+            # for the check-then-launch race.
+            raise BrowserError(_PROFILE_IN_USE_HINT)
         self._playwright = await async_playwright().start()
         try:
             self._context = await self._playwright.chromium.launch_persistent_context(
@@ -254,10 +316,7 @@ class BrowserManager:
                 await self._playwright.stop()
             self._playwright = None
             if "already in use" in str(exc) or "existing browser session" in str(exc):
-                raise BrowserError(
-                    "Yaadhamma's browser profile is in use by another Yaadhamma window. "
-                    "Close that window (or the other Yaadhamma session) and try again."
-                ) from exc
+                raise BrowserError(_PROFILE_IN_USE_HINT) from exc
             raise BrowserError(f"The browser could not start: {exc}") from exc
 
         self._browser = self._context.browser
