@@ -66,6 +66,46 @@ async def test_focus_failure_does_not_break_browser_use() -> None:
     await browser_module._bring_page_window_to_front(BrokenPage())
 
 
+@pytest.mark.asyncio
+async def test_evaluate_runs_script_on_active_tab() -> None:
+    class FakePage:
+        def __init__(self) -> None:
+            self.seen = []
+
+        def is_closed(self) -> bool:
+            return False
+
+        async def evaluate(self, script: str):
+            self.seen.append(script)
+            return {"ok": True}
+
+    manager = BrowserManager(headless=True)
+    manager._context = object()  # pretend the browser is already running
+    manager._page = FakePage()
+
+    result = await manager.evaluate("() => 1 + 1")
+
+    assert result == {"ok": True}
+    assert manager._page.seen == ["() => 1 + 1"]
+
+
+@pytest.mark.asyncio
+async def test_evaluate_wraps_page_failure() -> None:
+    class BrokenPage:
+        def is_closed(self) -> bool:
+            return False
+
+        async def evaluate(self, script: str):
+            raise RuntimeError("boom")
+
+    manager = BrowserManager(headless=True)
+    manager._context = object()
+    manager._page = BrokenPage()
+
+    with pytest.raises(BrowserError, match="page script failed"):
+        await manager.evaluate("() => 1")
+
+
 class _TestPageHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         body = b"""

@@ -471,6 +471,24 @@ class BrowserManager:
         except Exception:
             return ""
 
+    async def evaluate(self, script: str) -> object:
+        """Run JavaScript on the active tab and return its JSON result.
+
+        A narrow primitive for skills that need structured reads (WhatsApp
+        Web, chat lists) that inspect_page's element inventory cannot
+        provide. Arbitrary scripts stay out of the voice tools: only skill
+        code calls this, never the model directly.
+        """
+        page = await self._get_page()
+
+        async with self._lock:
+            try:
+                return await page.evaluate(script)
+            except PlaywrightTimeoutError as exc:
+                raise BrowserError("The page did not respond in time.") from exc
+            except Exception as exc:
+                raise BrowserError(f"The page script failed: {exc}") from exc
+
     async def enter_effect(self) -> dict[str, object]:
         """Describe what pressing Enter would do in the focused element.
 

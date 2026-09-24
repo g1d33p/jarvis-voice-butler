@@ -96,6 +96,12 @@ TOOL_TIERS: dict[str, RiskTier] = {
     "recent_tasks": RiskTier.LOW,
     # The approval tool itself
     "approve_pending_action": RiskTier.LOW,
+    # WhatsApp (whatsapp_tools.WhatsAppTools): reads are quick and local;
+    # sending goes through the approval gate.
+    "whatsapp_list_chats": RiskTier.LOW,
+    "whatsapp_read_chat": RiskTier.LOW,
+    "whatsapp_where_needed": RiskTier.LOW,
+    "whatsapp_send_message": RiskTier.MEDIUM,
 }
 
 # Words in a clicked control's name that make the click HIGH risk.

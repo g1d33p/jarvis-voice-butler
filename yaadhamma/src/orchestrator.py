@@ -322,6 +322,11 @@ VOICE_TOOL_NAMES = {
     "gmail_search_email",
     "gmail_read_email",
     "gmail_send_email",
+    # WhatsApp triage is quick; sending goes through the approval gate.
+    "whatsapp_list_chats",
+    "whatsapp_read_chat",
+    "whatsapp_where_needed",
+    "whatsapp_send_message",
 }
 
 

@@ -44,6 +44,7 @@ from prompts import AGENT_INSTRUCTIONS, VOICE_INSTRUCTIONS
 from pronunciation import PronunciationTTS
 from task_manager import TaskStore
 from tools import BrowserTools
+from whatsapp_tools import WhatsAppTools
 
 logger = logging.getLogger("yaadhamma")
 
@@ -133,6 +134,9 @@ class Assistant(Agent):
         self.observation_tools = ObservationTools(self.browser)
         self.memory_tools = MemoryTools(audit=self.audit_log)
         self.outlook_tools = OutlookTools(approvals=self.approvals)
+        self.whatsapp_tools = WhatsAppTools(
+            browser=self.browser, approvals=self.approvals
+        )
         toolsets = (
             self.browser_tools,
             self.mac_tools,
@@ -142,6 +146,7 @@ class Assistant(Agent):
             self.observation_tools,
             self.memory_tools,
             self.outlook_tools,
+            self.whatsapp_tools,
         )
         self._end_call_tool = EndCallTool(
             extra_description=(
