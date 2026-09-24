@@ -15,6 +15,7 @@ from livekit.plugins import ai_coustics, google
 
 from browser import BrowserManager
 from prompts import AGENT_INSTRUCTIONS
+from mac_tools import MacTools
 from tools import BrowserTools
 
 load_dotenv(".env.local")
@@ -24,6 +25,7 @@ class Assistant(Agent):
     def __init__(self, browser: BrowserManager | None = None) -> None:
         self.browser = browser or BrowserManager(headless=True)
         self.browser_tools = BrowserTools(self.browser)
+        self.mac_tools = MacTools()
         self._end_call_tool = EndCallTool(
             extra_description=(
                 "Only end the call after the user clearly says they are finished, "
@@ -54,6 +56,7 @@ class Assistant(Agent):
             instructions=AGENT_INSTRUCTIONS,
             tools=[
                 *self.browser_tools.tools,
+                *self.mac_tools.tools,
                 *self._end_call_tool.tools,
             ],
         )
