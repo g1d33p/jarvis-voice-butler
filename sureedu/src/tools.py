@@ -6,6 +6,7 @@ from livekit.agents import RunContext, function_tool
 from livekit.agents.llm import ToolError
 
 from browser import BrowserError, BrowserManager
+from policy import can_send_without_asking
 
 # How long a user's approval stays valid before the click must happen.
 APPROVAL_TTL_SECONDS = 60
@@ -62,15 +63,21 @@ def is_clear_approval(reply: str) -> bool:
     )
 
 
-def _latest_user_text(context: object) -> str | None:
-    """Return the most recent thing the user actually said, if available."""
+def _latest_user_message(context: object) -> tuple[str, str] | None:
+    """Return (id, text) of the most recent thing the user actually said."""
     try:
         for item in reversed(context.session.history.items):  # type: ignore[attr-defined]
             if getattr(item, "type", "") == "message" and item.role == "user":
-                return item.text_content
+                return str(getattr(item, "id", "")), item.text_content or ""
     except Exception:
         return None
     return None
+
+
+def _latest_user_text(context: object) -> str | None:
+    """Return the most recent thing the user actually said, if available."""
+    latest = _latest_user_message(context)
+    return latest[1] if latest else None
 
 
 def duckduckgo_search_url(query: str) -> str:
@@ -86,6 +93,9 @@ class BrowserTools:
         # One pending approval: (target, label, expiry time). It is used by
         # exactly one click, and revoked by anything that changes the page.
         self._approval: tuple[str, str, float] | None = None
+        # The user utterance that already sent a message without asking, so one
+        # instruction can never send more than one message.
+        self._auto_sent_for: str | None = None
 
     @property
     def tools(self) -> list:
@@ -205,7 +215,10 @@ class BrowserTools:
             # Any other click (e.g. opening a different chat) could change what
             # an earlier approval referred to, so it cancels that approval.
             self._revoke_approval()
-        elif not self._consume_approval(target, label):
+        elif not self._consume_approval(target, label) and not (
+            label.casefold().strip() == "send"
+            and await self._may_send_without_asking(context)
+        ):
             raise ToolError(
                 f"This action may be consequential and is not approved. Ask the "
                 f"user to confirm clicking {label!r}, stating exactly what will "
@@ -292,9 +305,41 @@ class BrowserTools:
     async def press_key(self, context: RunContext, key: str) -> dict[str, str]:
         """Press a safe navigation key in the current browser page.
 
+        Pressing Enter in a message box sends the message, and in a form submits
+        it, so Enter then needs the user's approval exactly like clicking Send:
+        ask, call confirm_browser_action with target "Enter", then press Enter.
+
         Args:
             key: One of Enter, Escape, Tab, an arrow key, or Backspace.
         """
+        if key == "Enter":
+            effect = await self.browser.enter_effect()
+            label = str(effect.get("label") or "")
+            consequential = effect.get("consequential")
+            if consequential == "button":
+                # Enter on a focused button is a click on that button.
+                consequential = self._requires_confirmation(label)
+            if (
+                consequential
+                and not self._consume_approval("Enter", "enter")
+                and not (
+                    consequential == "send"
+                    and await self._may_send_without_asking(
+                        context, str(effect.get("text") or "")
+                    )
+                )
+            ):
+                raise ToolError(
+                    "Pressing Enter here would send or submit it, and it is not "
+                    "approved. Tell the user exactly what will be sent or "
+                    "submitted, ask for confirmation, then call "
+                    'confirm_browser_action with target "Enter" and their reply.'
+                )
+            if not consequential:
+                self._revoke_approval()
+        else:
+            self._revoke_approval()
+
         try:
             return await self.browser.press_key(key)
         except BrowserError as exc:
@@ -397,6 +442,23 @@ class BrowserTools:
             return await self.browser.reload()
         except BrowserError as exc:
             raise ToolError(str(exc)) from exc
+
+    async def _may_send_without_asking(
+        self, context: object, message: str | None = None
+    ) -> bool:
+        """True if policy allows sending the pending message without a question."""
+        latest = _latest_user_message(context)
+        if latest is None:
+            return False
+        utterance_id, user_words = latest
+        if message is None:
+            message = await self.browser.pending_message_text()
+        allowed, _reason = can_send_without_asking(message, user_words)
+        key = utterance_id or user_words
+        if not allowed or key == self._auto_sent_for:
+            return False
+        self._auto_sent_for = key
+        return True
 
     def _revoke_approval(self) -> None:
         self._approval = None

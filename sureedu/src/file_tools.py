@@ -1,8 +1,70 @@
-from pathlib import Path
 import shutil
+import subprocess
+from pathlib import Path
 
 from livekit.agents import RunContext, function_tool
 from livekit.agents.llm import ToolError
+
+from tools import _latest_user_text, is_clear_approval
+
+# Folders that are never moved to the Trash as a whole, even with approval.
+_PROTECTED_NAMES = {
+    "Desktop",
+    "Documents",
+    "Downloads",
+    "Library",
+    "Applications",
+    "Movies",
+    "Music",
+    "Pictures",
+    "Public",
+    "Projects",
+}
+
+
+def _run_osascript(script: str) -> subprocess.CompletedProcess:
+    """Run AppleScript. Kept separate so tests can replace it."""
+    return subprocess.run(
+        ["osascript", "-e", script], capture_output=True, text=True, timeout=30
+    )
+
+
+def check_trashable(path: Path, home: Path | None = None) -> Path:
+    """Validate that `path` may be moved to the Trash; return it resolved.
+
+    Allowed: existing files or folders inside the home folder. Refused: the
+    home folder itself, the standard top-level folders, anything under
+    ~/Library, and anything under a hidden folder (for example ~/.sureedu).
+    """
+    home = (home or Path.home()).resolve()
+    target = path.expanduser().resolve()
+
+    if not target.exists():
+        raise ToolError(f"Nothing exists at {target}.")
+    if target == home or home not in target.parents:
+        raise ToolError("I can only move items inside your home folder to the Trash.")
+
+    relative = target.relative_to(home)
+    if len(relative.parts) == 1 and relative.parts[0] in _PROTECTED_NAMES:
+        raise ToolError(
+            f"{target.name} is a main system folder, so I will not trash it."
+        )
+    if relative.parts[0] == "Library":
+        raise ToolError(
+            "Items inside Library are used by apps, so I will not trash them."
+        )
+    if any(part.startswith(".") for part in relative.parts[:-1]) or (
+        len(relative.parts) == 1 and relative.parts[0].startswith(".")
+    ):
+        raise ToolError("Hidden configuration folders are off limits for the Trash.")
+    return target
+
+
+def describe_path(target: Path) -> dict[str, object]:
+    if target.is_dir():
+        count = sum(1 for _ in target.rglob("*"))
+        return {"kind": "folder", "items_inside": count}
+    return {"kind": "file", "bytes": target.stat().st_size}
 
 
 class FileTools:
@@ -20,6 +82,7 @@ class FileTools:
             self.rename_path,
             self.move_path,
             self.copy_path,
+            self.move_to_trash,
         ]
 
     @function_tool()
@@ -53,9 +116,7 @@ class FileTools:
                 key=lambda item: (not item.is_dir(), item.name.lower()),
             )
         except PermissionError as exc:
-            raise ToolError(
-                f"Permission denied while reading {target}."
-            ) from exc
+            raise ToolError(f"Permission denied while reading {target}.") from exc
 
         if not items:
             return f"{target} is empty."
@@ -123,9 +184,7 @@ class FileTools:
         try:
             stat = target.stat()
         except PermissionError as exc:
-            raise ToolError(
-                f"Permission denied while inspecting {target}."
-            ) from exc
+            raise ToolError(f"Permission denied while inspecting {target}.") from exc
 
         path_type = "directory" if target.is_dir() else "file"
 
@@ -150,16 +209,12 @@ class FileTools:
             if target.is_dir():
                 return f"The folder already exists: {target}"
 
-            raise ToolError(
-                f"A file already exists at this path: {target}"
-            )
+            raise ToolError(f"A file already exists at this path: {target}")
 
         try:
             target.mkdir(parents=True, exist_ok=False)
         except PermissionError as exc:
-            raise ToolError(
-                f"Permission denied while creating {target}."
-            ) from exc
+            raise ToolError(f"Permission denied while creating {target}.") from exc
 
         return f"Created folder: {target}"
 
@@ -175,17 +230,13 @@ class FileTools:
         target = Path(path).expanduser()
 
         if target.exists():
-            raise ToolError(
-                f"A file or folder already exists at: {target}"
-            )
+            raise ToolError(f"A file or folder already exists at: {target}")
 
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text(content, encoding="utf-8")
         except PermissionError as exc:
-            raise ToolError(
-                f"Permission denied while creating {target}."
-            ) from exc
+            raise ToolError(f"Permission denied while creating {target}.") from exc
 
         return f"Created file: {target}"
 
@@ -210,16 +261,12 @@ class FileTools:
         destination = source_path.parent / new_name
 
         if destination.exists():
-            raise ToolError(
-                f"A file or folder already exists at: {destination}"
-            )
+            raise ToolError(f"A file or folder already exists at: {destination}")
 
         try:
             source_path.rename(destination)
         except PermissionError as exc:
-            raise ToolError(
-                f"Permission denied while renaming {source_path}."
-            ) from exc
+            raise ToolError(f"Permission denied while renaming {source_path}.") from exc
 
         return f"Renamed {source_path} to {destination}"
 
@@ -244,16 +291,12 @@ class FileTools:
             final_destination = destination_path
 
         if final_destination.exists():
-            raise ToolError(
-                f"The destination already exists: {final_destination}"
-            )
+            raise ToolError(f"The destination already exists: {final_destination}")
 
         try:
             shutil.move(str(source_path), str(final_destination))
         except PermissionError as exc:
-            raise ToolError(
-                f"Permission denied while moving {source_path}."
-            ) from exc
+            raise ToolError(f"Permission denied while moving {source_path}.") from exc
 
         return f"Moved {source_path} to {final_destination}"
 
@@ -278,9 +321,7 @@ class FileTools:
             final_destination = destination_path
 
         if final_destination.exists():
-            raise ToolError(
-                f"The destination already exists: {final_destination}"
-            )
+            raise ToolError(f"The destination already exists: {final_destination}")
 
         try:
             if source_path.is_dir():
@@ -288,8 +329,55 @@ class FileTools:
             else:
                 shutil.copy2(source_path, final_destination)
         except PermissionError as exc:
-            raise ToolError(
-                f"Permission denied while copying {source_path}."
-            ) from exc
+            raise ToolError(f"Permission denied while copying {source_path}.") from exc
 
         return f"Copied {source_path} to {final_destination}"
+
+    @function_tool()
+    async def move_to_trash(
+        self,
+        context: RunContext,
+        path: str,
+        user_confirmed: bool = False,
+    ) -> dict[str, object]:
+        """Move a file or folder to the macOS Trash, where it can be restored.
+
+        Never deletes permanently. First call with user_confirmed false: the
+        result describes the item. Tell the user exactly what will be moved to
+        the Trash (and how many items a folder contains), ask for confirmation,
+        and only call again with user_confirmed true after a clear yes.
+
+        Args:
+            path: Full path of the file or folder, e.g. ~/Downloads/old.pdf.
+            user_confirmed: True only after the user clearly approved this item.
+        """
+        target = check_trashable(Path(path))
+        details = {"path": str(target), **describe_path(target)}
+
+        if not user_confirmed:
+            return {"moved": False, "needs_confirmation": True, **details}
+
+        heard = _latest_user_text(context)
+        if heard is not None and not is_clear_approval(heard):
+            raise ToolError(
+                "The user's reply was not a clear yes, so nothing was moved. Ask again."
+            )
+
+        safe = str(target).replace("\\", "\\\\").replace('"', '\\"')
+        try:
+            result = _run_osascript(
+                f'tell application "Finder" to delete POSIX file "{safe}"'
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise ToolError("Moving the item to the Trash timed out.") from exc
+
+        if result.returncode != 0:
+            raise ToolError(
+                "Finder could not move it to the Trash. If macOS asked for "
+                "permission to control Finder, allow it and try again. "
+                f"Details: {result.stderr.strip()}"
+            )
+        if target.exists():
+            raise ToolError("Finder reported success, but the item is still there.")
+
+        return {"moved": True, "restorable": True, **details}

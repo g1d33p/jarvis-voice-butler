@@ -102,6 +102,58 @@ _INSPECT_SCRIPT = r"""elements => {
   return results;
 }"""
 
+# Finds the text currently typed into a message box (not a search box).
+_PENDING_MESSAGE_SCRIPT = """() => {
+  const isSearch = el => {
+    const hints = ((el.getAttribute('aria-label') || '') + ' ' +
+      (el.getAttribute('placeholder') || '') + ' ' +
+      (el.getAttribute('title') || '')).toLowerCase();
+    return (el.getAttribute('type') || '') === 'search' ||
+      (el.getAttribute('role') || '') === 'searchbox' || hints.includes('search');
+  };
+  const textOf = el => (el.isContentEditable ? el.innerText : el.value) || '';
+  const active = document.activeElement;
+  if (active && (active.isContentEditable || active.tagName === 'TEXTAREA') &&
+      !isSearch(active) && textOf(active).trim()) {
+    return textOf(active).trim();
+  }
+  for (const el of document.querySelectorAll('[contenteditable="true"], textarea')) {
+    if (!isSearch(el) && textOf(el).trim()) return textOf(el).trim();
+  }
+  return '';
+}"""
+
+# Works out what pressing Enter would do in the focused element: sending a
+# message, submitting a form, or activating a focused button all count.
+_ENTER_EFFECT_SCRIPT = """() => {
+  const el = document.activeElement;
+  if (!el || el === document.body || el === document.documentElement) {
+    return {consequential: false, label: ''};
+  }
+  const label = (el.getAttribute('aria-label') || el.getAttribute('title') ||
+    el.getAttribute('placeholder') || el.innerText || el.value || '')
+    .trim().replace(/\\s+/g, ' ').slice(0, 100);
+  const role = (el.getAttribute('role') || '').toLowerCase();
+  const type = (el.getAttribute('type') || '').toLowerCase();
+  const hints = ((el.getAttribute('aria-label') || '') + ' ' +
+    (el.getAttribute('placeholder') || '')).toLowerCase();
+  if (type === 'search' || role === 'searchbox' || hints.includes('search')) {
+    return {consequential: false, label};
+  }
+  if (el.tagName === 'BUTTON' || el.tagName === 'A' || role === 'button' ||
+      type === 'submit') {
+    return {consequential: 'button', label};
+  }
+  const text = el.isContentEditable ? (el.innerText || '') : (el.value || '');
+  if (el.isContentEditable || el.tagName === 'TEXTAREA') {
+    return {consequential: text.trim() ? 'send' : false, label, text: text.trim()};
+  }
+  if (el.tagName === 'INPUT') {
+    return {consequential: (el.form || text.trim()) ? 'submit' : false, label};
+  }
+  return {consequential: false, label};
+}"""
+
 _ELEMENT_LABEL_SCRIPT = """el => (el.getAttribute('aria-label') || el.getAttribute('title') ||
   el.innerText || el.value || '').trim().replace(/\\s+/g, ' ').slice(0, 100)"""
 
@@ -318,6 +370,31 @@ class BrowserManager:
         async with self._lock:
             await page.mouse.wheel(0, amount)
             return {"direction": direction, "url": page.url}
+
+    async def pending_message_text(self) -> str:
+        """Return the text waiting in the page's message box, if any.
+
+        Prefers the focused editable field; otherwise the first non-empty
+        message box that is not a search field.
+        """
+        page = await self._get_page()
+        try:
+            return await page.evaluate(_PENDING_MESSAGE_SCRIPT) or ""
+        except Exception:
+            return ""
+
+    async def enter_effect(self) -> dict[str, object]:
+        """Describe what pressing Enter would do in the focused element.
+
+        Returns consequential = "send", "submit", "button" or False, plus the
+        focused element's label.
+        """
+        page = await self._get_page()
+        try:
+            return await page.evaluate(_ENTER_EFFECT_SCRIPT)
+        except Exception:
+            # If we cannot tell, treat Enter as consequential.
+            return {"consequential": "unknown", "label": ""}
 
     async def press_key(self, key: str) -> dict[str, str]:
         allowed_keys = {

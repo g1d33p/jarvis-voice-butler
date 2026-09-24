@@ -613,3 +613,177 @@ async def test_approval_uses_the_real_transcript_not_the_models_retelling(
 def test_close_browser_tool_is_registered() -> None:
     ids = [tool.id for tool in BrowserTools(BrowserManager(headless=True)).tools]
     assert "close_browser" in ids
+
+
+# ----------------------------------------------------------------------
+# Enter key: the live bug where "type Hi, press Enter" sent without approval
+# ----------------------------------------------------------------------
+
+_ENTER_PAGE = b"""
+<html><head><title>Enter test</title></head><body>
+  <input type="search" aria-label="Search or start a new chat">
+  <div contenteditable="true" aria-label="Type a message"></div>
+  <button aria-label="Send">&gt;</button>
+  <button aria-label="Emoji">:)</button>
+</body></html>
+"""
+
+
+class _EnterPageHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(_ENTER_PAGE)))
+        self.end_headers()
+        self.wfile.write(_ENTER_PAGE)
+
+    def log_message(self, message_format: str, *args: object) -> None:
+        return
+
+
+@pytest.fixture
+async def enter_browser(tmp_path):
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _EnterPageHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    manager = BrowserManager(headless=True, profile_dir=tmp_path / "profile")
+    try:
+        await manager.open_url(f"http://127.0.0.1:{server.server_port}/")
+        yield manager
+    finally:
+        await manager.close()
+        server.shutdown()
+        thread.join(timeout=2)
+
+
+def _yes_context():
+    from types import SimpleNamespace
+
+    message = SimpleNamespace(type="message", role="user", text_content="Yes, send it")
+    return SimpleNamespace(
+        session=SimpleNamespace(history=SimpleNamespace(items=[message]))
+    )
+
+
+@pytest.mark.asyncio
+async def test_enter_in_message_box_needs_approval(enter_browser) -> None:
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(enter_browser)
+    composer = _find((await enter_browser.inspect_page())["elements"], "Type a message")
+    await tools.type_text(None, composer["id"], "Hi")
+
+    with pytest.raises(ToolError, match="would send or submit"):
+        await tools.press_key(None, "Enter")
+
+    await tools.confirm_browser_action(_yes_context(), "Enter", "yes")
+    await tools.press_key(None, "Enter")  # approved once
+
+
+@pytest.mark.asyncio
+async def test_enter_in_search_box_is_free(enter_browser) -> None:
+    tools = BrowserTools(enter_browser)
+    search = _find((await enter_browser.inspect_page())["elements"], "Search")
+    await tools.type_text(None, search["id"], "Priya")
+
+    await tools.press_key(None, "Enter")  # no approval needed
+
+
+@pytest.mark.asyncio
+async def test_enter_on_focused_send_button_needs_approval(enter_browser) -> None:
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(enter_browser)
+    page = await enter_browser._get_page()
+    await page.focus("button[aria-label='Send']")
+
+    with pytest.raises(ToolError, match="would send or submit"):
+        await tools.press_key(None, "Enter")
+
+
+@pytest.mark.asyncio
+async def test_enter_on_harmless_button_is_free(enter_browser) -> None:
+    tools = BrowserTools(enter_browser)
+    page = await enter_browser._get_page()
+    await page.focus("button[aria-label='Emoji']")
+
+    await tools.press_key(None, "Enter")
+
+
+# ----------------------------------------------------------------------
+# Context-aware sending: simple dictated messages go straight out
+# ----------------------------------------------------------------------
+
+
+def _said(text: str, item_id: str = "u1"):
+    from types import SimpleNamespace
+
+    message = SimpleNamespace(
+        type="message", role="user", text_content=text, id=item_id
+    )
+    return SimpleNamespace(
+        session=SimpleNamespace(history=SimpleNamespace(items=[message]))
+    )
+
+
+@pytest.mark.asyncio
+async def test_dictated_hi_is_sent_without_asking(chat_browser) -> None:
+    tools = BrowserTools(chat_browser)
+    elements = (await chat_browser.inspect_page())["elements"]
+    composer = _find(elements, "Type a message")
+    send = _find(elements, "Send")
+    context = _said("Send hi to the guy in the first chat")
+
+    await tools.type_text(context, composer["id"], "Hi")
+    await tools.click(context, send["id"])  # no approval question needed
+
+
+@pytest.mark.asyncio
+async def test_one_instruction_sends_at_most_one_message(chat_browser) -> None:
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(chat_browser)
+    elements = (await chat_browser.inspect_page())["elements"]
+    composer = _find(elements, "Type a message")
+    send = _find(elements, "Send")
+    context = _said("send hi")
+
+    await tools.type_text(context, composer["id"], "Hi")
+    await tools.click(context, send["id"])
+    await tools.type_text(context, composer["id"], "Hi")
+    with pytest.raises(ToolError, match="not approved"):
+        await tools.click(context, send["id"])
+
+
+@pytest.mark.asyncio
+async def test_composed_message_still_needs_approval(chat_browser) -> None:
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(chat_browser)
+    elements = (await chat_browser.inspect_page())["elements"]
+    composer = _find(elements, "Type a message")
+    send = _find(elements, "Send")
+    context = _said("send him a friendly greeting")
+
+    await tools.type_text(context, composer["id"], "Hey! Hope you're doing well")
+    with pytest.raises(ToolError, match="not approved"):
+        await tools.click(context, send["id"])
+
+
+@pytest.mark.asyncio
+async def test_enter_follows_the_same_policy(chat_browser) -> None:
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(chat_browser)
+    composer = _find((await chat_browser.inspect_page())["elements"], "Type a message")
+
+    # Sensitive text: Enter is blocked.
+    await tools.type_text(
+        _said("send code 482913", "u1"), composer["id"], "code 482913"
+    )
+    with pytest.raises(ToolError, match="not approved"):
+        await tools.press_key(_said("send code 482913", "u1"), "Enter")
+
+    # Simple dictated text: Enter goes through.
+    await tools.type_text(_said("send hello", "u2"), composer["id"], "hello")
+    await tools.press_key(_said("send hello", "u2"), "Enter")
