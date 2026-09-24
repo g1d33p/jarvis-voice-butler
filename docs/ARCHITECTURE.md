@@ -1,7 +1,7 @@
-# Sureedu architecture (Phase 3)
+# Yaadhamma architecture (Phase 3)
 
 ```
- You (voice) ──► Gemini Live (voice model)           Mac + Sureedu's browser
+ You (voice) ──► Gemini Live (voice model)           Mac + Yaadhamma's browser
                   │  quick actions: open site/tab,         ▲
                   │  switch/close tabs, observe, apps,     │
                   │  screenshot, clipboard, open folder ───┤
@@ -11,7 +11,7 @@
                                           think → tool → result → repeat)
                                               │
                                               ▼
-                                      Task store (SQLite, ~/.sureedu/sureedu.db)
+                                      Task store (SQLite, ~/.yaadhamma/yaadhamma.db)
 ```
 
 ## Files
@@ -37,12 +37,12 @@ orchestrator. It allows a send only when policy allows it (short, dictated,
 non-sensitive) or when the real speech transcript shows a clear yes to that
 exact action. Nothing a model writes can approve an action by itself.
 
-## Settings (`sureedu/.env.local`)
+## Settings (`yaadhamma/.env.local`)
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `SUREEDU_MODE` | `split` | `direct` restores the Phase 1–2 behaviour. |
-| `SUREEDU_BRAIN_MODEL` | `gemini-3.5-flash-lite` | Background model for tasks. |
-| `SUREEDU_ESCALATION_MODEL` | `gemini-3.6-flash` | Used after two failed steps in a row. |
-| `SUREEDU_MAX_TASK_STEPS` | `15` | Tool rounds per task. |
-| `SUREEDU_TASK_TIMEOUT_SECONDS` | `120` | Time limit per task. |
+| `YAADHAMMA_MODE` | `split` | `direct` restores the Phase 1–2 behaviour. |
+| `YAADHAMMA_BRAIN_MODEL` | `gemini-3.5-flash-lite` | Background model for tasks. |
+| `YAADHAMMA_ESCALATION_MODEL` | `gemini-3.6-flash` | Used after two failed steps in a row. |
+| `YAADHAMMA_MAX_TASK_STEPS` | `15` | Tool rounds per task. |
+| `YAADHAMMA_TASK_TIMEOUT_SECONDS` | `120` | Time limit per task. |

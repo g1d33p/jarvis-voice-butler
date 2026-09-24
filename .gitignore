@@ -34,8 +34,8 @@ build/
 # Logs
 *.log
 
-# Sureedu local state (never commit: may contain cookies/sessions)
-.sureedu/
+# Yaadhamma local state (never commit: may contain cookies/sessions)
+.yaadhamma/
 *.db
 *.db-journal
 screenshots/
