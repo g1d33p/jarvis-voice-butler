@@ -302,6 +302,8 @@ VOICE_TOOL_NAMES = {
     "read_clipboard",
     "write_clipboard",
     "open_path",
+    # Completing an approval round-trip must always be one direct call away.
+    "approve_pending_action",
 }
 
 

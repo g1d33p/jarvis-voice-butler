@@ -113,3 +113,45 @@ def test_new_mac_tools_are_registered() -> None:
 def test_active_app_is_no_longer_a_separate_tool() -> None:
     ids = [tool.id for tool in MacTools().tools]
     assert "get_active_app" not in ids  # replaced by observe_state
+
+
+@pytest.mark.asyncio
+async def test_quit_application_asks_for_approval_first(monkeypatch) -> None:
+    from permissions import ApprovalManager
+
+    calls = []
+    monkeypatch.setattr(
+        mac_tools.subprocess, "run", lambda *a, **k: calls.append(a) or _completed()
+    )
+    approvals = ApprovalManager()
+    tools = MacTools(approvals=approvals)
+
+    with pytest.raises(ToolError, match="approve_pending_action"):
+        await tools.quit_application(None, "Google Chrome")
+
+    assert calls == []  # nothing was quit yet
+    assert approvals.pending is not None
+    assert approvals.pending.description == "quit Google Chrome"
+
+
+@pytest.mark.asyncio
+async def test_quit_application_runs_after_approval(monkeypatch) -> None:
+    from permissions import ApprovalManager, ApprovalTools
+
+    calls = []
+    monkeypatch.setattr(
+        mac_tools.subprocess, "run", lambda *a, **k: calls.append(a) or _completed()
+    )
+    approvals = ApprovalManager()
+    tools = MacTools(approvals=approvals)
+
+    with pytest.raises(ToolError, match="needs the user's approval"):
+        await tools.quit_application(None, "Google Chrome")
+
+    result = await ApprovalTools(approvals=approvals).approve_pending_action(
+        None, "yes"
+    )
+
+    assert result == "Quit 'Google Chrome'."
+    assert len(calls) == 1
+    assert "osascript" in calls[0][0]

@@ -35,10 +35,10 @@ STT_MODEL = os.environ.get("YAADHAMMA_STT_MODEL", "muse-voice-transcribe-1.0")
 # decide when Jeevan has finished speaking.
 STT_MODE = os.environ.get("YAADHAMMA_STT_MODE", "ENDPOINTING")
 
-# Speech output (LiveKit Inference; Meta has no TTS). Jeevan picks the final
-# voice in Phase 2; this feminine placeholder stands in until then.
+# Speech output (LiveKit Inference; Meta has no TTS). Jeevan picked Sarah
+# in Phase 2; override with YAADHAMMA_TTS_VOICE to try another voice.
 TTS_MODEL = os.environ.get("YAADHAMMA_TTS_MODEL", "fishaudio/s2.1-pro")
-TTS_VOICE = os.environ.get("YAADHAMMA_TTS_VOICE", "fa4c9eb3dccc4806b382b40d61c6b10a")
+TTS_VOICE = os.environ.get("YAADHAMMA_TTS_VOICE", "933563129e564b19a115bedd57b7406a")
 
 # Limits for one task.
 MAX_TASK_STEPS = int(os.environ.get("YAADHAMMA_MAX_TASK_STEPS", "15"))

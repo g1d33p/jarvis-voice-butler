@@ -84,7 +84,7 @@ class MetaConfig:
     stt_mode: str = "ENDPOINTING"  # PUSH_TO_TALK | ENDPOINTING | DIARIZATION
     voice_mode: str = "pipeline"  # "pipeline" | "realtime" (old Gemini Live path)
     tts_model: str = "fishaudio/s2.1-pro"
-    tts_voice: str = "fa4c9eb3dccc4806b382b40d61c6b10a"
+    tts_voice: str = "933563129e564b19a115bedd57b7406a"  # Sarah (Jeevan's pick)
 
     @classmethod
     def from_env(cls) -> MetaConfig:

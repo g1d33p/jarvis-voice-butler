@@ -1,183 +1,24 @@
-import re
-import time
-from dataclasses import dataclass
+"""Browser tools: what Yaadhamma can do on the web.
+
+Consequential actions (sending, buying, submitting) go through the shared
+ApprovalManager from permissions.py: the tool stops, the model asks, and
+approve_pending_action carries the action out after a clear yes.
+"""
+
 from urllib.parse import urlencode
 
 from livekit.agents import RunContext, function_tool
 from livekit.agents.llm import ToolError
 
 from browser import BrowserError, BrowserManager
+from permissions import (
+    ApprovalManager,
+    is_clear_approval,  # noqa: F401  (re-exported: tests import it from here)
+    is_risky_click_target,
+    latest_user_message,
+    normalize_message,
+)
 from policy import can_send_without_asking
-
-# How long a blocked action waits for the user's yes.
-APPROVAL_TTL_SECONDS = 60
-
-_AFFIRMATIVE = {
-    "yes",
-    "yeah",
-    "yep",
-    "yup",
-    "sure",
-    "ok",
-    "okay",
-    "confirm",
-    "confirmed",
-    "proceed",
-    "absolutely",
-    "definitely",
-    "correct",
-    "affirmative",
-    # Telugu / Hindi
-    "avunu",
-    "sare",
-    "sari",
-    "haan",
-    "cheyyi",
-    "pampu",
-}
-_AFFIRMATIVE_PHRASES = (
-    "go ahead",
-    "do it",
-    "send it",
-    "please do",
-    "go for it",
-    "that works",
-    "sounds good",
-    "looks good",
-)
-# While a message is waiting to be sent, a plain instruction to send it
-# ("send the message", "what are you waiting for, send it") is also a yes.
-_SEND_COMMANDS = {"send", "pampu", "bhejo"}
-_NEGATIVE = {
-    "no",
-    "nope",
-    "not",
-    "don't",
-    "dont",
-    "wait",
-    "stop",
-    "cancel",
-    "hold",
-    "never",
-    "vaddu",
-    "ledu",
-    "nahi",
-}
-
-
-def is_clear_approval(reply: str, *, sending: bool = False) -> bool:
-    """True only for an unambiguous yes; anything unclear counts as no.
-
-    With sending=True, a direct instruction to send also counts as a yes.
-    """
-    words = re.findall(r"[a-z']+", reply.casefold())
-    if not words or _NEGATIVE.intersection(words):
-        return False
-    text = " ".join(words)
-    if sending and _SEND_COMMANDS.intersection(words):
-        return True
-    return bool(_AFFIRMATIVE.intersection(words)) or any(
-        phrase in text for phrase in _AFFIRMATIVE_PHRASES
-    )
-
-
-def _normalize_message(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip().rstrip(".!").casefold()
-
-
-@dataclass
-class PendingAction:
-    """A consequential action that was stopped to ask the user first."""
-
-    kind: str  # "click" or "enter"
-    target: str
-    label: str
-    message: str  # the text that would be sent, if any
-    expires_at: float
-
-
-def _latest_user_message(context: object) -> tuple[str, str] | None:
-    """Return (id, text) of the most recent thing the user actually said."""
-    try:
-        for item in reversed(context.session.history.items):  # type: ignore[attr-defined]
-            if getattr(item, "type", "") == "message" and item.role == "user":
-                return str(getattr(item, "id", "")), item.text_content or ""
-    except Exception:
-        return None
-    return None
-
-
-def _messages(context: object) -> list:
-    """The conversation so far as chat messages, oldest first (empty if unknown)."""
-    try:
-        return [
-            item
-            for item in context.session.history.items  # type: ignore[attr-defined]
-            if getattr(item, "type", "") == "message"
-        ]
-    except Exception:
-        return []
-
-
-# Text in quotation marks, e.g. 'hi' or "hi" or \u201chi\u201d. The opening quote
-# must start a word, so apostrophes as in "it's" or "I'll" are not quotes.
-_QUOTED = re.compile(
-    '(?:^|[\\s:(])["\'\u201c\u2018]([^"\u201d\u2019]{3,}?)["\'\u201d\u2019](?=[\\s.,!?)]|$)'
-)
-
-# How long a spoken yes to a proposed draft stays usable.
-SPOKEN_DRAFT_APPROVAL_SECONDS = 300
-
-
-def spoken_approval(
-    context: object, message: str, label: str
-) -> tuple[bool, str | None]:
-    """Did the user already approve this exact action in conversation?
-
-    Two cases count, both judged on the real transcript:
-    - Yaadhamma's latest question named the action (for example "Shall I send
-      it?") and the user's reply right after it is a clear yes.
-    - Yaadhamma proposed this exact message text, and the user's very next
-      reply was a clear yes (for example "That works"), within five minutes.
-    Returns (approved, id of the approving user message).
-    """
-    messages = _messages(context)
-    wanted = _normalize_message(message) if message else ""
-    action_word = "send" if message else label.casefold().strip()
-
-    for index in range(len(messages) - 1, 0, -1):
-        reply, question = messages[index], messages[index - 1]
-        if reply.role != "user" or question.role != "assistant":
-            continue
-        said = reply.text_content or ""
-        asked = (question.text_content or "").casefold()
-        if not is_clear_approval(said, sending=bool(message)):
-            continue
-        is_latest_reply = all(m.role != "user" for m in messages[index + 1 :])
-        quotes = [_normalize_message(q) for q in _QUOTED.findall(asked)]
-        # If the question quoted a message, it must be this one.
-        matches_quote = not quotes or any(wanted and wanted in q for q in quotes)
-        if (
-            is_latest_reply
-            and "?" in asked
-            and action_word
-            and action_word in asked
-            and matches_quote
-        ):
-            return True, str(reply.id)
-        quoted = wanted and wanted in _normalize_message(asked)
-        fresh = time.time() - getattr(reply, "created_at", 0) <= (
-            SPOKEN_DRAFT_APPROVAL_SECONDS
-        )
-        if quoted and fresh:
-            return True, str(reply.id)
-    return False, None
-
-
-def _latest_user_text(context: object) -> str | None:
-    """Return the most recent thing the user actually said, if available."""
-    latest = _latest_user_message(context)
-    return latest[1] if latest else None
 
 
 def duckduckgo_search_url(query: str) -> str:
@@ -188,16 +29,16 @@ def duckduckgo_search_url(query: str) -> str:
 
 
 class BrowserTools:
-    def __init__(self, browser: BrowserManager) -> None:
+    def __init__(
+        self, browser: BrowserManager, approvals: ApprovalManager | None = None
+    ) -> None:
         self.browser = browser
-        # The consequential action waiting for the user's yes. confirming it
-        # performs it; anything that changes the page cancels it.
-        self._pending: PendingAction | None = None
+        # Shared across toolsets: the voice agent and the orchestrator use one
+        # manager, so an approval asked in one path can be answered in either.
+        self._approvals = approvals or ApprovalManager()
         # The user utterance that already sent a message without asking, so one
         # instruction can never send more than one message.
         self._auto_sent_for: str | None = None
-        # Spoken approvals already used, so one yes never sends twice.
-        self._used_approvals: set[str] = set()
 
     @property
     def tools(self) -> list:
@@ -208,7 +49,6 @@ class BrowserTools:
             self.inspect_page,
             self.go_back,
             self.click,
-            self.confirm_browser_action,
             self.type_text,
             self.scroll,
             self.press_key,
@@ -236,7 +76,7 @@ class BrowserTools:
         Args:
             query: A concise DuckDuckGo search query containing all relevant context.
         """
-        self._page_changed()
+        self._approvals.cancel_pending()
         try:
             # Search in a new tab so the page the user was on stays intact.
             return await self.browser.open_tab(duckduckgo_search_url(query))
@@ -253,7 +93,7 @@ class BrowserTools:
         Args:
             url: A complete http or https URL to open.
         """
-        self._page_changed()
+        self._approvals.cancel_pending()
         try:
             return await self.browser.open_url(url)
         except BrowserError as exc:
@@ -275,7 +115,7 @@ class BrowserTools:
         pass that id to click or type_text. Ids change whenever the page changes,
         so inspect again after navigating or if an id is reported missing.
         """
-        self._pending = None
+        self._approvals.cancel_pending()
         try:
             return await self.browser.inspect_page()
         except BrowserError as exc:
@@ -284,7 +124,7 @@ class BrowserTools:
     @function_tool()
     async def go_back(self, context: RunContext) -> dict[str, str]:
         """Go back to the previous page in the agent-controlled browser."""
-        self._page_changed()
+        self._approvals.cancel_pending()
         try:
             return await self.browser.go_back()
         except BrowserError as exc:
@@ -315,72 +155,48 @@ class BrowserTools:
             message = ""
             if label.casefold().strip() == "send":
                 message = await self.browser.pending_message_text()
-            await self._gate(context, "click", target, label, message)
-        else:
-            # Any other click (e.g. opening a different chat) could change what
-            # an approval referred to, so it cancels it.
-            self._page_changed()
+            description = f"send {message!r}" if message else f"click {label!r}"
+            pre_approved = (
+                await self._policy_approval(context, message) if message else None
+            )
+
+            async def execute() -> dict[str, str]:
+                try:
+                    result = await self.browser.click(target)
+                except BrowserError as exc:
+                    raise ToolError(str(exc)) from exc
+                outcome: dict[str, str] = {"clicked": label}
+                if message:
+                    outcome["sent"] = message
+                return {**outcome, **result}
+
+            async def verify() -> None:
+                current = await self.browser.pending_message_text()
+                if normalize_message(current) != normalize_message(message):
+                    raise ToolError(
+                        "The message changed after the user was asked, so it was "
+                        "not sent. Ask again with the new text."
+                    )
+
+            return await self._approvals.gate(
+                tool_name="click",
+                description=description,
+                context=context,
+                execute=execute,
+                verify=verify if message else None,
+                args={"target": target, "label": label},
+                pre_approved=pre_approved,
+                quoted=message,
+            )
+        # Any other click (e.g. opening a different chat) could change what an
+        # approval referred to, so it cancels it.
+        self._approvals.cancel_pending()
 
         try:
             result = await self.browser.click(target)
         except BrowserError as exc:
             raise ToolError(str(exc)) from exc
         return {"clicked": label, **result}
-
-    @function_tool()
-    async def confirm_browser_action(
-        self, context: RunContext, user_reply: str
-    ) -> dict[str, object]:
-        """Carry out the action that was stopped for approval, now that the user agreed.
-
-        Call this right after the user answers your confirmation question. It
-        performs the waiting click or Enter itself, so do not click Send or press
-        Enter again afterwards. Only report success if this returns done.
-
-        Args:
-            user_reply: The user's exact words in reply to your question.
-        """
-        pending = self._pending
-        if pending is None or time.monotonic() > pending.expires_at:
-            self._pending = None
-            raise ToolError(
-                "Nothing is waiting for approval any more. Try the action again; "
-                "it will say whether approval is needed."
-            )
-        heard = _latest_user_text(context) or user_reply
-        if not is_clear_approval(heard, sending=bool(pending.message)):
-            if re.search(
-                r"\b(no|nope|don't|dont|cancel|stop|vaddu)\b", heard.casefold()
-            ):
-                self._pending = None
-                raise ToolError("The user said no. Nothing was sent; drop it.")
-            # Unclear (noise, echo, "very well"): keep it waiting and ask again.
-            raise ToolError(
-                "That reply is not a clear yes, so nothing was done yet. The action "
-                "is still waiting: ask again briefly, then call this again."
-            )
-        self._pending = None
-        if pending.message:
-            current = await self.browser.pending_message_text()
-            if _normalize_message(current) != _normalize_message(pending.message):
-                raise ToolError(
-                    "The message changed after the user was asked, so it was not "
-                    "sent. Ask again with the new text."
-                )
-
-        try:
-            if pending.kind == "enter":
-                result = await self.browser.press_key("Enter")
-            else:
-                result = await self.browser.click(pending.target)
-        except BrowserError as exc:
-            raise ToolError(str(exc)) from exc
-        return {
-            "done": True,
-            "action": pending.label,
-            "sent": pending.message,
-            **result,
-        }
 
     @function_tool()
     async def type_text(
@@ -400,7 +216,7 @@ class BrowserTools:
             target: An element id such as "#7", or the field's label or placeholder.
             text: The text to enter.
         """
-        self._pending = None
+        self._approvals.cancel_pending()
         try:
             return await self.browser.type_text(target, text)
         except BrowserError as exc:
@@ -437,13 +253,47 @@ class BrowserTools:
                 consequential = self._requires_confirmation(label)
             if consequential:
                 message = str(effect.get("text") or "")
-                await self._gate(
-                    context, "enter", "Enter", "Send" if message else label, message
+                description = (
+                    f"send {message!r}"
+                    if message
+                    else f"submit with Enter ({label or 'the form'})"
                 )
-            else:
-                self._page_changed()
+                pre_approved = (
+                    await self._policy_approval(context, message) if message else None
+                )
+
+                async def execute() -> dict[str, str]:
+                    try:
+                        sent_result = await self.browser.press_key("Enter")
+                    except BrowserError as exc:
+                        raise ToolError(str(exc)) from exc
+                    sent_result["effect"] = (
+                        f"Enter sent or submitted it ({label or 'form'})."
+                    )
+                    sent_result["sent"] = True
+                    return sent_result
+
+                async def verify() -> None:
+                    current = await self.browser.pending_message_text()
+                    if normalize_message(current) != normalize_message(message):
+                        raise ToolError(
+                            "The message changed after the user was asked, so it "
+                            "was not sent. Ask again with the new text."
+                        )
+
+                return await self._approvals.gate(
+                    tool_name="press_key",
+                    description=description,
+                    context=context,
+                    execute=execute,
+                    verify=verify if message else None,
+                    args={"key": "Enter", "consequential": True},
+                    pre_approved=pre_approved,
+                    quoted=message,
+                )
+            self._approvals.cancel_pending()
         else:
-            self._page_changed()
+            self._approvals.cancel_pending()
 
         try:
             result = await self.browser.press_key(key)
@@ -480,7 +330,7 @@ class BrowserTools:
         Args:
             tab_number: The tab's number from list_tabs, counting from 1 on the left.
         """
-        self._page_changed()
+        self._approvals.cancel_pending()
         try:
             return await self.browser.switch_tab(tab_number)
         except BrowserError as exc:
@@ -496,7 +346,7 @@ class BrowserTools:
         Args:
             url: Optional complete http or https URL to load in the new tab.
         """
-        self._page_changed()
+        self._approvals.cancel_pending()
         try:
             return await self.browser.open_tab(url or None)
         except BrowserError as exc:
@@ -519,7 +369,7 @@ class BrowserTools:
             tab_number: The tab's number from list_tabs. Use 0 for the active tab.
             user_confirmed: True only after the user explicitly approved losing unsaved text.
         """
-        self._page_changed()
+        self._approvals.cancel_pending()
         try:
             return await self.browser.close_tab(
                 tab_number or None, confirmed=user_confirmed
@@ -542,7 +392,7 @@ class BrowserTools:
         Args:
             user_confirmed: True only after the user approved losing unsent text.
         """
-        self._page_changed()
+        self._approvals.cancel_pending()
         try:
             return await self.browser.close_browser(confirmed=user_confirmed)
         except BrowserError as exc:
@@ -551,69 +401,30 @@ class BrowserTools:
     @function_tool()
     async def reload_page(self, context: RunContext) -> dict[str, str]:
         """Reload the active browser tab."""
-        self._page_changed()
+        self._approvals.cancel_pending()
         try:
             return await self.browser.reload()
         except BrowserError as exc:
             raise ToolError(str(exc)) from exc
 
-    async def _may_send_without_asking(
-        self, context: object, message: str | None = None
-    ) -> bool:
-        """True if policy allows sending the pending message without a question."""
-        latest = _latest_user_message(context)
+    async def _policy_approval(self, context: object, message: str) -> str | None:
+        """Reason the dictated-message policy allows sending, else None.
+
+        Short messages the user dictated word for word can go without asking
+        (see policy.can_send_without_asking). One utterance can only send one
+        message this way.
+        """
+        latest = latest_user_message(context)
         if latest is None:
-            return False
+            return None
         utterance_id, user_words = latest
-        if message is None:
-            message = await self.browser.pending_message_text()
-        allowed, _reason = can_send_without_asking(message, user_words)
+        allowed, reason = can_send_without_asking(message, user_words)
         key = utterance_id or user_words
         if not allowed or key == self._auto_sent_for:
-            return False
+            return None
         self._auto_sent_for = key
-        return True
-
-    async def _gate(
-        self, context: object, kind: str, target: str, label: str, message: str
-    ) -> None:
-        """Allow a consequential action, or stop it and ask the user first."""
-        if message and await self._may_send_without_asking(context, message):
-            return
-
-        approved, approval_id = spoken_approval(context, message, label)
-        if approved and approval_id not in self._used_approvals:
-            self._used_approvals.add(approval_id)
-            return
-
-        self._pending = PendingAction(
-            kind=kind,
-            target=target,
-            label=label,
-            message=message,
-            expires_at=time.monotonic() + APPROVAL_TTL_SECONDS,
-        )
-        what = f"send {message!r}" if message else f"click {label!r}"
-        raise ToolError(
-            f"Not done yet: this needs the user's approval. Ask once, naturally, "
-            f"whether to {what}, naming the recipient if there is one. When they "
-            f"agree, call confirm_browser_action with their reply; that performs "
-            f"it. Do not click or press Enter again yourself."
-        )
-
-    def _page_changed(self) -> None:
-        """Cancel anything approved or waiting, because the context changed."""
-        self._pending = None
+        return reason
 
     @staticmethod
     def _requires_confirmation(target: str) -> bool:
-        risky_words = {
-            "buy",
-            "confirm",
-            "delete",
-            "purchase",
-            "remove",
-            "send",
-            "submit",
-        }
-        return bool(risky_words.intersection(target.casefold().split()))
+        return is_risky_click_target(target)

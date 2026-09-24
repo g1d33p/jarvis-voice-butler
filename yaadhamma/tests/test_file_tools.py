@@ -7,6 +7,7 @@ from livekit.agents.llm import ToolError
 
 import file_tools
 from file_tools import FileTools, check_trashable
+from permissions import ApprovalManager, ApprovalTools
 
 
 def _context_saying(text: str) -> SimpleNamespace:
@@ -59,19 +60,21 @@ def test_paths_outside_home_are_refused(home, tmp_path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_first_call_only_describes_the_item(home, monkeypatch) -> None:
+async def test_first_call_stops_and_asks_with_item_details(home, monkeypatch) -> None:
     monkeypatch.setattr(
         file_tools, "_run_osascript", lambda script: pytest.fail("must not trash yet")
     )
+    approvals = ApprovalManager()
+    tools = FileTools(approvals=approvals)
 
-    result = await FileTools().move_to_trash(
-        None, str(home / "Downloads" / "old-stuff")
-    )
+    with pytest.raises(ToolError, match="needs the user's approval"):
+        await tools.move_to_trash(
+            _context_saying("trash it"), str(home / "Downloads" / "old-stuff")
+        )
 
-    assert result["needs_confirmation"] is True
-    assert result["moved"] is False
-    assert result["kind"] == "folder"
-    assert result["items_inside"] == 1
+    # The question names the item and how much is inside it.
+    assert "old-stuff" in str(approvals.pending.description)
+    assert "1 items inside" in approvals.pending.description
 
 
 @pytest.mark.asyncio
@@ -79,11 +82,17 @@ async def test_unclear_reply_does_not_trash(home, monkeypatch) -> None:
     monkeypatch.setattr(
         file_tools, "_run_osascript", lambda script: pytest.fail("must not trash")
     )
+    approvals = ApprovalManager()
+    tools = FileTools(approvals=approvals)
+    confirm = ApprovalTools(approvals=approvals)
 
-    with pytest.raises(ToolError, match="not a clear yes"):
-        await FileTools().move_to_trash(
-            _context_saying("hmm"), str(home / "Downloads" / "report.pdf"), True
+    with pytest.raises(ToolError, match="needs the user's approval"):
+        await tools.move_to_trash(
+            _context_saying("trash it"), str(home / "Downloads" / "report.pdf")
         )
+    with pytest.raises(ToolError, match="not a clear yes"):
+        await confirm.approve_pending_action(_context_saying("hmm"), "hmm")
+    assert (home / "Downloads" / "report.pdf").exists()
 
 
 @pytest.mark.asyncio
@@ -97,8 +106,13 @@ async def test_confirmed_item_goes_to_trash_via_finder(home, monkeypatch) -> Non
         return subprocess.CompletedProcess([], 0, stdout="", stderr="")
 
     monkeypatch.setattr(file_tools, "_run_osascript", fake_finder)
+    approvals = ApprovalManager()
+    tools = FileTools(approvals=approvals)
+    confirm = ApprovalTools(approvals=approvals)
 
-    result = await FileTools().move_to_trash(_context_saying("yes"), str(target), True)
+    with pytest.raises(ToolError, match="needs the user's approval"):
+        await tools.move_to_trash(_context_saying("trash it"), str(target))
+    result = await confirm.approve_pending_action(_context_saying("yes"), "yes")
 
     assert result["moved"] is True
     assert result["restorable"] is True
@@ -117,7 +131,13 @@ async def test_quotes_in_file_names_are_escaped(home, monkeypatch) -> None:
         return subprocess.CompletedProcess([], 0, stdout="", stderr="")
 
     monkeypatch.setattr(file_tools, "_run_osascript", fake_finder)
-    await FileTools().move_to_trash(_context_saying("yes"), str(target), True)
+    approvals = ApprovalManager()
+    tools = FileTools(approvals=approvals)
+    confirm = ApprovalTools(approvals=approvals)
+
+    with pytest.raises(ToolError, match="needs the user's approval"):
+        await tools.move_to_trash(_context_saying("trash it"), str(target))
+    await confirm.approve_pending_action(_context_saying("yes"), "yes")
 
     assert 'odd \\"name\\".txt' in scripts[0]
 
@@ -129,11 +149,16 @@ async def test_success_is_verified_not_assumed(home, monkeypatch) -> None:
         "_run_osascript",
         lambda script: subprocess.CompletedProcess([], 0, stdout="", stderr=""),
     )
+    approvals = ApprovalManager()
+    tools = FileTools(approvals=approvals)
+    confirm = ApprovalTools(approvals=approvals)
 
-    with pytest.raises(ToolError, match="still there"):
-        await FileTools().move_to_trash(
-            _context_saying("yes"), str(home / "Downloads" / "report.pdf"), True
+    with pytest.raises(ToolError, match="needs the user's approval"):
+        await tools.move_to_trash(
+            _context_saying("trash it"), str(home / "Downloads" / "report.pdf")
         )
+    with pytest.raises(ToolError, match="still there"):
+        await confirm.approve_pending_action(_context_saying("yes"), "yes")
 
 
 def test_no_permanent_delete_tool_exists() -> None:

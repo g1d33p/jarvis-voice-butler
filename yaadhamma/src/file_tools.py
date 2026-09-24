@@ -5,7 +5,7 @@ from pathlib import Path
 from livekit.agents import RunContext, function_tool
 from livekit.agents.llm import ToolError
 
-from tools import _latest_user_text, is_clear_approval
+from permissions import ApprovalManager
 
 # Folders that are never moved to the Trash as a whole, even with approval.
 _PROTECTED_NAMES = {
@@ -94,6 +94,9 @@ def describe_path(target: Path) -> dict[str, object]:
 
 class FileTools:
     """Tools for interacting with files and folders on the Mac."""
+
+    def __init__(self, approvals: ApprovalManager | None = None) -> None:
+        self._approvals = approvals or ApprovalManager()
 
     @property
     def tools(self) -> list:
@@ -364,49 +367,50 @@ class FileTools:
         self,
         context: RunContext,
         path: str,
-        user_confirmed: bool = False,
     ) -> dict[str, object]:
         """Move a file or folder to the macOS Trash, where it can be restored.
 
-        Never deletes permanently. First call with user_confirmed false: the
-        result describes the item. Tell the user exactly what will be moved to
-        the Trash (and how many items a folder contains), ask for confirmation,
-        and only call again with user_confirmed true after a clear yes.
+        Never deletes permanently. If the result says approval is needed, tell
+        the user exactly what will be moved (the question names it), ask for
+        confirmation, and call approve_pending_action with their exact reply.
 
         Args:
             path: Full path of the file or folder, e.g. ~/Downloads/old.pdf.
-            user_confirmed: True only after the user clearly approved this item.
         """
         target = check_trashable(Path(path))
         details = {"path": str(target), **describe_path(target)}
+        description = f"move {target} to the Trash"
+        items_inside = details.get("items_inside")
+        if isinstance(items_inside, int) and items_inside:
+            description += f" ({items_inside} items inside)"
 
-        if not user_confirmed:
-            return {"moved": False, "needs_confirmation": True, **details}
+        async def execute() -> dict[str, object]:
+            safe = str(target).replace("\\", "\\\\").replace('"', '\\"')
+            try:
+                result = _run_osascript(
+                    f'tell application "Finder" to delete POSIX file "{safe}"'
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ToolError("Moving the item to the Trash timed out.") from exc
 
-        heard = _latest_user_text(context)
-        if heard is not None and not is_clear_approval(heard):
-            raise ToolError(
-                "The user's reply was not a clear yes, so nothing was moved. Ask again."
-            )
+            if result.returncode != 0:
+                raise ToolError(
+                    "Finder could not move it to the Trash. If macOS asked for "
+                    "permission to control Finder, allow it and try again. "
+                    f"Details: {result.stderr.strip()}"
+                )
+            if target.exists():
+                raise ToolError("Finder reported success, but the item is still there.")
 
-        safe = str(target).replace("\\", "\\\\").replace('"', '\\"')
-        try:
-            result = _run_osascript(
-                f'tell application "Finder" to delete POSIX file "{safe}"'
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise ToolError("Moving the item to the Trash timed out.") from exc
+            return {"moved": True, "restorable": True, **details}
 
-        if result.returncode != 0:
-            raise ToolError(
-                "Finder could not move it to the Trash. If macOS asked for "
-                "permission to control Finder, allow it and try again. "
-                f"Details: {result.stderr.strip()}"
-            )
-        if target.exists():
-            raise ToolError("Finder reported success, but the item is still there.")
-
-        return {"moved": True, "restorable": True, **details}
+        return await self._approvals.gate(
+            tool_name="move_to_trash",
+            description=description,
+            context=context,
+            execute=execute,
+            args={"path": str(target)},
+        )
 
     @function_tool()
     async def open_path(

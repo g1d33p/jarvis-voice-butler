@@ -597,6 +597,17 @@ def _said(text: str, item_id: str = "u1"):
     )
 
 
+def _browser_and_approvals(chat_browser):
+    """BrowserTools plus ApprovalTools sharing one ApprovalManager."""
+    from permissions import ApprovalManager, ApprovalTools
+
+    approvals = ApprovalManager()
+    return (
+        BrowserTools(chat_browser, approvals=approvals),
+        ApprovalTools(approvals=approvals),
+    )
+
+
 @pytest.mark.asyncio
 async def test_dictated_hi_is_sent_without_asking(chat_browser) -> None:
     tools = BrowserTools(chat_browser)
@@ -683,54 +694,53 @@ async def _send_id(browser):
 async def test_yes_performs_the_waiting_send(chat_browser) -> None:
     from livekit.agents.llm import ToolError
 
-    tools = BrowserTools(chat_browser)
+    tools, confirm = _browser_and_approvals(chat_browser)
     await _typed(tools, chat_browser, "Hope the meeting went well")
     send = "#" + await _send_id(chat_browser)
 
     with pytest.raises(ToolError, match="needs the user's approval"):
         await tools.click(_said("send it to him", "u1"), send)
 
-    result = await tools.confirm_browser_action(_said("Yes.", "u2"), "yes")
+    result = await confirm.approve_pending_action(_said("Yes.", "u2"), "yes")
 
-    assert result["done"] is True
     assert result["sent"] == "Hope the meeting went well"
     # Nothing is left approved afterwards.
     with pytest.raises(ToolError, match="Nothing is waiting"):
-        await tools.confirm_browser_action(_said("yes", "u3"), "yes")
+        await confirm.approve_pending_action(_said("yes", "u3"), "yes")
 
 
 async def test_send_command_counts_as_yes_while_a_message_waits(chat_browser) -> None:
     """Live run: 'What are you waiting for? Send a message.' was rejected."""
     from livekit.agents.llm import ToolError
 
-    tools = BrowserTools(chat_browser)
+    tools, confirm = _browser_and_approvals(chat_browser)
     await _typed(tools, chat_browser, "Good morning! Hope you have a brilliant day.")
     with pytest.raises(ToolError):
         await tools.press_key(_said("type it", "u1"), "Enter")
 
-    result = await tools.confirm_browser_action(
+    result = await confirm.approve_pending_action(
         _said("What are you waiting for? Send a message.", "u2"), "send it already"
     )
-    assert result["done"] is True
+    assert result["sent"] is True
 
 
 async def test_garbled_or_negative_replies_do_not_send(chat_browser) -> None:
     from livekit.agents.llm import ToolError
 
-    tools = BrowserTools(chat_browser)
+    tools, confirm = _browser_and_approvals(chat_browser)
     await _typed(tools, chat_browser, "Call me later")
     with pytest.raises(ToolError):
         await tools.press_key(_said("type call me later", "u1"), "Enter")
 
     for reply in ("Est-ce que", "ready", "don't send that"):
         with pytest.raises(ToolError):
-            await tools.confirm_browser_action(_said(reply, "u2"), "yes")
+            await confirm.approve_pending_action(_said(reply, "u2"), "yes")
 
 
 async def test_message_edited_after_the_question_is_not_sent(chat_browser) -> None:
     from livekit.agents.llm import ToolError
 
-    tools = BrowserTools(chat_browser)
+    tools, confirm = _browser_and_approvals(chat_browser)
     await _typed(tools, chat_browser, "See you at six")
     with pytest.raises(ToolError):
         await tools.press_key(_said("type see you at six", "u1"), "Enter")
@@ -738,13 +748,13 @@ async def test_message_edited_after_the_question_is_not_sent(chat_browser) -> No
     # The text changes behind the user's back (typing clears the pending send).
     await _typed(tools, chat_browser, "See you at seven")
     with pytest.raises(ToolError, match="Nothing is waiting"):
-        await tools.confirm_browser_action(_said("yes", "u2"), "yes")
+        await confirm.approve_pending_action(_said("yes", "u2"), "yes")
 
 
 async def test_switching_chats_cancels_a_waiting_send(chat_browser) -> None:
     from livekit.agents.llm import ToolError
 
-    tools = BrowserTools(chat_browser)
+    tools, confirm = _browser_and_approvals(chat_browser)
     await _typed(tools, chat_browser, "Running late, sorry")
     with pytest.raises(ToolError):
         await tools.press_key(_said("type running late", "u1"), "Enter")
@@ -753,40 +763,40 @@ async def test_switching_chats_cancels_a_waiting_send(chat_browser) -> None:
     await tools.click(None, other_chat["id"])
 
     with pytest.raises(ToolError, match="Nothing is waiting"):
-        await tools.confirm_browser_action(_said("yes", "u2"), "yes")
+        await confirm.approve_pending_action(_said("yes", "u2"), "yes")
 
 
 async def test_waiting_send_expires(chat_browser, monkeypatch) -> None:
     from livekit.agents.llm import ToolError
 
-    import tools as tools_module
+    import permissions as permissions_module
 
-    tools = BrowserTools(chat_browser)
+    tools, confirm = _browser_and_approvals(chat_browser)
     await _typed(tools, chat_browser, "Call me")
     with pytest.raises(ToolError):
         await tools.press_key(_said("type call me", "u1"), "Enter")
 
-    real = tools_module.time.monotonic
+    real = permissions_module.time.monotonic
     monkeypatch.setattr(
-        tools_module.time,
+        permissions_module.time,
         "monotonic",
-        lambda: real() + tools_module.APPROVAL_TTL_SECONDS + 1,
+        lambda: real() + permissions_module.APPROVAL_TTL_SECONDS + 1,
     )
     with pytest.raises(ToolError, match="Nothing is waiting"):
-        await tools.confirm_browser_action(_said("yes", "u2"), "yes")
+        await confirm.approve_pending_action(_said("yes", "u2"), "yes")
 
 
 async def test_approval_judges_the_real_transcript(chat_browser) -> None:
     """The user said 'research'; the model claims they said 'yes'."""
     from livekit.agents.llm import ToolError
 
-    tools = BrowserTools(chat_browser)
+    tools, confirm = _browser_and_approvals(chat_browser)
     await _typed(tools, chat_browser, "Meeting moved")
     with pytest.raises(ToolError):
         await tools.press_key(_said("type meeting moved", "u1"), "Enter")
 
     with pytest.raises(ToolError, match="not a clear yes"):
-        await tools.confirm_browser_action(_said("research", "u2"), "yes")
+        await confirm.approve_pending_action(_said("research", "u2"), "yes")
 
 
 async def test_click_reports_what_was_clicked(chat_browser) -> None:
@@ -982,30 +992,30 @@ async def test_unclear_reply_keeps_the_send_waiting(chat_browser) -> None:
     """Live: echo "Very well." wiped the pending send, forcing a third question."""
     from livekit.agents.llm import ToolError
 
-    tools = BrowserTools(chat_browser)
+    tools, confirm = _browser_and_approvals(chat_browser)
     await _typed(tools, chat_browser, "Running late")
     with pytest.raises(ToolError):
         await tools.press_key(_said("type running late", "u1"), "Enter")
 
     with pytest.raises(ToolError, match="still waiting"):
-        await tools.confirm_browser_action(_said("Very well.", "u2"), "very well")
+        await confirm.approve_pending_action(_said("Very well.", "u2"), "very well")
 
-    result = await tools.confirm_browser_action(_said("Yes.", "u3"), "yes")
-    assert result["done"] is True
+    result = await confirm.approve_pending_action(_said("Yes.", "u3"), "yes")
+    assert result["sent"] is True
 
 
 async def test_no_cancels_the_waiting_send(chat_browser) -> None:
     from livekit.agents.llm import ToolError
 
-    tools = BrowserTools(chat_browser)
+    tools, confirm = _browser_and_approvals(chat_browser)
     await _typed(tools, chat_browser, "Running late")
     with pytest.raises(ToolError):
         await tools.press_key(_said("type running late", "u1"), "Enter")
 
     with pytest.raises(ToolError, match="said no"):
-        await tools.confirm_browser_action(_said("No, don't.", "u2"), "no")
+        await confirm.approve_pending_action(_said("No, don't.", "u2"), "no")
     with pytest.raises(ToolError, match="Nothing is waiting"):
-        await tools.confirm_browser_action(_said("yes", "u3"), "yes")
+        await confirm.approve_pending_action(_said("yes", "u3"), "yes")
 
 
 async def test_enter_in_search_box_says_nothing_was_sent(chat_browser) -> None:

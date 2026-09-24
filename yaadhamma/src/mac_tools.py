@@ -5,6 +5,8 @@ from pathlib import Path
 from livekit.agents import RunContext, function_tool
 from livekit.agents.llm import ToolError
 
+from permissions import ApprovalManager
+
 # Screenshots the user asks for are theirs, so they go somewhere visible and
 # are never deleted automatically.
 SCREENSHOT_DIR = Path.home() / "Documents" / "Yaadhamma" / "Screenshots"
@@ -41,6 +43,9 @@ def _run(
 
 class MacTools:
     """Tools for interacting with native macOS applications."""
+
+    def __init__(self, approvals: ApprovalManager | None = None) -> None:
+        self._approvals = approvals or ApprovalManager()
 
     @property
     def tools(self) -> list:
@@ -117,7 +122,15 @@ class MacTools:
         context: RunContext,
         application: str,
     ) -> str:
-        """Quit a native macOS application."""
+        """Quit a native macOS application.
+
+        Quitting can lose unsaved work, so this needs the user's approval: if
+        the result says approval is needed, ask, then call
+        approve_pending_action with their exact reply.
+
+        Args:
+            application: The application's name, e.g. "Google Chrome".
+        """
 
         application = application.strip()
 
@@ -126,25 +139,36 @@ class MacTools:
 
         safe_application = application.replace('"', '\\"')
 
-        try:
-            result = subprocess.run(
-                [
-                    "osascript",
-                    "-e",
-                    f'tell application "{safe_application}" to quit',
-                ],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise ToolError(f"Quitting {application!r} timed out.") from exc
+        async def execute() -> str:
+            try:
+                result = subprocess.run(
+                    [
+                        "osascript",
+                        "-e",
+                        f'tell application "{safe_application}" to quit',
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise ToolError(f"Quitting {application!r} timed out.") from exc
 
-        if result.returncode != 0:
-            error = result.stderr.strip() or ("macOS could not quit the application.")
-            raise ToolError(f"Could not quit {application!r}: {error}")
+            if result.returncode != 0:
+                error = result.stderr.strip() or (
+                    "macOS could not quit the application."
+                )
+                raise ToolError(f"Could not quit {application!r}: {error}")
 
-        return f"Quit {application!r}."
+            return f"Quit {application!r}."
+
+        return await self._approvals.gate(
+            tool_name="quit_application",
+            description=f"quit {application}",
+            context=context,
+            execute=execute,
+            args={"application": application},
+        )
 
     @function_tool()
     async def read_clipboard(self, context: RunContext) -> dict[str, object]:

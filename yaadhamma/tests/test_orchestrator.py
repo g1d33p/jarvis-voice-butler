@@ -21,6 +21,7 @@ from orchestrator import (
     _shrink_old_results,
     voice_tools,
 )
+from permissions import ApprovalManager, ApprovalTools
 from task_manager import Task, TaskStore
 from tools import BrowserTools
 
@@ -322,10 +323,14 @@ def test_voice_keeps_only_quick_tools() -> None:
 
 
 def test_registry_describes_every_tool_to_the_model() -> None:
-    registry = ActionRegistry(BrowserTools(BrowserManager(headless=True)))
+    approvals = ApprovalManager()
+    registry = ActionRegistry(
+        BrowserTools(BrowserManager(headless=True), approvals=approvals),
+        ApprovalTools(approvals=approvals),
+    )
     declared = {declaration.name for declaration in registry.declarations()}
 
-    assert {"inspect_page", "click", "type_text", "confirm_browser_action"} <= declared
+    assert {"inspect_page", "click", "type_text", "approve_pending_action"} <= declared
 
 
 async def test_task_tools_return_a_short_summary(tmp_path) -> None:
@@ -377,7 +382,8 @@ async def chat_page(tmp_path):
 
 
 async def test_end_to_end_dictated_message_is_sent(chat_page, tmp_path) -> None:
-    tools = BrowserTools(chat_page)
+    approvals = ApprovalManager()
+    tools = BrowserTools(chat_page, approvals=approvals)
     model = FakeModel(
         turn(call("inspect_page")),
         turn(call("type_text", target="Type a message", text="Hi")),
@@ -385,7 +391,9 @@ async def test_end_to_end_dictated_message_is_sent(chat_page, tmp_path) -> None:
         turn(text="Sent 'Hi'."),
     )
     orchestrator = Orchestrator(
-        registry=ActionRegistry(tools), store=TaskStore(tmp_path / "t.db"), client=model
+        registry=ActionRegistry(tools, ApprovalTools(approvals=approvals)),
+        store=TaskStore(tmp_path / "t.db"),
+        client=model,
     )
 
     task = await orchestrator.start(
@@ -398,7 +406,8 @@ async def test_end_to_end_dictated_message_is_sent(chat_page, tmp_path) -> None:
 
 
 async def test_end_to_end_composed_message_asks_then_sends(chat_page, tmp_path) -> None:
-    tools = BrowserTools(chat_page)
+    approvals = ApprovalManager()
+    tools = BrowserTools(chat_page, approvals=approvals)
     context = _history("Send him a friendly note about the meeting")
     model = FakeModel(
         turn(
@@ -408,11 +417,13 @@ async def test_end_to_end_composed_message_asks_then_sends(chat_page, tmp_path) 
         ),
         turn(call("press_key", key="Enter")),  # blocked: needs approval
         turn(text="QUESTION: Send 'Hope the meeting went well'?"),
-        turn(call("confirm_browser_action", user_reply="yes")),
+        turn(call("approve_pending_action", user_reply="yes")),
         turn(text="Sent."),
     )
     orchestrator = Orchestrator(
-        registry=ActionRegistry(tools), store=TaskStore(tmp_path / "t.db"), client=model
+        registry=ActionRegistry(tools, ApprovalTools(approvals=approvals)),
+        store=TaskStore(tmp_path / "t.db"),
+        client=model,
     )
 
     task = await orchestrator.start("send a friendly note", context=context)
@@ -428,4 +439,4 @@ async def test_end_to_end_composed_message_asks_then_sends(chat_page, tmp_path) 
     task = await orchestrator.resume(task.id, "Yes.", context)
 
     assert task.state == "completed"
-    assert task.steps[-1].action == "confirm_browser_action" and task.steps[-1].ok
+    assert task.steps[-1].action == "approve_pending_action" and task.steps[-1].ok

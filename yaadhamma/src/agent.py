@@ -10,7 +10,6 @@ from livekit.agents import (
     JobContext,
     TurnHandlingOptions,
     cli,
-    inference,
     room_io,
 )
 from livekit.agents.beta.tools import EndCallTool
@@ -19,6 +18,7 @@ from livekit.plugins import openai as lk_openai
 
 import config
 from actions import ActionRegistry
+from audit import AuditLog
 from browser import BrowserManager
 from file_tools import FileTools
 from mac_tools import MacTools
@@ -30,7 +30,9 @@ from meta_client import (
 )
 from observation import ObservationTools
 from orchestrator import Orchestrator, TaskTools, voice_tools
+from permissions import ApprovalManager, ApprovalTools
 from prompts import AGENT_INSTRUCTIONS, VOICE_INSTRUCTIONS
+from pronunciation import PronunciationTTS
 from task_manager import TaskStore
 from tools import BrowserTools
 
@@ -68,7 +70,9 @@ def voice_components():
             model=cfg.voice_model, client=client, _strict_tool_schema=False
         )
         stt = MetaRealtimeSTT(cfg)
-        tts = inference.TTS(model=cfg.tts_model, voice=cfg.tts_voice)
+        # PronunciationTTS respells words the model mispronounces
+        # ("Yaadhamma" -> "Yaah-dh-um-ah") just before synthesis.
+        tts = PronunciationTTS(model=cfg.tts_model, voice=cfg.tts_voice)
         return llm, stt, tts, "pipeline"
     if cfg.voice_mode != "realtime":
         logger.warning(
@@ -99,14 +103,21 @@ class Assistant(Agent):
             voice_components()
         )
         self.browser = browser or BrowserManager(headless=True)
-        self.browser_tools = BrowserTools(self.browser)
-        self.mac_tools = MacTools()
-        self.file_tools = FileTools()
+        # One approval manager and one audit log shared by every toolset, so
+        # an approval asked for in one path can be answered in any other, and
+        # every consequential action is recorded in one place.
+        self.audit_log = AuditLog()
+        self.approvals = ApprovalManager(audit=self.audit_log)
+        self.browser_tools = BrowserTools(self.browser, approvals=self.approvals)
+        self.mac_tools = MacTools(approvals=self.approvals)
+        self.file_tools = FileTools(approvals=self.approvals)
+        self.approval_tools = ApprovalTools(approvals=self.approvals)
         self.observation_tools = ObservationTools(self.browser)
         toolsets = (
             self.browser_tools,
             self.mac_tools,
             self.file_tools,
+            self.approval_tools,
             self.observation_tools,
         )
         self._end_call_tool = EndCallTool(
