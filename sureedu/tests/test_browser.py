@@ -727,27 +727,6 @@ async def test_garbled_or_negative_replies_do_not_send(chat_browser) -> None:
             await tools.confirm_browser_action(_said(reply, "u2"), "yes")
 
 
-async def test_approved_draft_sends_without_a_second_question(chat_browser) -> None:
-    """Live run: the user approved the wording, then had to confirm 3 more times."""
-    tools = BrowserTools(chat_browser)
-    draft = "Good morning! Hope you have a brilliant day."
-
-    await tools.approve_draft(_said("That works, go ahead.", "u1"), draft, "that works")
-    await _typed(tools, chat_browser, draft)
-    await tools.press_key(_said("That works, go ahead.", "u1"), "Enter")  # sends
-
-
-async def test_approved_draft_does_not_cover_different_text(chat_browser) -> None:
-    from livekit.agents.llm import ToolError
-
-    tools = BrowserTools(chat_browser)
-    await tools.approve_draft(_said("yes", "u1"), "Good morning!", "yes")
-    await _typed(tools, chat_browser, "Good morning! Also, I quit.")
-
-    with pytest.raises(ToolError, match="needs the user's approval"):
-        await tools.press_key(_said("yes", "u1"), "Enter")
-
-
 async def test_message_edited_after_the_question_is_not_sent(chat_browser) -> None:
     from livekit.agents.llm import ToolError
 
@@ -870,3 +849,184 @@ async def test_snapshot_describes_tabs(tab_browser) -> None:
 
     assert snap["tab_count"] == 2
     assert snap["active_tab"]["title"] == "Page Two"
+
+
+# ----------------------------------------------------------------------
+# Replays of the Phase 2 live test (24 Sep 2026, 02:58)
+# ----------------------------------------------------------------------
+
+
+def _conversation(*turns, age_seconds: float = 0):
+    """Build a fake session history from (role, text) pairs, oldest first."""
+    import time
+    from types import SimpleNamespace
+
+    items = [
+        SimpleNamespace(
+            type="message",
+            role=role,
+            text_content=text,
+            id=f"m{i}",
+            created_at=time.time() - age_seconds,
+        )
+        for i, (role, text) in enumerate(turns)
+    ]
+    return SimpleNamespace(
+        session=SimpleNamespace(history=SimpleNamespace(items=items))
+    )
+
+
+async def test_two_tools_at_once_launch_the_browser_only_once(tmp_path) -> None:
+    """Live bug: open_url and open_tab together crashed ("profile already in use")."""
+    import asyncio
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _TabPageHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    manager = BrowserManager(headless=True, profile_dir=tmp_path / "profile")
+    base = f"http://127.0.0.1:{server.server_port}"
+    try:
+        await asyncio.gather(
+            manager.open_url(f"{base}/one"), manager.open_tab(f"{base}/two")
+        )
+        assert (await manager.list_tabs())["tab_count"] >= 2
+    finally:
+        await manager.close()
+        server.shutdown()
+        thread.join(timeout=2)
+
+
+async def test_proposed_draft_plus_that_works_sends_without_asking(
+    chat_browser,
+) -> None:
+    """Live: 'How about: "Rise and shine! ..."' -> 'Oh, that works, indeed.'"""
+    draft = "Rise and shine! Wishing you a peaceful and productive day."
+    context = _conversation(
+        ("user", "Suggest a soothing good morning message."),
+        ("assistant", f'How about: "{draft}" Too cliche?'),
+        ("user", "Oh, that works, indeed."),
+    )
+    tools = BrowserTools(chat_browser)
+    await _typed(tools, chat_browser, draft)
+
+    result = await tools.press_key(context, "Enter")
+
+    assert result["sent"] is True
+
+
+async def test_draft_approval_does_not_cover_different_text(chat_browser) -> None:
+    from livekit.agents.llm import ToolError
+
+    context = _conversation(
+        ("assistant", 'How about: "Good morning!"?'),
+        ("user", "Yes."),
+    )
+    tools = BrowserTools(chat_browser)
+    await _typed(tools, chat_browser, "Good morning! Also, I quit.")
+
+    with pytest.raises(ToolError, match="needs the user's approval"):
+        await tools.press_key(context, "Enter")
+
+
+async def test_old_draft_approval_expires(chat_browser) -> None:
+    from livekit.agents.llm import ToolError
+
+    context = _conversation(
+        ("assistant", 'How about: "Morning all"?'),
+        ("user", "Sure."),
+        ("user", "Open the other chat."),
+        age_seconds=600,
+    )
+    tools = BrowserTools(chat_browser)
+    await _typed(tools, chat_browser, "Morning all")
+
+    with pytest.raises(ToolError, match="needs the user's approval"):
+        await tools.press_key(context, "Enter")
+
+
+async def test_yes_to_a_send_question_counts_once(chat_browser) -> None:
+    """Live: 'Shall I try sending it again?' -> 'Yes, please.' then Enter."""
+    from livekit.agents.llm import ToolError
+
+    context = _conversation(
+        ("assistant", "It still looks like a draft. Shall I try sending it again?"),
+        ("user", "Yes, please."),
+    )
+    tools = BrowserTools(chat_browser)
+    await _typed(tools, chat_browser, "Call you later")
+
+    assert (await tools.press_key(context, "Enter"))["sent"] is True
+
+    await _typed(tools, chat_browser, "Call you later")
+    with pytest.raises(ToolError, match="needs the user's approval"):
+        await tools.press_key(context, "Enter")  # the same yes is used up
+
+
+async def test_yes_to_a_question_about_a_different_message_does_not_count(
+    chat_browser,
+) -> None:
+    from livekit.agents.llm import ToolError
+
+    context = _conversation(
+        ("assistant", "Shall I send 'See you at six'?"),
+        ("user", "Yes."),
+    )
+    tools = BrowserTools(chat_browser)
+    await _typed(tools, chat_browser, "See you at seven")
+
+    with pytest.raises(ToolError, match="needs the user's approval"):
+        await tools.press_key(context, "Enter")
+
+
+async def test_unclear_reply_keeps_the_send_waiting(chat_browser) -> None:
+    """Live: echo "Very well." wiped the pending send, forcing a third question."""
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(chat_browser)
+    await _typed(tools, chat_browser, "Running late")
+    with pytest.raises(ToolError):
+        await tools.press_key(_said("type running late", "u1"), "Enter")
+
+    with pytest.raises(ToolError, match="still waiting"):
+        await tools.confirm_browser_action(_said("Very well.", "u2"), "very well")
+
+    result = await tools.confirm_browser_action(_said("Yes.", "u3"), "yes")
+    assert result["done"] is True
+
+
+async def test_no_cancels_the_waiting_send(chat_browser) -> None:
+    from livekit.agents.llm import ToolError
+
+    tools = BrowserTools(chat_browser)
+    await _typed(tools, chat_browser, "Running late")
+    with pytest.raises(ToolError):
+        await tools.press_key(_said("type running late", "u1"), "Enter")
+
+    with pytest.raises(ToolError, match="said no"):
+        await tools.confirm_browser_action(_said("No, don't.", "u2"), "no")
+    with pytest.raises(ToolError, match="Nothing is waiting"):
+        await tools.confirm_browser_action(_said("yes", "u3"), "yes")
+
+
+async def test_enter_in_search_box_says_nothing_was_sent(chat_browser) -> None:
+    """Live: Enter in the search box was reported as 'message sent'."""
+    tools = BrowserTools(chat_browser)
+    page = await chat_browser._get_page()
+    await page.set_content(
+        "<input aria-label='Search or start a new chat'>"
+        "<div contenteditable='true' aria-label='Type a message'></div>"
+    )
+    search = _find((await chat_browser.inspect_page())["elements"], "Search")
+
+    typed = await tools.type_text(None, search["id"], "Rise and shine")
+    assert "search box" in typed["warning"]
+
+    result = await tools.press_key(None, "Enter")
+    assert result["sent"] is False
+    assert "Nothing was sent" in result["effect"]
+
+
+def test_page_screenshot_tool_is_gone() -> None:
+    ids = [tool.id for tool in BrowserTools(BrowserManager(headless=True)).tools]
+    assert "take_screenshot" not in ids  # it never saved a file; capture_screen does
+    assert "approve_draft" not in ids

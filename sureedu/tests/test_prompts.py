@@ -63,7 +63,7 @@ def test_greeting_is_brief() -> None:
 
 def test_approval_flow_is_described() -> None:
     assert "It performs the waiting action itself" in AGENT_INSTRUCTIONS
-    assert "call approve_draft" in AGENT_INSTRUCTIONS
+    assert "The system recognises their spoken yes" in AGENT_INSTRUCTIONS
 
 
 def test_observation_tool_is_explained() -> None:

@@ -102,6 +102,14 @@ _INSPECT_SCRIPT = r"""elements => {
   return results;
 }"""
 
+_IS_SEARCH_SCRIPT = """el => {
+  const hints = ((el.getAttribute('aria-label') || '') + ' ' +
+    (el.getAttribute('placeholder') || '') + ' ' +
+    (el.getAttribute('title') || '')).toLowerCase();
+  return (el.getAttribute('type') || '') === 'search' ||
+    (el.getAttribute('role') || '') === 'searchbox' || hints.includes('search');
+}"""
+
 # Finds the text currently typed into a message box (not a search box).
 _PENDING_MESSAGE_SCRIPT = """() => {
   const isSearch = el => {
@@ -224,17 +232,33 @@ class BrowserManager:
         self._context = None
         self._page: Page | None = None
         self._lock = asyncio.Lock()
+        # Separate lock so two tools called at once cannot both launch the
+        # browser (the second launch fails: "profile is already in use").
+        self._start_lock = asyncio.Lock()
 
     async def start(self) -> None:
-        if self._context is not None:
-            return
+        async with self._start_lock:
+            if self._context is not None:
+                return
+            await self._launch()
 
+    async def _launch(self) -> None:
         self._playwright = await async_playwright().start()
-
-        self._context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=str(self._profile_dir),
-            headless=self._headless,
-        )
+        try:
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                user_data_dir=str(self._profile_dir),
+                headless=self._headless,
+            )
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                await self._playwright.stop()
+            self._playwright = None
+            if "already in use" in str(exc) or "existing browser session" in str(exc):
+                raise BrowserError(
+                    "Sureedu's browser profile is in use by another Sureedu window. "
+                    "Close that window (or the other Sureedu session) and try again."
+                ) from exc
+            raise BrowserError(f"The browser could not start: {exc}") from exc
 
         self._browser = self._context.browser
         # Tabs opened by the page itself (e.g. a link with target="_blank")
@@ -412,7 +436,17 @@ class BrowserManager:
 
             # Report which field was actually filled, so the assistant can tell
             # the user accurately (e.g. "the search box", not "the message box").
-            return {"target": target, "typed_into": field, "url": page.url}
+            result = {"target": target, "typed_into": field, "url": page.url}
+            try:
+                is_search = await locator.evaluate(_IS_SEARCH_SCRIPT)
+            except Exception:
+                is_search = False
+            if is_search:
+                result["warning"] = (
+                    "This is a search box, not a message box. If you meant to "
+                    "write a message, clear this and type into the message box."
+                )
+            return result
 
     async def scroll(self, direction: Literal["up", "down"]) -> dict[str, str]:
         if direction not in {"up", "down"}:

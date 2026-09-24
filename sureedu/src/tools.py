@@ -11,8 +11,6 @@ from policy import can_send_without_asking
 
 # How long a blocked action waits for the user's yes.
 APPROVAL_TTL_SECONDS = 60
-# How long an approved draft message stays valid while it is typed and sent.
-DRAFT_TTL_SECONDS = 120
 
 _AFFIRMATIVE = {
     "yes",
@@ -109,6 +107,73 @@ def _latest_user_message(context: object) -> tuple[str, str] | None:
     return None
 
 
+def _messages(context: object) -> list:
+    """The conversation so far as chat messages, oldest first (empty if unknown)."""
+    try:
+        return [
+            item
+            for item in context.session.history.items  # type: ignore[attr-defined]
+            if getattr(item, "type", "") == "message"
+        ]
+    except Exception:
+        return []
+
+
+# Text in quotation marks, e.g. 'hi' or "hi" or \u201chi\u201d. The opening quote
+# must start a word, so apostrophes as in "it's" or "I'll" are not quotes.
+_QUOTED = re.compile(
+    '(?:^|[\\s:(])["\'\u201c\u2018]([^"\u201d\u2019]{3,}?)["\'\u201d\u2019](?=[\\s.,!?)]|$)'
+)
+
+# How long a spoken yes to a proposed draft stays usable.
+SPOKEN_DRAFT_APPROVAL_SECONDS = 300
+
+
+def spoken_approval(
+    context: object, message: str, label: str
+) -> tuple[bool, str | None]:
+    """Did the user already approve this exact action in conversation?
+
+    Two cases count, both judged on the real transcript:
+    - Sureedu's latest question named the action (for example "Shall I send
+      it?") and the user's reply right after it is a clear yes.
+    - Sureedu proposed this exact message text, and the user's very next
+      reply was a clear yes (for example "That works"), within five minutes.
+    Returns (approved, id of the approving user message).
+    """
+    messages = _messages(context)
+    wanted = _normalize_message(message) if message else ""
+    action_word = "send" if message else label.casefold().strip()
+
+    for index in range(len(messages) - 1, 0, -1):
+        reply, question = messages[index], messages[index - 1]
+        if reply.role != "user" or question.role != "assistant":
+            continue
+        said = reply.text_content or ""
+        asked = (question.text_content or "").casefold()
+        if not is_clear_approval(said, sending=bool(message)):
+            continue
+        is_latest_reply = all(m.role != "user" for m in messages[index + 1 :])
+        quotes = [_normalize_message(q) for q in _QUOTED.findall(asked)]
+        # If the question quoted a message, it must be this one.
+        matches_quote = not quotes or any(wanted and wanted in q for q in quotes)
+        if (
+            is_latest_reply
+            and "?" in asked
+            and action_word
+            and action_word in asked
+            and matches_quote
+        ):
+            return True, str(reply.id)
+        quoted = wanted and wanted in _normalize_message(asked)
+        fresh = time.time() - getattr(reply, "created_at", 0) <= (
+            SPOKEN_DRAFT_APPROVAL_SECONDS
+        )
+        if quoted and fresh:
+            return True, str(reply.id)
+    return False, None
+
+
 def _latest_user_text(context: object) -> str | None:
     """Return the most recent thing the user actually said, if available."""
     latest = _latest_user_message(context)
@@ -128,12 +193,11 @@ class BrowserTools:
         # The consequential action waiting for the user's yes. confirming it
         # performs it; anything that changes the page cancels it.
         self._pending: PendingAction | None = None
-        # A drafted message the user approved before it was typed:
-        # (normalized text, expiry time).
-        self._approved_draft: tuple[str, float] | None = None
         # The user utterance that already sent a message without asking, so one
         # instruction can never send more than one message.
         self._auto_sent_for: str | None = None
+        # Spoken approvals already used, so one yes never sends twice.
+        self._used_approvals: set[str] = set()
 
     @property
     def tools(self) -> list:
@@ -143,10 +207,8 @@ class BrowserTools:
             self.read_page,
             self.inspect_page,
             self.go_back,
-            self.take_screenshot,
             self.click,
             self.confirm_browser_action,
-            self.approve_draft,
             self.type_text,
             self.scroll,
             self.press_key,
@@ -278,18 +340,26 @@ class BrowserTools:
         Args:
             user_reply: The user's exact words in reply to your question.
         """
-        pending, self._pending = self._pending, None
+        pending = self._pending
         if pending is None or time.monotonic() > pending.expires_at:
+            self._pending = None
             raise ToolError(
                 "Nothing is waiting for approval any more. Try the action again; "
                 "it will say whether approval is needed."
             )
         heard = _latest_user_text(context) or user_reply
         if not is_clear_approval(heard, sending=bool(pending.message)):
+            if re.search(
+                r"\b(no|nope|don't|dont|cancel|stop|vaddu)\b", heard.casefold()
+            ):
+                self._pending = None
+                raise ToolError("The user said no. Nothing was sent; drop it.")
+            # Unclear (noise, echo, "very well"): keep it waiting and ask again.
             raise ToolError(
-                "That reply is not a clear yes, so nothing was done. Ask the user "
-                "again."
+                "That reply is not a clear yes, so nothing was done yet. The action "
+                "is still waiting: ask again briefly, then call this again."
             )
+        self._pending = None
         if pending.message:
             current = await self.browser.pending_message_text()
             if _normalize_message(current) != _normalize_message(pending.message):
@@ -311,30 +381,6 @@ class BrowserTools:
             "sent": pending.message,
             **result,
         }
-
-    @function_tool()
-    async def approve_draft(
-        self, context: RunContext, message: str, user_reply: str
-    ) -> str:
-        """Record that the user approved a message you drafted for them.
-
-        Use this when you proposed the wording and the user agreed ("that works",
-        "yes, send that"). Then type exactly that text and send it; it will go
-        through without asking a second time. Any different text still needs
-        approval.
-
-        Args:
-            message: The exact message text the user approved.
-            user_reply: The user's exact words agreeing to it.
-        """
-        heard = _latest_user_text(context) or user_reply
-        if not is_clear_approval(heard, sending=True):
-            raise ToolError("That reply is not a clear yes. Nothing was approved.")
-        self._approved_draft = (
-            _normalize_message(message),
-            time.monotonic() + DRAFT_TTL_SECONDS,
-        )
-        return "Approved. Type exactly this text, then send it."
 
     @function_tool()
     async def type_text(
@@ -400,9 +446,18 @@ class BrowserTools:
             self._page_changed()
 
         try:
-            return await self.browser.press_key(key)
+            result = await self.browser.press_key(key)
         except BrowserError as exc:
             raise ToolError(str(exc)) from exc
+        if key == "Enter":
+            if consequential:
+                result["effect"] = f"Enter sent or submitted it ({label or 'form'})."
+                result["sent"] = True
+            else:
+                where = label or "the page"
+                result["effect"] = f"Enter pressed in {where}. Nothing was sent."
+                result["sent"] = False
+        return result
 
     @function_tool()
     async def list_tabs(self, context: RunContext) -> dict[str, object]:
@@ -523,16 +578,13 @@ class BrowserTools:
         self, context: object, kind: str, target: str, label: str, message: str
     ) -> None:
         """Allow a consequential action, or stop it and ask the user first."""
-        if message:
-            draft, self._approved_draft = self._approved_draft, None
-            if (
-                draft is not None
-                and time.monotonic() <= draft[1]
-                and _normalize_message(message) == draft[0]
-            ):
-                return
-            if await self._may_send_without_asking(context, message):
-                return
+        if message and await self._may_send_without_asking(context, message):
+            return
+
+        approved, approval_id = spoken_approval(context, message, label)
+        if approved and approval_id not in self._used_approvals:
+            self._used_approvals.add(approval_id)
+            return
 
         self._pending = PendingAction(
             kind=kind,
@@ -552,7 +604,6 @@ class BrowserTools:
     def _page_changed(self) -> None:
         """Cancel anything approved or waiting, because the context changed."""
         self._pending = None
-        self._approved_draft = None
 
     @staticmethod
     def _requires_confirmation(target: str) -> bool:
