@@ -33,3 +33,9 @@ build/
 
 # Logs
 *.log
+
+# Sureedu local state (never commit: may contain cookies/sessions)
+.sureedu/
+*.db
+*.db-journal
+screenshots/

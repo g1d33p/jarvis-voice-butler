@@ -1,154 +1,91 @@
-# Jarvis - Voice AI Butler
+# Sureedu — Voice-Driven Personal Assistant for macOS
 
-A voice-controlled AI butler built on the **LiveKit Agents** framework. Speak to Jarvis, and it responds with a sarcastic British-butler persona while having full control over a real web browser — browsing, searching, clicking, typing, and completing tasks on your behalf.
+Sureedu is a local-first, voice-driven AI personal assistant for macOS, built on the
+**LiveKit Agents** framework. Speak to Sureedu and it replies as a concise,
+slightly sarcastic British-English butler while controlling a real browser,
+native Mac applications, and your files — asking for approval before anything
+consequential.
 
-## Features
+Sureedu began as a customization of an open-source voice-butler starter project.
 
-- **Voice Conversations** — Real-time voice I/O powered by LiveKit with adaptive interruptions and preemptive generation
-- **Gemini 3.1 Flash Live** — Uses Google's realtime model with a British English voice ("Enceladus")
-- **Browser Control** — Full Playwright-powered Chromium automation with 11 tools:
-  - `open_url` / `search_the_web` / `read_page` / `inspect_page`
-  - `go_back` / `take_screenshot`
-  - `click` / `type_text` / `scroll` / `press_key`
-  - `confirm_browser_action` (safety gate for consequential actions)
-- **Video Input** — Camera support for the agent to "see" you
-- **Butler Persona** — Sarcastic British-butler personality with hardcoded easter eggs
-- **Multi-Client Support** — React web frontend, Flutter mobile app, and console mode
-- **Animated HUD Background** — Custom circuit-board/particle SVG animation in the web UI
+## Current capabilities
 
-## Project Structure
+- **Voice conversation** — real-time voice via LiveKit and Google Gemini Live
+  (`gemini-3.1-flash-live-preview`, British English voice). Understands English,
+  Telugu, and mixed speech; replies in English.
+- **Browser control** — a dedicated, persistent Playwright Chromium profile
+  (`~/.sureedu/chrome-profile`) that keeps logged-in sessions such as WhatsApp Web.
+  Tools: `open_url`, `search_the_web`, `read_page`, `inspect_page`, `go_back`,
+  `take_screenshot`, `click`, `type_text`, `scroll`, `press_key`,
+  `confirm_browser_action`.
+- **macOS application control** — `list_running_apps`, `open_application`,
+  `quit_application`.
+- **Filesystem control** — `get_home_directory`, `list_directory`, `search_files`,
+  `inspect_path`, `create_folder`, `create_file`, `rename_path`, `move_path`,
+  `copy_path`. There is deliberately no permanent-delete tool.
+- **Clients** — console mode, a Next.js web frontend, and a Flutter app.
+
+Audio only: camera and screen-share input are disabled.
+
+## Project structure
 
 ```
-jarvis_updated_test/
+jarvis-voice-butler/
 ├── jarvis_new/                 # Main project
 │   ├── src/
 │   │   ├── agent.py            # Entrypoint — AgentServer, Assistant class
 │   │   ├── browser.py          # BrowserManager (Playwright Chromium)
-│   │   ├── tools.py            # 11 browser function tools
-│   │   ├── prompts.py          # System prompts and instructions
-│   │   └── __init__.py
-│   ├── tests/                  # Agent evals, browser tests, prompt tests
-│   ├── frontend/               # Next.js/React web UI
-│   │   ├── app/                # Next.js app routes
-│   │   ├── components/         # Agents UI, audio visualizers, HUD background
-│   │   ├── hooks/              # LiveKit client hooks
-│   │   └── package.json
-│   ├── pyproject.toml          # Python deps (managed with uv)
-│   ├── uv.lock                 # Lockfile
-│   ├── Dockerfile              # Multi-stage production build
-│   ├── .env.example            # Environment variable template
-│   ├── .env.local              # Local credentials (gitignored)
-│   ├── AGENTS.md               # Coding agent guide
-│   └── plan.md                 # Architecture planning doc
-│
-└── agent-starter-flutter/      # Flutter mobile client
-    ├── lib/                    # Dart source
-    ├── pubspec.yaml            # Flutter deps
-    └── web/                    # Web build output
+│   │   ├── tools.py            # Browser function tools
+│   │   ├── mac_tools.py        # macOS application tools
+│   │   ├── file_tools.py       # Filesystem tools
+│   │   └── prompts.py          # Sureedu instructions and personality
+│   ├── tests/
+│   ├── frontend/               # Next.js web UI
+│   └── pyproject.toml
+└── agent-starter-flutter/      # Flutter client
 ```
 
-## Prerequisites
+## Setup
 
-- **Python** >= 3.10
-- **[uv](https://docs.astral.sh/uv/)** package manager
-- **[pnpm](https://pnpm.io/)** (for the React frontend)
-- **Flutter SDK** >= 3.5.1 (for the mobile app)
-- **Node.js** >= 20
-
-## Installation
-
-### 1. Python Agent
+Prerequisites: Python ≥ 3.10, [uv](https://docs.astral.sh/uv/), Node.js ≥ 20, pnpm.
 
 ```bash
 cd jarvis_new
 uv sync
 uv run playwright install chromium
+cp .env.example .env.local          # then fill in credentials
 ```
 
-### 2. React Web Frontend
+Required in `jarvis_new/.env.local`: `LIVEKIT_URL`, `LIVEKIT_API_KEY`,
+`LIVEKIT_API_SECRET`, `GOOGLE_API_KEY`.
 
-```bash
-cd jarvis_new/frontend
-pnpm install
-```
-
-### 3. Flutter Mobile App (Optional)
-
-```bash
-cd agent-starter-flutter
-flutter pub get
-```
-
-## Configuration
-
-Copy the example environment file and fill in your credentials:
-
-```bash
-cd jarvis_new
-cp .env.example .env.local
-```
-
-Required environment variables:
-
-| Variable | Description |
-|---|---|
-| `LIVEKIT_URL` | Your LiveKit Cloud WebSocket URL (e.g. `wss://your-project.livekit.cloud`) |
-| `LIVEKIT_API_KEY` | LiveKit API key |
-| `LIVEKIT_API_SECRET` | LiveKit API secret |
-| `GOOGLE_API_KEY` | Google AI API key (for Gemini) |
-
-The React frontend also expects `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, and `LIVEKIT_URL` in its own `.env.local`.
+The web frontend needs the same LiveKit values plus `AGENT_NAME=sureedu` in
+`jarvis_new/frontend/.env.local`.
 
 ## Running
 
-### Agent (Python)
-
 ```bash
 cd jarvis_new
+uv run src/agent.py console     # terminal voice chat
+uv run src/agent.py dev         # for the web frontend
+```
 
-# Development mode (connects to LiveKit dev server)
-uv run src/agent.py dev
-
-# Console mode (terminal-based voice chat)
-uv run src/agent.py console
-
-#### Important run your agent before running the frontend!
-
-### Web Frontend
+Web frontend (start the agent first):
 
 ```bash
 cd jarvis_new/frontend
-npm run dev
+pnpm install && pnpm dev        # http://localhost:3000
 ```
 
-Open [http://localhost:3000](http://localhost:3000) in your browser.
+## Safety
 
-### Flutter App
+- Never commit `.env.local`, API keys, or `~/.sureedu/` (browser profile, cookies).
+- Consequential actions (sending, deleting, submitting, purchasing) require
+  explicit user approval.
+- Sureedu must not report success unless a tool confirms it.
 
-```bash
-cd agent-starter-flutter
-flutter run
-```
+## Roadmap
 
-## Architecture
-
-Jarvis uses **LiveKit's realtime agent framework** with function tools:
-
-1. **Voice Pipeline**: User speaks → LiveKit streams audio → AI Coustics denoises → Gemini Realtime processes
-2. **Tool Calling**: Gemini invokes browser tools via LiveKit's function tool system
-3. **Browser**: Playwright Chromium instance (headless in production, visible locally) managed per-room with serialized async operations
-
-The agent is designed to recognize named sites (YouTube, Google, Amazon) and open them directly rather than searching via DuckDuckGo.
-
-## Tech Stack
-
-| Component | Technology |
-|---|---|
-| Agent Framework | LiveKit Agents 1.6.10 |
-| LLM | Google Gemini 3.1 Flash Live |
-| Browser Automation | Playwright (Chromium) |
-| Noise Cancellation | AI Coustics |
-| Web Frontend | Next.js 15, React 19, Tailwind CSS v4 |
-| Mobile Client | Flutter, Dart 3.5 |
-| Package Manager | uv (Python), pnpm (JS) |
-| Language | Python 3.14, TypeScript 5, Dart 3.5 |
+See the project roadmap: task orchestrator, verification and recovery, a central
+permission manager, Outlook/WhatsApp integrations, personal memory, and a
+background scheduler.

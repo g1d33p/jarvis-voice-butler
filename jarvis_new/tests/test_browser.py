@@ -40,37 +40,29 @@ def test_direct_navigation_is_prioritized_over_fallback_search() -> None:
 
 
 @pytest.mark.asyncio
-async def test_visible_browser_window_is_brought_to_front(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_visible_browser_window_is_brought_to_front() -> None:
     class FakePage:
         def __init__(self) -> None:
-            self.titles: list[str] = []
             self.was_brought_to_front = False
-
-        async def title(self) -> str:
-            return "Original title"
-
-        async def evaluate(self, expression: str, title: str) -> None:
-            self.titles.append(title)
 
         async def bring_to_front(self) -> None:
             self.was_brought_to_front = True
 
-    focused_titles: list[str] = []
-    monkeypatch.setattr(
-        browser_module,
-        "_focus_window_with_title",
-        lambda title: focused_titles.append(title) or True,
-    )
     page = FakePage()
 
     await browser_module._bring_page_window_to_front(page)
 
     assert page.was_brought_to_front
-    assert len(focused_titles) == 1
-    assert focused_titles[0].startswith("Jarvis Browser ")
-    assert page.titles == [focused_titles[0], "Original title"]
+
+
+@pytest.mark.asyncio
+async def test_focus_failure_does_not_break_browser_use() -> None:
+    class BrokenPage:
+        async def bring_to_front(self) -> None:
+            raise RuntimeError("window unavailable")
+
+    # Must not raise: focusing is best-effort.
+    await browser_module._bring_page_window_to_front(BrokenPage())
 
 
 class _TestPageHandler(BaseHTTPRequestHandler):

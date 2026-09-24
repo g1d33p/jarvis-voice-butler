@@ -3,9 +3,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
-import sys
-import time
-import uuid
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
@@ -24,121 +21,13 @@ class BrowserError(Exception):
     """A user-facing browser operation failure."""
 
 
-def _focus_window_with_title(title: str, *, timeout_seconds: float = 2.0) -> bool:
-    if sys.platform != "win32":
-        return False
-
-    import ctypes
-    from ctypes import wintypes
-
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    enum_windows_proc = ctypes.WINFUNCTYPE(
-        wintypes.BOOL,
-        wintypes.HWND,
-        wintypes.LPARAM,
-    )
-
-    user32.EnumWindows.argtypes = [enum_windows_proc, wintypes.LPARAM]
-    user32.EnumWindows.restype = wintypes.BOOL
-    user32.GetWindowTextLengthW.argtypes = [wintypes.HWND]
-    user32.GetWindowTextLengthW.restype = ctypes.c_int
-    user32.GetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-    user32.GetWindowTextW.restype = ctypes.c_int
-    user32.IsWindowVisible.argtypes = [wintypes.HWND]
-    user32.IsWindowVisible.restype = wintypes.BOOL
-    user32.GetForegroundWindow.restype = wintypes.HWND
-    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
-    user32.GetWindowThreadProcessId.restype = wintypes.DWORD
-    user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
-    user32.AttachThreadInput.restype = wintypes.BOOL
-    user32.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
-    user32.SetWindowPos.argtypes = [
-        wintypes.HWND,
-        wintypes.HWND,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        ctypes.c_int,
-        wintypes.UINT,
-    ]
-    user32.SetForegroundWindow.argtypes = [wintypes.HWND]
-    user32.SetForegroundWindow.restype = wintypes.BOOL
-    kernel32.GetCurrentThreadId.restype = wintypes.DWORD
-
-    def find_window() -> int | None:
-        matches: list[int] = []
-
-        @enum_windows_proc
-        def collect_window(hwnd: int, _: int) -> bool:
-            if not user32.IsWindowVisible(hwnd):
-                return True
-            length = user32.GetWindowTextLengthW(hwnd)
-            if length == 0:
-                return True
-            buffer = ctypes.create_unicode_buffer(length + 1)
-            user32.GetWindowTextW(hwnd, buffer, length + 1)
-            if title in buffer.value:
-                matches.append(hwnd)
-                return False
-            return True
-
-        user32.EnumWindows(collect_window, 0)
-        return matches[0] if matches else None
-
-    deadline = time.monotonic() + timeout_seconds
-    hwnd = find_window()
-    while hwnd is None and time.monotonic() < deadline:
-        time.sleep(0.05)
-        hwnd = find_window()
-    if hwnd is None:
-        return False
-
-    foreground = user32.GetForegroundWindow()
-    current_thread = kernel32.GetCurrentThreadId()
-    foreground_thread = user32.GetWindowThreadProcessId(foreground, None)
-    attached = bool(
-        foreground_thread
-        and foreground_thread != current_thread
-        and user32.AttachThreadInput(current_thread, foreground_thread, True)
-    )
-    try:
-        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-        user32.SetWindowPos(
-            hwnd,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0x0001 | 0x0002 | 0x0040,  # NOSIZE | NOMOVE | SHOWWINDOW
-        )
-        return bool(user32.SetForegroundWindow(hwnd))
-    finally:
-        if attached:
-            user32.AttachThreadInput(current_thread, foreground_thread, False)
-
-
 async def _bring_page_window_to_front(page: Page) -> None:
-    marker = f"Jarvis Browser {uuid.uuid4().hex}"
-    original_title = ""
-    title_changed = False
-    try:
-        original_title = await page.title()
-        await page.evaluate("title => { document.title = title; }", marker)
-        title_changed = True
+    """Best-effort: bring Sureedu's browser tab to the front.
+
+    Focus handling must never block browser use, so any failure is ignored.
+    """
+    with contextlib.suppress(Exception):
         await page.bring_to_front()
-        await asyncio.to_thread(_focus_window_with_title, marker)
-    except Exception:
-        # Foreground activation is best-effort and must not prevent browser use.
-        return
-    finally:
-        if title_changed:
-            with contextlib.suppress(Exception):
-                await page.evaluate(
-                    "title => { document.title = title; }",
-                    original_title,
-                )
 
 
 class BrowserManager:

@@ -74,7 +74,7 @@ The following LiveKit function tools are registered in `src/agent.py`:
 
 ## Page Inspection And Interaction
 
-Before clicking or typing, Jarvis is instructed to call `inspect_page` unless the target was returned by an earlier inspection.
+Before clicking or typing, Sureedu is instructed to call `inspect_page` unless the target was returned by an earlier inspection.
 
 `inspect_page` exposes up to eighty visible interactive elements, including:
 

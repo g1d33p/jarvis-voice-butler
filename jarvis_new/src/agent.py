@@ -68,7 +68,7 @@ class Assistant(Agent):
 server = AgentServer()
 
 
-@server.rtc_session(agent_name="my-agent")
+@server.rtc_session(agent_name="sureedu")
 async def my_agent(ctx: JobContext):
     # Logging setup
     # Add any other context you want in all log entries here
@@ -115,7 +115,6 @@ async def my_agent(ctx: JobContext):
         agent=Assistant(browser),
         room=ctx.room,
         room_options=room_io.RoomOptions(
-            video_input=True,
             audio_input=room_io.AudioInputOptions(
                 noise_cancellation=ai_coustics.audio_enhancement(
                     model=ai_coustics.EnhancerModel.QUAIL_VF_S
