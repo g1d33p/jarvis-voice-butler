@@ -15,6 +15,7 @@ from meta_client import (
     MetaConfigError,
     MetaRealtimeSTT,
     ModelTurn,
+    _raise_for_stt_error,
     create_async_client,
 )
 
@@ -171,12 +172,16 @@ async def _run_stream(stt, ws, *outgoing: str) -> list:
     """Push one audio frame, feed scripted server messages, return events."""
     stream = stt.stream()
     stream.push_frame(_audio_frame())
-    # Wait for the JSON start frame and the audio bytes to go out.
+    # Wait for the JSON handshake frame and the audio bytes to go out.
     for _ in range(200):
         if len(ws.sent) >= 2:
             break
         await asyncio.sleep(0.01)
-    assert json.loads(ws.sent[0])["type"] == "start"
+    handshake = json.loads(ws.sent[0])
+    assert handshake["authorization"] == {"accessToken": "Bearer k"}
+    assert handshake["audioEncoding"] == "PCM_24KHZ"
+    assert handshake["model"] == "muse-voice-transcribe-1.0"
+    assert handshake["mode"] == "ENDPOINTING"
     assert isinstance(ws.sent[1], (bytes, bytearray))
 
     events: list = []
@@ -206,6 +211,15 @@ def _frame(text: str, final: bool) -> str:
 
 
 def _audio_frame() -> rtc.AudioFrame:
+    return rtc.AudioFrame(
+        data=b"\x00\x00" * 240,
+        sample_rate=24000,
+        num_channels=1,
+        samples_per_channel=240,
+    )
+
+
+def _audio_frame_16k() -> rtc.AudioFrame:
     return rtc.AudioFrame(
         data=b"\x00\x00" * 160,
         sample_rate=16000,
@@ -259,3 +273,64 @@ def test_stt_reports_model_and_provider() -> None:
     assert stt.provider == "meta"
     assert stt.capabilities.streaming
     assert stt.capabilities.interim_results
+
+
+def test_stt_ws_url_carries_fresh_session_id() -> None:
+    stt = MetaRealtimeSTT(MetaConfig(api_key="k"))
+    url1, url2 = stt._ws_url(), stt._ws_url()
+    assert url1.startswith("wss://api.meta.ai/v1/asr/realtime?sessionId=stream-")
+    assert url1 != url2  # a fresh session id per connection
+
+
+def test_stt_error_frame_raises_loudly() -> None:
+    with pytest.raises(RuntimeError, match="bad key"):
+        _raise_for_stt_error(json.dumps({"type": "error", "message": "bad key"}))
+    # Anything else is ignored, never raised.
+    _raise_for_stt_error(json.dumps({"type": "transcript", "transcript": "hi"}))
+    _raise_for_stt_error("not json at all")
+    _raise_for_stt_error(None)
+
+
+def test_stt_ignores_binary_server_frames() -> None:
+    stt = MetaRealtimeSTT(MetaConfig(api_key="k"))
+    ws = FakeWS()
+    _connect(stt, ws)
+
+    async def run():
+        return await _run_stream(stt, ws, b"\x00\x01\x02", _frame("hi", True))
+
+    events = asyncio.run(run())
+    finals = [ev for ev in events if ev.type == lk_stt.SpeechEventType.FINAL_TRANSCRIPT]
+    assert finals and finals[0].alternatives[0].text == "hi"
+
+
+def test_stt_resamples_16k_input_to_24k() -> None:
+    stt = MetaRealtimeSTT(MetaConfig(api_key="k"))
+    ws = FakeWS()
+    _connect(stt, ws)
+
+    async def run() -> int:
+        stream = stt.stream()
+        for _ in range(200):
+            stream.push_frame(_audio_frame_16k())
+        for _ in range(400):
+            total = sum(
+                len(s) for s in ws.sent[1:] if isinstance(s, (bytes, bytearray))
+            )
+            if total >= 80000:
+                break
+            await asyncio.sleep(0.01)
+        total = sum(len(s) for s in ws.sent[1:] if isinstance(s, (bytes, bytearray)))
+        await stream.aclose()
+        return total
+
+    total = asyncio.run(run())
+    # 200 frames x 160 samples @16kHz = 2 s of audio -> ~96000 bytes @24kHz;
+    # the resampler may hold a small tail back.
+    assert 80000 <= total <= 96000
+
+
+def test_stt_config_reads_mode_from_env(monkeypatch) -> None:
+    monkeypatch.setenv("YAADHAMMA_STT_MODE", "push_to_talk")
+    cfg = MetaConfig.from_env()
+    assert cfg.stt_mode == "PUSH_TO_TALK"

@@ -31,6 +31,9 @@ ESCALATION_EFFORT = os.environ.get("YAADHAMMA_ESCALATION_EFFORT", "high")
 
 # Speech-to-text for the voice pipeline.
 STT_MODEL = os.environ.get("YAADHAMMA_STT_MODEL", "muse-voice-transcribe-1.0")
+# PUSH_TO_TALK | ENDPOINTING | DIARIZATION. ENDPOINTING lets the model itself
+# decide when Jeevan has finished speaking.
+STT_MODE = os.environ.get("YAADHAMMA_STT_MODE", "ENDPOINTING")
 
 # Speech output (LiveKit Inference; Meta has no TTS). Jeevan picks the final
 # voice in Phase 2; this feminine placeholder stands in until then.

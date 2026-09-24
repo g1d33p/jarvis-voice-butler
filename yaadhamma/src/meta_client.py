@@ -6,10 +6,12 @@ goes over the Voice Transcribe realtime websocket
 (``wss://api.meta.ai/v1/asr/realtime``). Meta offers no TTS, so speech output
 stays on LiveKit Inference (see agent.py).
 
-The realtime STT wire protocol below follows the endpoint published on
-dev.meta.ai (Bearer auth, audio frames one way, JSON transcript events back).
-The exact JSON frame shapes are isolated in ``_parse_message`` — confirm them
-against the Voice Transcribe realtime guide before first live use.
+The realtime STT wire protocol follows Meta's official "Transcribe in
+realtime" recipe (dev.meta.ai/docs/api-reference/voice/realtime), verified
+2026-09-24: the credential travels inside the opening JSON frame
+(``authorization.accessToken``), audio goes as raw 16-bit mono PCM @ 24 kHz
+binary frames, the stream ends with ``{"type": "endStream"}``, and the server
+answers with JSON ``transcript`` / ``error`` events.
 """
 
 from __future__ import annotations
@@ -18,6 +20,7 @@ import asyncio
 import json
 import logging
 import os
+import uuid
 from dataclasses import dataclass
 
 import httpx
@@ -37,7 +40,9 @@ logger = logging.getLogger("yaadhamma.meta")
 
 META_BASE_URL = "https://api.meta.ai/v1"
 META_STT_WS_URL = "wss://api.meta.ai/v1/asr/realtime"
-_STT_SAMPLE_RATE = 16_000
+# The recipe's audio contract: 16-bit little-endian mono PCM at 24 kHz.
+_STT_SAMPLE_RATE = 24_000
+_STT_AUDIO_ENCODING = "PCM_24KHZ"
 
 
 class MetaConfigError(RuntimeError):
@@ -68,6 +73,7 @@ class MetaConfig:
     escalation_effort: str = "high"
     stt_model: str = "muse-voice-transcribe-1.0"
     stt_ws_url: str = META_STT_WS_URL
+    stt_mode: str = "ENDPOINTING"  # PUSH_TO_TALK | ENDPOINTING | DIARIZATION
     voice_mode: str = "pipeline"  # "pipeline" | "realtime" (old Gemini Live path)
     tts_model: str = "fishaudio/s2.1-pro"
     tts_voice: str = "fa4c9eb3dccc4806b382b40d61c6b10a"
@@ -88,6 +94,7 @@ class MetaConfig:
                 "YAADHAMMA_ESCALATION_EFFORT", config.ESCALATION_EFFORT
             ),
             stt_model=get("YAADHAMMA_STT_MODEL", config.STT_MODEL),
+            stt_mode=get("YAADHAMMA_STT_MODE", config.STT_MODE).strip().upper(),
             voice_mode=get("YAADHAMMA_VOICE_MODE", config.VOICE_MODE).strip().lower(),
             tts_model=get("YAADHAMMA_TTS_MODEL", config.TTS_MODEL),
             tts_voice=get("YAADHAMMA_TTS_VOICE", config.TTS_VOICE),
@@ -223,14 +230,16 @@ class MetaRealtimeSTT(stt.STT):
             )
         return self._cfg.api_key
 
+    def _ws_url(self) -> str:
+        """Realtime URL with a fresh session id, per Meta's recipe."""
+        return f"{self._cfg.stt_ws_url}?sessionId=stream-{uuid.uuid4()}"
+
     async def _ws_connect(self):
         """Open the realtime websocket. A seam so tests can inject a fake."""
         import websockets
 
-        return await websockets.connect(
-            self._cfg.stt_ws_url,
-            additional_headers={"Authorization": f"Bearer {self._require_key()}"},
-        )
+        # The credential travels in the opening JSON frame, not in a header.
+        return await websockets.connect(self._ws_url(), open_timeout=30)
 
     def stream(
         self,
@@ -276,6 +285,60 @@ class MetaRealtimeSTT(stt.STT):
         pass
 
 
+def _raise_for_stt_error(raw: object) -> None:
+    """Fail fast on Meta ``{"type": "error"}`` frames (bad key, bad audio...)."""
+    try:
+        msg = json.loads(raw) if isinstance(raw, str) else None
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return
+    if isinstance(msg, dict) and str(msg.get("type", "")).lower() == "error":
+        raise RuntimeError(f"Meta STT error: {msg.get('message', msg)}")
+
+
+class _Pcm24kConverter:
+    """Convert arbitrary input frames to 16-bit mono PCM @ 24 kHz.
+
+    LiveKit hands the STT stream whatever the audio track delivers; Meta's
+    recipe wants PCM_24KHZ. Anything already 24 kHz mono passes through
+    untouched so the common path adds no latency.
+    """
+
+    def __init__(self) -> None:
+        self._resampler: rtc.AudioResampler | None = None
+        self._resampler_rate: int | None = None
+
+    def push(self, frame: rtc.AudioFrame) -> list[rtc.AudioFrame]:
+        import array
+
+        samples = array.array("h", bytes(frame.data))  # int16 LE on x86/ARM
+        channels = frame.num_channels or 1
+        frames = len(samples) // channels
+        if channels == 1:
+            mono = samples
+        else:
+            mono = array.array(
+                "h",
+                (
+                    sum(samples[i * channels : (i + 1) * channels]) // channels
+                    for i in range(frames)
+                ),
+            )
+        pcm = rtc.AudioFrame(
+            data=mono.tobytes(),
+            sample_rate=frame.sample_rate,
+            num_channels=1,
+            samples_per_channel=frames,
+        )
+        if frame.sample_rate == _STT_SAMPLE_RATE:
+            return [pcm]
+        if self._resampler is None or self._resampler_rate != frame.sample_rate:
+            self._resampler = rtc.AudioResampler(
+                input_rate=frame.sample_rate, output_rate=_STT_SAMPLE_RATE
+            )
+            self._resampler_rate = frame.sample_rate
+        return list(self._resampler.push(pcm))
+
+
 class MetaRecognizeStream(stt.RecognizeStream):
     """Streams PCM16 audio to Meta and emits transcript events."""
 
@@ -292,33 +355,37 @@ class MetaRecognizeStream(stt.RecognizeStream):
         self._speaking = False
 
     async def _send_audio(self, ws) -> None:
+        convert = _Pcm24kConverter()
         async for data in self._input_ch:
             if isinstance(data, rtc.AudioFrame):
-                await ws.send(bytes(data.data))
+                for frame in convert.push(data):
+                    await ws.send(bytes(frame.data))
             elif isinstance(data, stt.RecognizeStream._FlushSentinel):
-                await ws.send(json.dumps({"type": "flush"}))
+                await ws.send(json.dumps({"type": "endStream"}))
 
     async def _run(self) -> None:
         meta_stt = self._stt
         assert isinstance(meta_stt, MetaRealtimeSTT)
+        key = meta_stt._require_key()
         ws = await meta_stt._ws_connect()
         try:
+            # 1. Handshake: the first JSON text frame carries the credential.
             await ws.send(
                 json.dumps(
                     {
-                        "type": "start",
+                        "authorization": {"accessToken": f"Bearer {key}"},
+                        "audioEncoding": _STT_AUDIO_ENCODING,
                         "model": self._cfg.stt_model,
-                        "sample_rate": _STT_SAMPLE_RATE,
-                        "format": "pcm_s16le",
-                        "channels": 1,
-                        "language": "en",
-                        "interim_results": True,
+                        "mode": self._cfg.stt_mode,
                     }
                 )
             )
             send_task = asyncio.create_task(self._send_audio(ws))
             try:
                 async for raw in ws:
+                    if isinstance(raw, (bytes, bytearray)):
+                        continue  # binary frames carry no transcript events
+                    _raise_for_stt_error(raw)
                     parsed = _parse_message(raw)
                     if parsed is None:
                         continue
