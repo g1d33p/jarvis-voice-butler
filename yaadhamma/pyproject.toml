@@ -11,8 +11,11 @@ requires-python = ">=3.10, <3.15"
 dependencies = [
     "livekit-agents[google,images]>=1.6.9",
     "livekit-plugins-ai-coustics~=0.2",
+    "livekit-plugins-openai>=1.6.10",
+    "openai>=2.54.0",
     "playwright>=1.62.0",
     "python-dotenv",
+    "websockets>=15.0.1",
 ]
 
 [dependency-groups]

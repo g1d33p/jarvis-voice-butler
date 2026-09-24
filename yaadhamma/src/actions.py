@@ -38,6 +38,12 @@ class ActionRegistry:
         )
         return [types.FunctionDeclaration.model_validate(schema) for schema in schemas]
 
+    def openai_tools(self) -> list[dict[str, Any]]:
+        """Describe the tools in the OpenAI function-calling format."""
+        return llm.ToolContext(list(self._tools.values())).parse_function_tools(
+            "openai"
+        )
+
     async def call(
         self, name: str, args: dict[str, Any] | None, context: object
     ) -> dict[str, Any]:

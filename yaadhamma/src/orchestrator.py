@@ -1,32 +1,41 @@
 """The task orchestrator: Yaadhamma's background brain (Phase 3).
 
 The voice model hands over a goal ("in WhatsApp, send 'running late' to Ravi").
-The orchestrator works through it with a cheaper text model in a loop:
+The orchestrator works through it with a text model in a loop:
 
     ask the model -> run the tools it chose -> show it the results -> repeat
 
 until the model reports the outcome, asks the user a question, or runs out of
 steps. Every task is recorded in the task store with its steps and token use.
+
+The brain is Muse Spark through the Meta Model API (see meta_client.py),
+called with OpenAI-style chat messages and function tools.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from google import genai
-from google.genai import types
 from livekit.agents import RunContext, function_tool
 from livekit.agents.llm import ToolError
 
 import config
 from actions import ActionRegistry
+from meta_client import MetaBrainClient, ModelTurn
 from prompts import ORCHESTRATOR_INSTRUCTIONS
 from task_manager import Step, Task, TaskStore
+
+__all__ = [
+    "VOICE_TOOL_NAMES",
+    "ModelTurn",
+    "Orchestrator",
+    "TaskTools",
+    "voice_tools",
+]
 
 # Older tool results bigger than this are replaced with a short note, so each
 # model call does not re-send every page the task has looked at.
@@ -38,62 +47,34 @@ _BACKSTOP_SECONDS = config.TASK_TIMEOUT_SECONDS + 30
 _OMITTED = "(older result omitted to save space; call the tool again if needed)"
 
 
-@dataclass
-class ModelTurn:
-    """One model reply, reduced to what the orchestrator needs."""
+# ModelTurn is defined in meta_client.py and re-exported through the import
+# above, so `from orchestrator import ModelTurn` keeps working.
+def _assistant_message(task_id: str, step_index: int, turn: ModelTurn) -> dict:
+    """Rebuild the assistant's reply as an OpenAI chat message.
 
-    calls: list[tuple[str, dict]]
-    text: str
-    content: types.Content
-    tokens_in: int = 0
-    tokens_out: int = 0
-
-
-class GeminiClient:
-    """Calls the Gemini API. Created lazily so tests never need a key."""
-
-    def __init__(self) -> None:
-        self._client: genai.Client | None = None
-
-    async def generate(
-        self, model: str, contents: list, config_: types.GenerateContentConfig
-    ) -> ModelTurn:
-        if self._client is None:
-            self._client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
-        response = await self._client.aio.models.generate_content(
-            model=model, contents=contents, config=config_
-        )
-        candidate = response.candidates[0] if response.candidates else None
-        content = candidate.content if candidate and candidate.content else None
-        if content is None:
-            content = types.Content(role="model", parts=[types.Part(text="")])
-        text = "".join(
-            part.text
-            for part in content.parts or []
-            if part.text and not getattr(part, "thought", False)
-        )
-        calls = [
-            (call.name, dict(call.args or {})) for call in response.function_calls or []
-        ]
-        usage = response.usage_metadata
-        return ModelTurn(
-            calls=calls,
-            text=text,
-            content=content,
-            tokens_in=(usage.prompt_token_count or 0) if usage else 0,
-            tokens_out=(
-                (usage.candidates_token_count or 0) + (usage.thoughts_token_count or 0)
-            )
-            if usage
-            else 0,
-        )
+    Tool calls get synthetic ids; the following "tool" messages reference
+    them. The model never sees the ids, so they only need to be consistent
+    within one task.
+    """
+    return {
+        "role": "assistant",
+        "content": turn.text or None,
+        "tool_calls": [
+            {
+                "id": f"call_{task_id}_{step_index}_{i}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(args)},
+            }
+            for i, (name, args) in enumerate(turn.calls)
+        ],
+    }
 
 
 @dataclass
 class Orchestrator:
     registry: ActionRegistry
     store: TaskStore
-    client: object = field(default_factory=GeminiClient)
+    client: object = field(default_factory=MetaBrainClient)
     brain_model: str = config.BRAIN_MODEL
     escalation_model: str = config.ESCALATION_MODEL
     max_steps: int = config.MAX_TASK_STEPS
@@ -101,51 +82,43 @@ class Orchestrator:
     now: Callable[[], datetime] = datetime.now
     # Conversation per unfinished task, so a question can be answered and the
     # task continued from where it stopped.
-    _conversations: dict[str, list] = field(default_factory=dict)
+    _conversations: dict[str, list[dict]] = field(default_factory=dict)
 
-    def _config(self) -> types.GenerateContentConfig:
-        return types.GenerateContentConfig(
-            system_instruction=ORCHESTRATOR_INSTRUCTIONS,
-            tools=[types.Tool(function_declarations=self.registry.declarations())],
-            automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                disable=True
-            ),
-        )
+    def _tools(self) -> list[dict]:
+        return self.registry.openai_tools()
 
     async def start(self, goal: str, context: object) -> Task:
         task = Task(goal=goal, model=self.brain_model)
         self.store.save(task)
         opening = f"Task: {goal}\nCurrent local time: {self.now():%A %d %B %Y, %H:%M}."
         self._conversations[task.id] = [
-            types.Content(role="user", parts=[types.Part(text=opening)])
+            {"role": "system", "content": ORCHESTRATOR_INSTRUCTIONS},
+            {"role": "user", "content": opening},
         ]
         return await self._run(task, context)
 
     async def resume(self, task_id: str, user_reply: str, context: object) -> Task:
         task = self.store.get(task_id)
-        contents = self._conversations.get(task_id)
-        if task is None or contents is None or task.state != "waiting_for_user":
+        messages = self._conversations.get(task_id)
+        if task is None or messages is None or task.state != "waiting_for_user":
             raise LookupError(f"Task {task_id} is not waiting for an answer.")
         task.question = ""
-        contents.append(
-            types.Content(
-                role="user",
-                parts=[
-                    types.Part(
-                        text=f"The user replied: {user_reply!r}. Continue the task."
-                    )
-                ],
-            )
+        messages.append(
+            {
+                "role": "user",
+                "content": f"The user replied: {user_reply!r}. Continue the task.",
+            }
         )
         return await self._run(task, context)
 
     async def _run(self, task: Task, context: object) -> Task:
-        contents = self._conversations[task.id]
+        messages = self._conversations[task.id]
         task.set_state("running")
         self.store.save(task)
         model = task.model or self.brain_model
+        effort: str | None = None
         failures_in_a_row = 0
-        cfg = self._config()
+        tools = self._tools()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.time_limit
 
@@ -156,7 +129,9 @@ class Orchestrator:
                 )
             try:
                 turn = await asyncio.wait_for(
-                    self.client.generate(model, contents, cfg),
+                    self.client.generate(  # type: ignore[attr-defined]
+                        model, messages, tools, reasoning_effort=effort
+                    ),
                     timeout=config.MODEL_TIMEOUT_SECONDS,
                 )
             except TimeoutError:
@@ -170,7 +145,7 @@ class Orchestrator:
 
             task.tokens_in += turn.tokens_in
             task.tokens_out += turn.tokens_out
-            contents.append(turn.content)
+            messages.append(_assistant_message(task.id, len(task.steps), turn))
 
             if not turn.calls:
                 text = turn.text.strip()
@@ -181,8 +156,7 @@ class Orchestrator:
                     return task
                 return self._finish(task, "completed", result=text or "Done.")
 
-            responses = []
-            for name, args in turn.calls:
+            for i, (name, args) in enumerate(turn.calls):
                 outcome = await self.registry.call(name, args, context)
                 task.steps.append(
                     Step(
@@ -193,16 +167,22 @@ class Orchestrator:
                     )
                 )
                 failures_in_a_row = 0 if outcome["ok"] else failures_in_a_row + 1
-                responses.append(
-                    types.Part.from_function_response(name=name, response=outcome)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": f"call_{task.id}_{len(task.steps) - 1}_{i}",
+                        "content": json.dumps(outcome, default=str),
+                    }
                 )
 
-            _shrink_old_results(contents)
-            contents.append(types.Content(role="user", parts=responses))
+            _shrink_old_results(messages)
             self.store.save(task)
 
-            if failures_in_a_row >= 2 and model != self.escalation_model:
+            if failures_in_a_row >= 2 and (
+                model != self.escalation_model or effort != config.ESCALATION_EFFORT
+            ):
                 model = self.escalation_model
+                effort = config.ESCALATION_EFFORT
                 task.model = model
 
         return self._finish(
@@ -227,25 +207,21 @@ def _summary(outcome: dict) -> str:
     return text[:200]
 
 
-def _shrink_old_results(contents: list) -> None:
+def _shrink_old_results(messages: list[dict]) -> None:
     """Replace all but the latest few large tool results with a short note."""
     positions = [
-        (ci, pi)
-        for ci, content in enumerate(contents)
-        if content.role == "user"
-        for pi, part in enumerate(content.parts or [])
-        if part.function_response is not None
+        i for i, message in enumerate(messages) if message.get("role") == "tool"
     ]
-    for ci, pi in (
+    for i in (
         positions[:-_KEEP_FULL_RESULTS] if len(positions) > _KEEP_FULL_RESULTS else []
     ):
-        part = contents[ci].parts[pi]
-        response = part.function_response.response or {}
-        if len(json.dumps(response, default=str)) > _SHRINK_ABOVE_CHARS:
-            contents[ci].parts[pi] = types.Part.from_function_response(
-                name=part.function_response.name,
-                response={"ok": response.get("ok", True), "result": _OMITTED},
-            )
+        content = messages[i].get("content") or ""
+        if len(content) > _SHRINK_ABOVE_CHARS:
+            try:
+                ok = json.loads(content).get("ok", True)
+            except (json.JSONDecodeError, AttributeError):
+                ok = True
+            messages[i]["content"] = json.dumps({"ok": ok, "result": _OMITTED})
 
 
 class TaskTools:

@@ -1,6 +1,7 @@
 """Orchestrator tests with a scripted fake model (no API key, no network)."""
 
 import asyncio
+import json
 import threading
 from http.server import ThreadingHTTPServer
 from types import SimpleNamespace
@@ -51,9 +52,10 @@ class FakeModel:
         self.models_used: list[str] = []
         self.seen_contents: list[list] = []
 
-    async def generate(self, model, contents, config_):
+    async def generate(self, model, contents, tools, reasoning_effort=None):
         self.models_used.append(model)
         self.seen_contents.append(list(contents))
+        self.seen_effort = [*getattr(self, "seen_effort", []), reasoning_effort]
         if not self.turns:
             raise AssertionError("The fake model ran out of scripted turns.")
         next_turn = self.turns.pop(0)
@@ -95,12 +97,12 @@ class Toys:
 
 def make(model: FakeModel, tmp_path, **kwargs) -> tuple[Orchestrator, Toys]:
     toys = Toys()
+    kwargs.setdefault("brain_model", "cheap")
+    kwargs.setdefault("escalation_model", "strong")
     orchestrator = Orchestrator(
         registry=ActionRegistry(toys),
         store=TaskStore(tmp_path / "tasks.db"),
         client=model,
-        brain_model="cheap",
-        escalation_model="strong",
         **kwargs,
     )
     return orchestrator, toys
@@ -122,7 +124,7 @@ async def test_runs_tools_then_reports_the_outcome(tmp_path) -> None:
     assert (task.tokens_in, task.tokens_out) == (20, 10)
     # The tool result was shown to the model on the second call.
     last = model.seen_contents[1][-1]
-    assert last.parts[0].function_response.response["result"] == "echo: hi"
+    assert json.loads(last["content"])["result"] == "echo: hi"
 
 
 async def test_task_is_saved_and_listed(tmp_path) -> None:
@@ -142,7 +144,7 @@ async def test_tool_errors_are_shown_to_the_model_not_raised(tmp_path) -> None:
 
     assert task.state == "completed"
     assert task.steps[0].ok is False
-    response = model.seen_contents[1][-1].parts[0].function_response.response
+    response = json.loads(model.seen_contents[1][-1]["content"])
     assert response == {"ok": False, "error": "It broke."}
 
 
@@ -171,6 +173,28 @@ async def test_escalates_to_the_stronger_model_after_two_failures(tmp_path) -> N
     assert task.state == "completed"
 
 
+async def test_escalates_reasoning_effort_when_model_is_already_strong(
+    tmp_path,
+) -> None:
+    """Same brain/escalation model: two failures raise the reasoning effort."""
+    model = FakeModel(
+        turn(call("broken")),
+        turn(call("broken")),
+        turn(call("echo", text="ok")),
+        turn(text="Recovered."),
+    )
+    orchestrator, _ = make(
+        model, tmp_path, brain_model="strong", escalation_model="strong"
+    )
+
+    task = await orchestrator.start("recover", context=None)
+
+    assert model.models_used == ["strong", "strong", "strong", "strong"]
+    assert model.seen_effort == [None, None, "high", "high"]
+    assert task.model == "strong"
+    assert task.state == "completed"
+
+
 async def test_stops_after_the_step_limit(tmp_path) -> None:
     model = FakeModel(*[turn(call("echo", text=str(i))) for i in range(3)])
     orchestrator, _ = make(model, tmp_path, max_steps=3)
@@ -193,7 +217,7 @@ async def test_model_failure_fails_the_task_cleanly(tmp_path) -> None:
 
 async def test_time_limit_stops_the_task(tmp_path) -> None:
     class SlowModel(FakeModel):
-        async def generate(self, model, contents, config_):
+        async def generate(self, model, contents, tools, reasoning_effort=None):
             await asyncio.sleep(0.2)
             return turn(call("echo", text="again"))
 
@@ -226,7 +250,7 @@ async def test_question_pauses_the_task_and_the_reply_resumes_it(tmp_path) -> No
     assert task.state == "completed"
     assert toys.calls == ["Ravi"]
     reply_turn = model.seen_contents[1][-1]
-    assert "The user replied: 'Ravi'" in reply_turn.parts[0].text
+    assert "The user replied: 'Ravi'" in reply_turn["content"]
 
 
 async def test_cannot_resume_a_finished_task(tmp_path) -> None:
@@ -241,25 +265,23 @@ async def test_cannot_resume_a_finished_task(tmp_path) -> None:
 
 
 def test_old_large_results_are_shrunk() -> None:
-    def response(n: int, size: int) -> types.Content:
-        return types.Content(
-            role="user",
-            parts=[
-                types.Part.from_function_response(
-                    name="big_page", response={"ok": True, "result": str(n) * size}
-                )
-            ],
-        )
+    def tool_result(n: int, size: int) -> dict:
+        return {
+            "role": "tool",
+            "tool_call_id": f"call-{n}",
+            "name": "big_page",
+            "content": json.dumps({"ok": True, "result": str(n) * size}),
+        }
 
     contents = [
-        response(1, 3000),
-        response(2, 3000),
-        response(3, 3000),
-        response(4, 50),
+        tool_result(1, 3000),
+        tool_result(2, 3000),
+        tool_result(3, 3000),
+        tool_result(4, 50),
     ]
     _shrink_old_results(contents)
 
-    results = [c.parts[0].function_response.response["result"] for c in contents]
+    results = [json.loads(c["content"])["result"] for c in contents]
     assert results[0].startswith("(older result omitted")
     assert results[1].startswith("(older result omitted")
     assert results[2] == "3" * 3000  # the latest two stay whole
