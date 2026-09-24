@@ -6,7 +6,6 @@ import re
 import sys
 import time
 import uuid
-from pathlib import Path
 from typing import Literal
 from urllib.parse import urlparse
 
@@ -158,18 +157,11 @@ class BrowserManager:
             return
 
         self._playwright = await async_playwright().start()
-
-        self._context = await self._playwright.chromium.launch_persistent_context(
-            user_data_dir=str(Path.home() / ".sureedu" / "chrome-profile"),
+        self._browser = await self._playwright.chromium.launch(
             headless=self._headless,
         )
-
-        self._browser = self._context.browser
-
-        if self._context.pages:
-            self._page = self._context.pages[0]
-        else:
-            self._page = await self._context.new_page()
+        self._context = await self._browser.new_context()
+        self._page = await self._context.new_page()
         self._page.set_default_timeout(self._timeout_ms)
         if not self._headless:
             await _bring_page_window_to_front(self._page)
@@ -178,6 +170,8 @@ class BrowserManager:
         async with self._lock:
             if self._context is not None:
                 await self._context.close()
+            if self._browser is not None:
+                await self._browser.close()
             if self._playwright is not None:
                 await self._playwright.stop()
 
