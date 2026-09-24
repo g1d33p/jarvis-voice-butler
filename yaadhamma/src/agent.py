@@ -20,6 +20,12 @@ import config
 from actions import ActionRegistry
 from audit import AuditLog
 from browser import BrowserManager
+from failover_llm import (
+    FAILOVER_NOTICE_EVENT,
+    FailoverLLM,
+    FailoverNotice,
+    maybe_wrap_with_failover,
+)
 from file_tools import FileTools
 from gmail_tools import GmailTools
 from mac_tools import MacTools
@@ -61,6 +67,11 @@ def voice_components():
     LiveKit Inference speaks. Falls back to the old Gemini Live realtime path
     with a loud warning when no Meta key is configured; YAADHAMMA_VOICE_MODE
     set to "realtime" forces that path.
+
+    In pipeline mode the Muse Spark LLM is additionally wrapped for runtime
+    failover (see failover_llm): if the Meta endpoint hangs mid-conversation,
+    the turn is re-issued against a Gemini text model instead of retrying the
+    dead endpoint. Active only when GOOGLE_API_KEY is set.
     """
     cfg = MetaConfig.from_env()
     if cfg.voice_mode != "realtime" and cfg.api_key:
@@ -72,6 +83,9 @@ def voice_components():
         llm = lk_openai.LLM(
             model=cfg.voice_model, client=client, _strict_tool_schema=False
         )
+        # Runtime failover: a hung Meta endpoint fails the turn over to a
+        # Gemini text model (STT/TTS untouched). No-op without GOOGLE_API_KEY.
+        llm = maybe_wrap_with_failover(llm)
         stt = MetaRealtimeSTT(cfg)
         # PronunciationTTS respells words the model mispronounces
         # ("Yaadhamma" -> "Yaah-dh-um-ah") just before synthesis.
@@ -191,6 +205,27 @@ async def my_agent(ctx: JobContext):
             stt=assistant.voice_stt,
             tts=assistant.voice_tts,
         )
+        # One spoken notice per failover episode: the FailoverLLM emits
+        # FAILOVER_NOTICE_EVENT when the primary goes down (or when the
+        # YAADHAMMA_FORCE_FAILOVER test switch fires). session.say speaks it
+        # through the normal TTS path without an LLM call and without adding
+        # it to the conversation context; STT/TTS are untouched so the voice
+        # stays Sarah throughout.
+        voice_llm = assistant._voice_llm
+        if isinstance(voice_llm, FailoverLLM):
+
+            def _speak_failover_notice(notice: FailoverNotice) -> None:
+                text = (
+                    "Failover test: answering from my backup brain."
+                    if notice.reason == "forced_test"
+                    else "My main brain is unreachable, answering from backup."
+                )
+                try:
+                    session.say(text, add_to_chat_ctx=False)
+                except Exception:
+                    logger.warning("Could not speak failover notice", exc_info=True)
+
+            voice_llm.on(FAILOVER_NOTICE_EVENT, _speak_failover_notice)
 
     # Start the session, which initializes the voice pipeline and warms up the models
     await session.start(
