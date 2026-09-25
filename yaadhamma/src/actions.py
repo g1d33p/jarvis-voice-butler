@@ -7,6 +7,7 @@ orchestrator a uniform way to describe the tools to its model and call them.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -45,18 +46,29 @@ class ActionRegistry:
         )
 
     async def call(
-        self, name: str, args: dict[str, Any] | None, context: object
+        self,
+        name: str,
+        args: dict[str, Any] | None,
+        context: object,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         """Run one tool and return {"ok": ..., "result" or "error": ...}.
 
         Tool failures are returned as data, not raised, so the orchestrator's
-        model can read them and decide what to do next.
+        model can read them and decide what to do next. A tool that runs past
+        `timeout` seconds is stopped (2026-09-25: one stuck WhatsApp call held
+        the browser for minutes and starved every other task).
         """
         tool = self._tools.get(name)
         if tool is None:
             return {"ok": False, "error": f"There is no tool named {name!r}."}
         try:
-            result = await tool(context, **(args or {}))
+            result = await asyncio.wait_for(tool(context, **(args or {})), timeout)
+        except TimeoutError:
+            return {
+                "ok": False,
+                "error": f"{name} took longer than {timeout:.0f} seconds and was stopped.",
+            }
         except ToolError as exc:
             return {"ok": False, "error": str(exc)}
         except TypeError as exc:

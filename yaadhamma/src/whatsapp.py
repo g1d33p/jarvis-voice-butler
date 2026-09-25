@@ -67,15 +67,33 @@ def parse_message_meta(meta: str) -> tuple[str | None, str | None]:
     return match.group("time"), match.group("sender")
 
 
+def _digits(text: str) -> str:
+    return "".join(ch for ch in str(text) if ch.isdigit())
+
+
 def find_chats(name: str, chats: list[dict]) -> list[dict]:
-    """Exact name matches if any, else case-insensitive substring matches."""
+    """Exact name matches if any, else case-insensitive substring matches.
+
+    A target that is only digits (3 or more), such as "8990", matches chats
+    whose phone number ends with those digits: unsaved contacts appear in
+    WhatsApp under their number, e.g. "+1 (940) 843-8990".
+    """
     target = (name or "").strip().casefold()
     if not target:
         return []
     exact = [c for c in chats if c.get("name", "").casefold() == target]
     if exact:
         return exact
+    digits = _digits(target)
+    if len(digits) >= 3 and not any(ch.isalpha() for ch in target):
+        return [c for c in chats if _digits(c.get("name", "")).endswith(digits)]
     return [c for c in chats if target in c.get("name", "").casefold()]
+
+
+def matches_watchlist(chat_name: str, patterns: list[str]) -> bool:
+    """True if the chat name contains any watchlist pattern (case-insensitive)."""
+    name = (chat_name or "").casefold()
+    return any(p.strip().casefold() in name for p in patterns if p.strip())
 
 
 def _norm_chat_name(name: str) -> str:
@@ -159,9 +177,12 @@ class WhatsAppClient:
         return result.get("state", "loading")
 
     async def _require_login(
-        self, timeout_s: float = 8.0, poll_s: float = 1.0, qr_confirm_s: float = 4.0
+        self, timeout_s: float = 25.0, poll_s: float = 1.0, qr_confirm_s: float = 4.0
     ) -> None:
         """Require a paired session, tolerating WhatsApp Web's loading screen.
+
+        2026-09-25: on a freshly started browser WhatsApp Web took longer than
+        the old 8 seconds to load its chats, so the wait is now 25 seconds.
 
         On 2026-09-24 the old one-shot check fired while the page was still
         loading and reported "not paired"; ~20 seconds later the same tab
@@ -374,6 +395,7 @@ class WhatsAppClient:
         limit: int = 15,
         scroll_pause_s: float = 0.8,
         max_scrolls: int = 10,
+        exact: bool = False,
     ) -> dict[str, object]:
         """Recent messages from one chat, oldest first.
 
@@ -382,8 +404,19 @@ class WhatsAppClient:
         the limit is reached or no more history appears. Opening the chat
         marks its messages as read in WhatsApp.
         """
-        matched = await self.find_chat(chat_name)
-        await self._open_chat(matched)
+        if exact:
+            # The caller already has the exact title (e.g. from one list
+            # traversal): try clicking the row where it is, and only scroll
+            # from the top to find it if it isn't rendered.
+            matched = chat_name
+            try:
+                await self._open_chat(matched, attempts=1)
+            except WhatsAppError:
+                matched = await self.find_chat(chat_name)
+                await self._open_chat(matched)
+        else:
+            matched = await self.find_chat(chat_name)
+            await self._open_chat(matched)
         result = await self._evaluate("waReadMessages", limit)
         messages = self._parse_messages(result)
         scrolls = 0

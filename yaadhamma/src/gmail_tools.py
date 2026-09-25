@@ -15,6 +15,8 @@ Tool names are prefixed with gmail_ because the Outlook skill already
 registers read_inbox / search_email / read_email / send_email.
 """
 
+import asyncio
+
 from livekit.agents import RunContext, function_tool
 from livekit.agents.llm import ToolError
 
@@ -56,9 +58,14 @@ class GmailTools:
             self.gmail_send_email,
         ]
 
-    def _call(self, fn, *args, **kwargs):
+    async def _call(self, fn, *args, **kwargs):
+        """Run a Gmail network call on a worker thread.
+
+        The Gmail client is synchronous; called directly it froze the voice
+        for up to 1.4 s per request (2026-09-25 log). On a thread it can't.
+        """
         try:
-            return fn(*args, **kwargs)
+            return await asyncio.to_thread(fn, *args, **kwargs)
         except GmailAuthError as exc:
             raise ToolError(str(exc)) from exc
 
@@ -106,7 +113,9 @@ class GmailTools:
         errors = []
         for client in clients:
             try:
-                per_account.append((client, client.list_messages(limit=limit)))
+                per_account.append(
+                    (client, await asyncio.to_thread(client.list_messages, limit=limit))
+                )
             except GmailAuthError as exc:
                 errors.append(f"{client.label}: {exc}")
         result = self._merge(per_account, limit)
@@ -127,7 +136,12 @@ class GmailTools:
         errors = []
         for client in clients:
             try:
-                per_account.append((client, client.search_mail(query, limit=limit)))
+                per_account.append(
+                    (
+                        client,
+                        await asyncio.to_thread(client.search_mail, query, limit=limit),
+                    )
+                )
             except GmailAuthError as exc:
                 errors.append(f"{client.label}: {exc}")
         result = self._merge(per_account, limit)
@@ -148,13 +162,15 @@ class GmailTools:
         label, _, raw_id = message_id.partition(":")
         if raw_id:
             client = self._client_for_label(label)
-            message = self._call(client.get_message, raw_id)
+            message = await self._call(client.get_message, raw_id)
             return self._tag(client, message)
         # Bare id: try each account in turn.
         last_error = None
         for client in clients:
             try:
-                return self._tag(client, client.get_message(message_id))
+                return self._tag(
+                    client, await asyncio.to_thread(client.get_message, message_id)
+                )
             except GmailAuthError as exc:
                 last_error = exc
         raise ToolError(
@@ -203,7 +219,7 @@ class GmailTools:
         )
 
         async def execute() -> dict[str, object]:
-            return self._call(client.send_mail, to, subject, body)
+            return await self._call(client.send_mail, to, subject, body)
 
         return await self._approvals.gate(
             tool_name="gmail_send_email",

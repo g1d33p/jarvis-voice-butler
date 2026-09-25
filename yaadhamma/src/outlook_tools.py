@@ -6,6 +6,8 @@ word may go without asking (the same policy as dictated chat messages);
 anything Yaadhamma composed is read back first and needs a clear yes.
 """
 
+import asyncio
+
 from livekit.agents import RunContext, function_tool
 from livekit.agents.llm import ToolError
 
@@ -39,9 +41,10 @@ class OutlookTools:
             self.send_email,
         ]
 
-    def _call(self, fn, *args, **kwargs):
+    async def _call(self, fn, *args, **kwargs):
+        """Run an Outlook network call on a worker thread (keeps the voice smooth)."""
         try:
-            return fn(*args, **kwargs)
+            return await asyncio.to_thread(fn, *args, **kwargs)
         except OutlookAuthError as exc:
             raise ToolError(str(exc)) from exc
 
@@ -55,7 +58,7 @@ class OutlookTools:
         arrived. Returns short summaries with ids; use read_email for the
         full text of one.
         """
-        messages = self._call(self._client.list_inbox, limit=limit)
+        messages = await self._call(self._client.list_inbox, limit=limit)
         return {"messages": messages}
 
     @function_tool()
@@ -67,7 +70,7 @@ class OutlookTools:
         Args:
             query: What to look for, e.g. "electric bill" or "Ravi".
         """
-        messages = self._call(self._client.search_mail, query, limit=limit)
+        messages = await self._call(self._client.search_mail, query, limit=limit)
         return {"messages": messages}
 
     @function_tool()
@@ -79,7 +82,7 @@ class OutlookTools:
         Args:
             message_id: The id from a read_inbox or search_email result.
         """
-        return self._call(self._client.get_message, message_id)
+        return await self._call(self._client.get_message, message_id)
 
     @function_tool()
     async def check_calendar(
@@ -90,7 +93,7 @@ class OutlookTools:
         Args:
             days: How many days ahead to look (default 1, today).
         """
-        events = self._call(self._client.list_calendar, days=days)
+        events = await self._call(self._client.list_calendar, days=days)
         return {"events": events}
 
     @function_tool()
@@ -123,7 +126,7 @@ class OutlookTools:
         description = f"send email to {to} with subject {subject!r}"
 
         async def execute() -> dict[str, object]:
-            return self._call(self._client.send_mail, to, subject, body)
+            return await self._call(self._client.send_mail, to, subject, body)
 
         return await self._approvals.gate(
             tool_name="send_email",

@@ -86,4 +86,16 @@ TTS_VOICE = os.environ.get("YAADHAMMA_TTS_VOICE", "933563129e564b19a115bedd57b74
 # Limits for one task.
 MAX_TASK_STEPS = int(os.environ.get("YAADHAMMA_MAX_TASK_STEPS", "15"))
 TASK_TIMEOUT_SECONDS = float(os.environ.get("YAADHAMMA_TASK_TIMEOUT_SECONDS", "120"))
+# Longest a single tool call inside a task may run.
+TOOL_TIMEOUT_SECONDS = float(os.environ.get("YAADHAMMA_TOOL_TIMEOUT_SECONDS", "90"))
 MODEL_TIMEOUT_SECONDS = float(os.environ.get("YAADHAMMA_MODEL_TIMEOUT_SECONDS", "40"))
+
+# WhatsApp chats Jeevan wants eyes on (case-insensitive "name contains").
+# Comma-separated; change in .env.local without touching code.
+WHATSAPP_WATCHLIST = [
+    part.strip()
+    for part in os.environ.get(
+        "YAADHAMMA_WHATSAPP_WATCHLIST", "Saayam,SC1,SC2,SC3"
+    ).split(",")
+    if part.strip()
+]

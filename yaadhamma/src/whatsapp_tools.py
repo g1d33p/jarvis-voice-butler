@@ -25,7 +25,12 @@ from permissions import (
     latest_user_message,
 )
 from policy import can_send_without_asking
-from whatsapp import WhatsAppClient, WhatsAppError, WhatsAppNotPairedError
+from whatsapp import (
+    WhatsAppClient,
+    WhatsAppError,
+    WhatsAppNotPairedError,
+    matches_watchlist,
+)
 
 _SIGNIN_HINT = (
     "WhatsApp is not paired in Yaadhamma's own dedicated browser window. "
@@ -57,6 +62,7 @@ class WhatsAppTools:
             self.whatsapp_list_chats,
             self.whatsapp_read_chat,
             self.whatsapp_where_needed,
+            self.whatsapp_watchlist_digest,
             self.whatsapp_send_message,
         ]
 
@@ -136,7 +142,7 @@ class WhatsAppTools:
             # can be triaged without it.
             try:
                 messages = await self._client.read_messages(
-                    chat["name"], messages_per_chat
+                    chat["name"], messages_per_chat, exact=True
                 )
             except WhatsAppNotPairedError as exc:
                 raise ToolError(_SIGNIN_HINT) from exc
@@ -157,6 +163,76 @@ class WhatsAppTools:
             "unread_chat_count": len(unread),
             "total_chats": len(chats),
         }
+
+    @function_tool()
+    @browser_action(lambda self: self._client._browser_or_default())
+    async def whatsapp_watchlist_digest(
+        self,
+        context: RunContext,
+        open_chats: bool = True,
+        max_chats: int = 10,
+        messages_per_chat: int = 8,
+    ) -> dict[str, object]:
+        """Jeevan's main WhatsApp check: his watched community chats.
+
+        Covers every chat whose name contains a watchlist word (by default
+        Saayam, SC1, SC2, SC3), in one pass over the chat list. Use this for
+        any request about the Saayam or SC community chats, "my community
+        chats", or "where am I needed" in them.
+
+        Args:
+            open_chats: True reads the recent messages of each watched chat
+                with unread messages (opening a chat marks it as read in
+                WhatsApp). False only returns names, unread counts and the
+                last-message preview, without opening anything.
+            max_chats: Most unread watched chats to open (default 10).
+            messages_per_chat: Recent messages to read per chat (default 8).
+        """
+        import config
+
+        patterns = config.WHATSAPP_WATCHLIST
+        chats = await self._guarded(self._client.list_all_chats)
+        watched = [c for c in chats if matches_watchlist(c.get("name", ""), patterns)]
+        unread = [c for c in watched if c.get("unread", 0) > 0]
+        result: dict[str, object] = {
+            "watchlist": patterns,
+            "watched_chats": len(watched),
+            "unread_watched_chats": len(unread),
+            "quiet_chats": [c["name"] for c in watched if not c.get("unread", 0)],
+        }
+        if not open_chats:
+            result["unread"] = [
+                {
+                    "chat": c["name"],
+                    "unread": c.get("unread", 0),
+                    "preview": c.get("preview", ""),
+                }
+                for c in unread
+            ]
+            return result
+
+        details, skipped = [], []
+        for chat in unread[:max_chats]:
+            try:
+                messages = await self._client.read_messages(
+                    chat["name"], messages_per_chat, exact=True
+                )
+            except WhatsAppNotPairedError as exc:
+                raise ToolError(_SIGNIN_HINT) from exc
+            except WhatsAppError as exc:
+                skipped.append({"chat": chat["name"], "reason": str(exc)})
+                continue
+            details.append(
+                {
+                    "chat": chat["name"],
+                    "unread": chat.get("unread", 0),
+                    "messages": messages["messages"],
+                }
+            )
+        result["unread"] = details
+        result["skipped_chats"] = skipped
+        result["not_opened"] = [c["name"] for c in unread[max_chats:]]
+        return result
 
     @function_tool()
     @browser_action(lambda self: self._client._browser_or_default())

@@ -114,6 +114,17 @@ class Orchestrator:
         return await self._run(task, context)
 
     async def _run(self, task: Task, context: object) -> Task:
+        try:
+            return await self._run_steps(task, context)
+        except asyncio.CancelledError:
+            # Replaced by a newer request (or the session ended): record it
+            # instead of leaving the task marked "running" forever.
+            self._finish(
+                task, "cancelled", error="Stopped: replaced by a newer request."
+            )
+            raise
+
+    async def _run_steps(self, task: Task, context: object) -> Task:
         messages = self._conversations[task.id]
         task.set_state("running")
         self.store.save(task)
@@ -161,7 +172,13 @@ class Orchestrator:
                 return self._finish(task, "completed", result=text or "Done.")
 
             for i, (name, args) in enumerate(turn.calls):
-                outcome = await self.registry.call(name, args, context)
+                remaining = max(5.0, deadline - loop.time())
+                outcome = await self.registry.call(
+                    name,
+                    args,
+                    context,
+                    timeout=min(remaining, config.TOOL_TIMEOUT_SECONDS),
+                )
                 task.steps.append(
                     Step(
                         action=name,
@@ -238,6 +255,13 @@ class TaskTools:
     def tools(self) -> list:
         return [self.run_task, self.continue_task, self.recent_tasks]
 
+    @property
+    def _jobs(self) -> set:
+        # Created lazily so existing constructors keep working.
+        if not hasattr(self, "_job_set"):
+            self._job_set: set = set()
+        return self._job_set
+
     @function_tool()
     async def run_task(self, context: RunContext, goal: str) -> dict[str, object]:
         """Hand a multi-step job to the background assistant and wait for the outcome.
@@ -250,13 +274,31 @@ class TaskTools:
         Args:
             goal: The complete task in one sentence.
         """
+        # A new request replaces any task still running (2026-09-25: three
+        # overlapping WhatsApp tasks queued behind one browser and all timed
+        # out). Only one background job at a time.
+        for job in list(self._jobs):
+            if not job.done():
+                job.cancel()
+        job = asyncio.ensure_future(self.orchestrator.start(goal, context))
+        self._jobs.add(job)
+        job.add_done_callback(self._jobs.discard)
         try:
             task = await asyncio.wait_for(
-                self.orchestrator.start(goal, context),
-                timeout=_BACKSTOP_SECONDS,
+                asyncio.shield(job), timeout=_BACKSTOP_SECONDS
             )
         except TimeoutError as exc:
+            job.cancel()
             raise ToolError("The task took too long and was stopped.") from exc
+        except asyncio.CancelledError:
+            if job.cancelled() and not _current_task_cancelling():
+                return {
+                    "status": "cancelled",
+                    "reason": "Replaced by his newer request. Do not mention it "
+                    "unless he asks.",
+                }
+            job.cancel()
+            raise
         return task.summary()
 
     @function_tool()
@@ -287,6 +329,12 @@ class TaskTools:
             {"goal": task.goal, **task.summary()}
             for task in self.orchestrator.store.recent(5)
         ]
+
+
+def _current_task_cancelling() -> bool:
+    """True if the calling task itself is being cancelled (not just the job)."""
+    task = asyncio.current_task()
+    return bool(task and task.cancelling())
 
 
 # Quick, single actions the voice model keeps doing itself (instant replies).

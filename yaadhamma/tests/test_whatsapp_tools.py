@@ -47,7 +47,7 @@ class FakeClient:
             )
         return partial[0]["name"]
 
-    async def read_messages(self, chat_name, limit=15):
+    async def read_messages(self, chat_name, limit=15, exact=False):
         self._need_paired()
         chat_name = await self.find_chat(chat_name)
         self.read_calls.append(chat_name)
