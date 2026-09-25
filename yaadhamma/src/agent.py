@@ -99,6 +99,22 @@ def voice_components():
         "voice": config.REALTIME_VOICE,
         # Speak tool results when she is not mid-sentence.
         "tool_response_scheduling": genai_types.FunctionResponseScheduling.WHEN_IDLE,
+        # Wait a little longer before deciding he has finished a sentence
+        # (2026-09-25: "All right. Do you know" was cut off mid-question).
+        "realtime_input_config": genai_types.RealtimeInputConfig(
+            automatic_activity_detection=genai_types.AutomaticActivityDetection(
+                end_of_speech_sensitivity=genai_types.EndSensitivity.END_SENSITIVITY_LOW,
+                silence_duration_ms=config.END_OF_SPEECH_SILENCE_MS,
+            )
+        ),
+        # Cost control: Gemini Live re-bills the whole conversation on every
+        # reply, so keep only a recent window once it grows.
+        "context_window_compression": genai_types.ContextWindowCompressionConfig(
+            trigger_tokens=config.CONTEXT_TRIGGER_TOKENS,
+            sliding_window=genai_types.SlidingWindow(
+                target_tokens=config.CONTEXT_TARGET_TOKENS
+            ),
+        ),
     }
     if config.REALTIME_LANGUAGE:
         options["language"] = config.REALTIME_LANGUAGE
@@ -110,6 +126,15 @@ def voice_components():
             ".env.local (or set YAADHAMMA_VOICE_MODE=pipeline with a Meta key)."
         ) from exc
     return llm, None, None, "realtime"
+
+
+def _local_vad():
+    """The small on-device voice detector, or None if switched off."""
+    if not config.LOCAL_VAD:
+        return None
+    from livekit.agents import inference
+
+    return inference.VAD(min_silence_duration=config.LOCAL_VAD_SILENCE_S)
 
 
 class Assistant(Agent):
@@ -217,7 +242,10 @@ async def my_agent(ctx: JobContext):
     if assistant.voice_mode == "realtime":
         # Gemini Live does its own server-side turn detection and interruption
         # handling, so only preemptive generation is configured here.
+        # A local voice detector tells us exactly when he stops talking, so the
+        # reply-latency meter is accurate. Gemini still decides turns itself.
         session = AgentSession(
+            vad=_local_vad(),
             turn_handling=TurnHandlingOptions(
                 preemptive_generation={"enabled": True},
             ),
@@ -242,7 +270,14 @@ async def my_agent(ctx: JobContext):
     # Speed and cost: time every reply (you stop talking -> she starts
     # speaking) and add up the voice model's token use. One line per reply in
     # the console; a per-session summary in ~/.yaadhamma/voice_metrics.csv.
-    metrics = VoiceMetrics(mode=assistant.voice_mode)
+    metrics = VoiceMetrics(
+        mode=assistant.voice_mode,
+        # The detector reports "stopped" after this much silence; subtract it.
+        speech_end_offset_s=config.LOCAL_VAD_SILENCE_S
+        if assistant.voice_mode == "realtime" and config.LOCAL_VAD
+        else 0.0,
+        timing_reliable=assistant.voice_mode != "realtime" or config.LOCAL_VAD,
+    )
     session.on("user_state_changed", metrics.on_user_state)
     session.on("agent_state_changed", metrics.on_agent_state)
     session.on("metrics_collected", metrics.on_metrics)

@@ -97,15 +97,22 @@ def test_gemini_live_is_the_default_even_with_a_meta_key(
     assert stt is None and tts is None
 
 
-def test_realtime_uses_gemini_38_live_and_gacrux(monkeypatch, _fake_realtime_model):
+def test_realtime_uses_gemini_38_live_and_sulafat(monkeypatch, _fake_realtime_model):
     _env(monkeypatch, key=None)
     monkeypatch.delenv("YAADHAMMA_REALTIME_LANGUAGE", raising=False)
     agent.voice_components()
     made = _fake_realtime_model
     assert made["model"] == "gemini-3.8-live"
-    assert made["voice"] == "Gacrux"
+    assert made["voice"] == "Sulafat"
     assert made["tool_response_scheduling"] == (
         agent.genai_types.FunctionResponseScheduling.WHEN_IDLE
     )
     # No fixed language, so English/Telugu mixing is auto-detected.
     assert "language" not in made
+    # Patient end of speech, and a capped conversation window (cost).
+    detection = made["realtime_input_config"].automatic_activity_detection
+    assert detection.silence_duration_ms == 800
+    assert detection.end_of_speech_sensitivity == (
+        agent.genai_types.EndSensitivity.END_SENSITIVITY_LOW
+    )
+    assert made["context_window_compression"].sliding_window.target_tokens == 8000

@@ -67,6 +67,10 @@ class ModelTurn:
     content: object | None = None
     tokens_in: int = 0
     tokens_out: int = 0
+    # The provider's own tool-call objects, sent back unchanged on the next
+    # request. Gemini 3 attaches a "thought signature" to each call and
+    # rejects follow-up requests that drop it.
+    raw_tool_calls: list[dict] | None = None
 
 
 @dataclass
@@ -82,7 +86,9 @@ class MetaConfig:
     stt_model: str = "muse-voice-transcribe-1.0"
     stt_ws_url: str = META_STT_WS_URL
     stt_mode: str = "ENDPOINTING"  # PUSH_TO_TALK | ENDPOINTING | DIARIZATION
-    voice_mode: str = "realtime"  # "realtime" (Gemini Live) | "pipeline" (Meta rollback)
+    voice_mode: str = (
+        "realtime"  # "realtime" (Gemini Live) | "pipeline" (Meta rollback)
+    )
     tts_model: str = "fishaudio/s2.1-pro"
     tts_voice: str = "933563129e564b19a115bedd57b7406a"  # Sarah (Jeevan's pick)
 
@@ -95,9 +101,9 @@ class MetaConfig:
         return cls(
             api_key=get("YAADHAMMA_MODEL_API_KEY") or None,
             base_url=get("YAADHAMMA_MODEL_API_URL", config.META_BASE_URL),
-            brain_model=get("YAADHAMMA_BRAIN_MODEL", config.BRAIN_MODEL),
+            brain_model=get("YAADHAMMA_BRAIN_MODEL", "muse-spark-1.3"),
             voice_model=get("YAADHAMMA_VOICE_MODEL", config.VOICE_MODEL),
-            escalation_model=get("YAADHAMMA_ESCALATION_MODEL", config.ESCALATION_MODEL),
+            escalation_model=get("YAADHAMMA_ESCALATION_MODEL", "muse-spark-1.3"),
             escalation_effort=get(
                 "YAADHAMMA_ESCALATION_EFFORT", config.ESCALATION_EFFORT
             ),
@@ -161,6 +167,11 @@ class MetaBrainClient:
         response = await client.chat.completions.create(**kwargs)
         message = response.choices[0].message
         calls = []
+        raw_tool_calls = [
+            tool_call.model_dump(exclude_none=True)
+            for tool_call in message.tool_calls or []
+            if hasattr(tool_call, "model_dump")
+        ]
         for tool_call in message.tool_calls or []:
             try:
                 args = json.loads(tool_call.function.arguments or "{}")
@@ -173,7 +184,42 @@ class MetaBrainClient:
             text=message.content or "",
             tokens_in=usage.prompt_tokens if usage else 0,
             tokens_out=usage.completion_tokens if usage else 0,
+            raw_tool_calls=raw_tool_calls or None,
         )
+
+
+# Google's OpenAI-compatible endpoint for the Gemini API.
+GEMINI_OPENAI_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+
+
+class GeminiBrainClient(MetaBrainClient):
+    """The orchestrator's brain on Gemini, via Google's OpenAI-compatible API.
+
+    Same request/response handling as the Meta client; only the address and
+    key differ. Uses GOOGLE_API_KEY (the paid Tier 1 key).
+    """
+
+    def _get_client(self) -> AsyncOpenAI:
+        if self._client is None:
+            import os
+
+            key = os.environ.get("GOOGLE_API_KEY")
+            if not key:
+                raise MetaConfigError(
+                    "GOOGLE_API_KEY is not set in .env.local; the background "
+                    "brain (Gemini) cannot start."
+                )
+            self._client = AsyncOpenAI(base_url=GEMINI_OPENAI_URL, api_key=key)
+        return self._client
+
+
+def brain_client_from_config():
+    """The orchestrator's brain client, chosen by YAADHAMMA_BRAIN_PROVIDER."""
+    import config
+
+    if config.BRAIN_PROVIDER == "meta":
+        return MetaBrainClient()
+    return GeminiBrainClient()
 
 
 def _language(code: str) -> LanguageCode:

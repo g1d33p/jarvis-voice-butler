@@ -8,8 +8,8 @@ The orchestrator works through it with a text model in a loop:
 until the model reports the outcome, asks the user a question, or runs out of
 steps. Every task is recorded in the task store with its steps and token use.
 
-The brain is Muse Spark through the Meta Model API (see meta_client.py),
-called with OpenAI-style chat messages and function tools.
+The brain is Gemini (default) or Muse Spark, both called with OpenAI-style
+chat messages and function tools (see meta_client.py).
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from livekit.agents.llm import ToolError
 
 import config
 from actions import ActionRegistry
-from meta_client import MetaBrainClient, ModelTurn
+from meta_client import ModelTurn, brain_client_from_config
 from prompts import ORCHESTRATOR_INSTRUCTIONS
 from task_manager import Step, Task, TaskStore
 
@@ -52,29 +52,31 @@ _OMITTED = "(older result omitted to save space; call the tool again if needed)"
 def _assistant_message(task_id: str, step_index: int, turn: ModelTurn) -> dict:
     """Rebuild the assistant's reply as an OpenAI chat message.
 
-    Tool calls get synthetic ids; the following "tool" messages reference
-    them. The model never sees the ids, so they only need to be consistent
-    within one task.
+    When the provider returned its own tool-call objects they are sent back
+    unchanged (ids and all): Gemini 3 attaches a thought signature to each
+    call and rejects the next request if it is missing. Otherwise the calls
+    get synthetic ids that the following "tool" messages reference.
     """
-    return {
-        "role": "assistant",
-        "content": turn.text or None,
-        "tool_calls": [
-            {
-                "id": f"call_{task_id}_{step_index}_{i}",
-                "type": "function",
-                "function": {"name": name, "arguments": json.dumps(args)},
-            }
-            for i, (name, args) in enumerate(turn.calls)
-        ],
-    }
+    calls = turn.raw_tool_calls or [
+        {
+            "id": f"call_{task_id}_{step_index}_{i}",
+            "type": "function",
+            "function": {"name": name, "arguments": json.dumps(args)},
+        }
+        for i, (name, args) in enumerate(turn.calls)
+    ]
+    message: dict = {"role": "assistant", "content": turn.text or None}
+    if calls:
+        # An empty tool_calls list is rejected by some providers; omit it.
+        message["tool_calls"] = calls
+    return message
 
 
 @dataclass
 class Orchestrator:
     registry: ActionRegistry
     store: TaskStore
-    client: object = field(default_factory=MetaBrainClient)
+    client: object = field(default_factory=brain_client_from_config)
     brain_model: str = config.BRAIN_MODEL
     escalation_model: str = config.ESCALATION_MODEL
     max_steps: int = config.MAX_TASK_STEPS
@@ -145,7 +147,9 @@ class Orchestrator:
 
             task.tokens_in += turn.tokens_in
             task.tokens_out += turn.tokens_out
-            messages.append(_assistant_message(task.id, len(task.steps), turn))
+            assistant = _assistant_message(task.id, len(task.steps), turn)
+            call_ids = [call["id"] for call in assistant.get("tool_calls", [])]
+            messages.append(assistant)
 
             if not turn.calls:
                 text = turn.text.strip()
@@ -170,7 +174,7 @@ class Orchestrator:
                 messages.append(
                     {
                         "role": "tool",
-                        "tool_call_id": f"call_{task.id}_{len(task.steps) - 1}_{i}",
+                        "tool_call_id": call_ids[i],
                         "content": json.dumps(outcome, default=str),
                     }
                 )
@@ -288,45 +292,24 @@ class TaskTools:
 # Quick, single actions the voice model keeps doing itself (instant replies).
 # Everything else goes through run_task.
 VOICE_TOOL_NAMES = {
+    # Kept deliberately small (2026-09-25): every tool description is re-sent
+    # to Gemini Live on every reply, so each one costs money all session long.
+    # Email, WhatsApp, calendar, clipboard and memory edits go through
+    # run_task, where a cheaper model does the work and returns a short answer.
     "open_url",
-    "open_tab",
-    "list_tabs",
     "switch_tab",
     "close_tab",
     "close_browser",
     "observe_state",
-    "list_running_apps",
     "open_application",
     "quit_application",
-    "capture_screen",
-    "read_clipboard",
-    "write_clipboard",
     "open_path",
+    "capture_screen",
     # Completing an approval round-trip must always be one direct call away.
     "approve_pending_action",
     # Personal memory is instant and local; the voice model handles it itself.
     "remember",
     "recall",
-    "correct_memory",
-    "forget_memory",
-    "export_memories",
-    # Outlook reads are quick; sending goes through the approval gate.
-    "read_inbox",
-    "search_email",
-    "read_email",
-    "check_calendar",
-    "send_email",
-    # Gmail is the primary daily inbox; reads merge every linked account
-    # newest-first, and sending goes through the approval gate.
-    "gmail_read_inbox",
-    "gmail_search_email",
-    "gmail_read_email",
-    "gmail_send_email",
-    # WhatsApp triage is quick; sending goes through the approval gate.
-    "whatsapp_list_chats",
-    "whatsapp_read_chat",
-    "whatsapp_where_needed",
-    "whatsapp_send_message",
 }
 
 

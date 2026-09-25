@@ -41,11 +41,18 @@ PRICE_PER_MILLION = {
 class VoiceMetrics:
     mode: str = "realtime"
     csv_path: Path = DEFAULT_CSV
+    # The voice detector says "stopped" only after this much silence.
+    speech_end_offset_s: float = 0.0
+    # False when no local voice detector runs: the Gemini plugin then marks
+    # "user stopped" when her reply finishes generating, so timings are wrong.
+    timing_reliable: bool = True
     started: datetime = field(default_factory=datetime.now)
     latencies: list[float] = field(default_factory=list)
     tokens: dict[str, int] = field(
         default_factory=lambda: dict.fromkeys(PRICE_PER_MILLION, 0)
     )
+    # Input tokens Google served from its cache (billed at a discount).
+    cached_in: int = 0
     _user_stopped_at: float | None = None
 
     # ------------------------------------------------------------ events
@@ -53,11 +60,14 @@ class VoiceMetrics:
     def on_user_state(self, event) -> None:
         """He stopped talking: start the clock."""
         if event.old_state == "speaking" and event.new_state != "speaking":
-            self._user_stopped_at = event.created_at
+            self._user_stopped_at = event.created_at - self.speech_end_offset_s
 
     def on_agent_state(self, event) -> None:
         """She started speaking: stop the clock."""
         if event.new_state != "speaking" or self._user_stopped_at is None:
+            return
+        if not self.timing_reliable:
+            self._user_stopped_at = None
             return
         latency = max(0.0, event.created_at - self._user_stopped_at)
         self._user_stopped_at = None
@@ -81,6 +91,7 @@ class VoiceMetrics:
         self.tokens["text_in"] += inp.text_tokens
         self.tokens["audio_out"] += out.audio_tokens
         self.tokens["text_out"] += out.text_tokens
+        self.cached_in += getattr(inp, "cached_tokens", 0) or 0
 
     # ------------------------------------------------------------ results
 
@@ -107,6 +118,8 @@ class VoiceMetrics:
             "p90_s": round(pct(0.9), 2),
             "slowest_s": round(ordered[-1], 2) if ordered else 0.0,
             **self.tokens,
+            "cached_in": self.cached_in,
+            # Counts cached input at full price, so this is an upper bound.
             "est_cost_usd": round(self.estimated_cost(), 4),
         }
 

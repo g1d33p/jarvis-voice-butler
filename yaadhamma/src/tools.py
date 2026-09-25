@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from livekit.agents import RunContext, function_tool
 from livekit.agents.llm import ToolError
 
-from browser import BrowserError, BrowserManager
+from browser import BrowserError, BrowserManager, browser_action
 from permissions import (
     ApprovalManager,
     is_clear_approval,  # noqa: F401  (re-exported: tests import it from here)
@@ -61,6 +61,7 @@ class BrowserTools:
         ]
 
     @function_tool()
+    @browser_action(lambda self: self.browser)
     async def search_the_web(
         self,
         context: RunContext,
@@ -84,6 +85,7 @@ class BrowserTools:
             raise ToolError(str(exc)) from exc
 
     @function_tool()
+    @browser_action(lambda self: self.browser)
     async def open_url(self, context: RunContext, url: str) -> dict[str, str]:
         """Open a public webpage directly in the agent-controlled browser.
 
@@ -100,6 +102,7 @@ class BrowserTools:
             raise ToolError(str(exc)) from exc
 
     @function_tool()
+    @browser_action(lambda self: self.browser)
     async def read_page(self, context: RunContext) -> dict[str, str | bool]:
         """Read the visible text from the current browser page."""
         try:
@@ -108,6 +111,7 @@ class BrowserTools:
             raise ToolError(str(exc)) from exc
 
     @function_tool()
+    @browser_action(lambda self: self.browser)
     async def inspect_page(self, context: RunContext) -> dict[str, object]:
         """Inspect the current page: readable text plus numbered interactive elements.
 
@@ -122,6 +126,7 @@ class BrowserTools:
             raise ToolError(str(exc)) from exc
 
     @function_tool()
+    @browser_action(lambda self: self.browser)
     async def go_back(self, context: RunContext) -> dict[str, str]:
         """Go back to the previous page in the agent-controlled browser."""
         self._approvals.cancel_pending()
@@ -131,6 +136,7 @@ class BrowserTools:
             raise ToolError(str(exc)) from exc
 
     @function_tool()
+    @browser_action(lambda self: self.browser)
     async def take_screenshot(self, context: RunContext) -> dict[str, str | int | bool]:
         """Capture the current browser page for diagnostics."""
         try:
@@ -139,6 +145,7 @@ class BrowserTools:
             raise ToolError(str(exc)) from exc
 
     @function_tool()
+    @browser_action(lambda self: self.browser)
     async def click(self, context: RunContext, target: str) -> dict[str, str]:
         """Click a visible control.
 
@@ -199,6 +206,7 @@ class BrowserTools:
         return {"clicked": label, **result}
 
     @function_tool()
+    @browser_action(lambda self: self.browser)
     async def type_text(
         self,
         context: RunContext,
@@ -223,6 +231,7 @@ class BrowserTools:
             raise ToolError(str(exc)) from exc
 
     @function_tool()
+    @browser_action(lambda self: self.browser)
     async def scroll(self, context: RunContext, direction: str) -> dict[str, str]:
         """Scroll the current browser page up or down.
 
@@ -235,6 +244,7 @@ class BrowserTools:
             raise ToolError(str(exc)) from exc
 
     @function_tool()
+    @browser_action(lambda self: self.browser)
     async def press_key(self, context: RunContext, key: str) -> dict[str, str]:
         """Press a safe navigation key in the current browser page.
 
@@ -310,6 +320,7 @@ class BrowserTools:
         return result
 
     @function_tool()
+    @browser_action(lambda self: self.browser)
     async def list_tabs(self, context: RunContext) -> dict[str, object]:
         """List the open browser tabs with their numbers, titles and URLs.
 
@@ -322,6 +333,7 @@ class BrowserTools:
             raise ToolError(str(exc)) from exc
 
     @function_tool()
+    @browser_action(lambda self: self.browser)
     async def switch_tab(
         self, context: RunContext, tab_number: int
     ) -> dict[str, object]:
@@ -337,6 +349,7 @@ class BrowserTools:
             raise ToolError(str(exc)) from exc
 
     @function_tool()
+    @browser_action(lambda self: self.browser)
     async def open_tab(self, context: RunContext, url: str = "") -> dict[str, object]:
         """Open a new browser tab and make it the active tab.
 
@@ -353,6 +366,7 @@ class BrowserTools:
             raise ToolError(str(exc)) from exc
 
     @function_tool()
+    @browser_action(lambda self: self.browser)
     async def close_tab(
         self,
         context: RunContext,
@@ -378,6 +392,7 @@ class BrowserTools:
             raise ToolError(str(exc)) from exc
 
     @function_tool()
+    @browser_action(lambda self: self.browser)
     async def close_browser(
         self, context: RunContext, user_confirmed: bool = False
     ) -> dict[str, object]:
@@ -399,6 +414,7 @@ class BrowserTools:
             raise ToolError(str(exc)) from exc
 
     @function_tool()
+    @browser_action(lambda self: self.browser)
     async def reload_page(self, context: RunContext) -> dict[str, str]:
         """Reload the active browser tab."""
         self._approvals.cancel_pending()

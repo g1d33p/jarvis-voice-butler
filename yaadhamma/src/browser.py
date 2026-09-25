@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import os
 import re
 from pathlib import Path
@@ -264,6 +265,57 @@ def compact_elements(elements: list[dict]) -> list[str]:
     return lines
 
 
+class ActionLock:
+    """Lets only one browser action run at a time.
+
+    Gemini 3.8 Live runs tools in the background, so two actions can arrive
+    together (2026-09-25: "open a tab" and the WhatsApp check ran at the same
+    moment, and the check read the wrong tab). Re-entrant within one task, so
+    a tool that calls another tool cannot deadlock itself.
+    """
+
+    def __init__(self) -> None:
+        self._lock = asyncio.Lock()
+        self._owner: asyncio.Task | None = None
+        self._depth = 0
+
+    async def __aenter__(self) -> ActionLock:
+        task = asyncio.current_task()
+        if self._owner is task and task is not None:
+            self._depth += 1
+            return self
+        await self._lock.acquire()
+        self._owner = task
+        self._depth = 1
+        return self
+
+    async def __aexit__(self, *exc: object) -> None:
+        self._depth -= 1
+        if self._depth == 0:
+            self._owner = None
+            self._lock.release()
+
+
+def browser_action(get_browser):
+    """Decorator: run a tool while holding its browser's ActionLock."""
+
+    def decorate(method):
+        @functools.wraps(method)
+        async def wrapper(self, *args, **kwargs):
+            try:
+                lock = getattr(get_browser(self), "action_lock", None)
+            except AttributeError:  # e.g. a test double with no browser
+                lock = None
+            if lock is None:
+                return await method(self, *args, **kwargs)
+            async with lock:
+                return await method(self, *args, **kwargs)
+
+        return wrapper
+
+    return decorate
+
+
 class BrowserManager:
     """Own one isolated, visible browser for a LiveKit room.
 
@@ -287,6 +339,8 @@ class BrowserManager:
         self._context = None
         self._page: Page | None = None
         self._lock = asyncio.Lock()
+        # One tool-level browser action at a time (see ActionLock).
+        self.action_lock = ActionLock()
         # Separate lock so two tools called at once cannot both launch the
         # browser (the second launch fails: "profile is already in use").
         self._start_lock = asyncio.Lock()

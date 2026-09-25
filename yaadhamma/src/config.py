@@ -24,17 +24,52 @@ VOICE_MODE = os.environ.get("YAADHAMMA_VOICE_MODE", "realtime").strip().lower()
 
 # Gemini Live voice (realtime mode).
 REALTIME_MODEL = os.environ.get("YAADHAMMA_REALTIME_MODEL", "gemini-3.8-live")
-# Jeevan picked Gacrux in Google AI Studio (2026-09-25).
-REALTIME_VOICE = os.environ.get("YAADHAMMA_REALTIME_VOICE", "Gacrux")
+# Jeevan picked Sulafat (2026-09-25, after trying Gacrux).
+REALTIME_VOICE = os.environ.get("YAADHAMMA_REALTIME_VOICE", "Sulafat")
 # Empty = let Gemini detect the language (best for English/Telugu mixing).
 REALTIME_LANGUAGE = os.environ.get("YAADHAMMA_REALTIME_LANGUAGE", "").strip()
+# How long a pause (ms) before Gemini decides he has finished speaking.
+# Longer = fewer sentences cut in half, slightly slower replies.
+END_OF_SPEECH_SILENCE_MS = int(os.environ.get("YAADHAMMA_END_OF_SPEECH_MS", "800"))
+# Keep only a recent window of the conversation, because Gemini Live re-bills
+# the whole conversation on every reply. Trigger/target are in tokens.
+CONTEXT_TRIGGER_TOKENS = int(
+    os.environ.get("YAADHAMMA_CONTEXT_TRIGGER_TOKENS", "16000")
+)
+CONTEXT_TARGET_TOKENS = int(os.environ.get("YAADHAMMA_CONTEXT_TARGET_TOKENS", "8000"))
+# A small voice detector on the Mac, used to time replies accurately.
+# Set to "off" if she ever interrupts herself.
+LOCAL_VAD = os.environ.get("YAADHAMMA_LOCAL_VAD", "on").strip().lower() != "off"
+LOCAL_VAD_SILENCE_S = 0.25
 
 # The voice brain: Muse Spark via the Meta Model API.
 VOICE_MODEL = os.environ.get("YAADHAMMA_VOICE_MODEL", "muse-spark-1.3")
 
-# The background "brain": Muse Spark, stronger when stuck (higher effort).
-BRAIN_MODEL = os.environ.get("YAADHAMMA_BRAIN_MODEL", "muse-spark-1.3")
-ESCALATION_MODEL = os.environ.get("YAADHAMMA_ESCALATION_MODEL", "muse-spark-1.3")
+# The background "brain" for multi-step tasks.
+# "gemini" (default since 2026-09-25): cheap, fast Gemini via Google's
+# OpenAI-compatible API. "meta": Muse Spark (rollback only).
+BRAIN_PROVIDER = os.environ.get("YAADHAMMA_BRAIN_PROVIDER", "gemini").strip().lower()
+_BRAIN_DEFAULTS = {
+    "gemini": ("gemini-3.5-flash-lite", "gemini-3.8-flash"),
+    "meta": ("muse-spark-1.3", "muse-spark-1.3"),
+}
+_brain, _escalation = _BRAIN_DEFAULTS.get(BRAIN_PROVIDER, _BRAIN_DEFAULTS["gemini"])
+
+
+def _model_setting(name: str, default: str) -> str:
+    """Read a model name, ignoring one left over from the other provider.
+
+    An old .env.local may still say muse-spark-1.3; sending that to Gemini
+    would fail, so a name that does not match the provider falls back.
+    """
+    value = os.environ.get(name, "").strip()
+    prefix = "gemini" if BRAIN_PROVIDER == "gemini" else "muse"
+    return value if value.startswith(prefix) else default
+
+
+BRAIN_MODEL = _model_setting("YAADHAMMA_BRAIN_MODEL", _brain)
+# Used after two failed steps in a row.
+ESCALATION_MODEL = _model_setting("YAADHAMMA_ESCALATION_MODEL", _escalation)
 ESCALATION_EFFORT = os.environ.get("YAADHAMMA_ESCALATION_EFFORT", "high")
 
 # Speech-to-text for the voice pipeline.

@@ -19,6 +19,7 @@ Jeevan had opened it himself. Triage therefore consumes unread state.
 from livekit.agents import RunContext, function_tool
 from livekit.agents.llm import ToolError
 
+from browser import browser_action
 from permissions import (
     ApprovalManager,
     latest_user_message,
@@ -63,11 +64,19 @@ class WhatsAppTools:
         try:
             return await fn(*args, **kwargs)
         except WhatsAppNotPairedError as exc:
+            if "still loading" in str(exc):
+                # Not a pairing problem: the page was slow. Don't send him off
+                # to re-pair a session that works.
+                raise ToolError(
+                    "WhatsApp Web is still loading in Yaadhamma's browser. "
+                    "Wait a few seconds and try again."
+                ) from exc
             raise ToolError(_SIGNIN_HINT) from exc
         except WhatsAppError as exc:
             raise ToolError(str(exc)) from exc
 
     @function_tool()
+    @browser_action(lambda self: self._client._browser_or_default())
     async def whatsapp_list_chats(
         self, context: RunContext, limit: int = 30
     ) -> dict[str, object]:
@@ -80,6 +89,7 @@ class WhatsAppTools:
         return {"chats": chats[:limit], "total": len(chats)}
 
     @function_tool()
+    @browser_action(lambda self: self._client._browser_or_default())
     async def whatsapp_read_chat(
         self, context: RunContext, chat_name: str, limit: int = 10
     ) -> dict[str, object]:
@@ -99,6 +109,7 @@ class WhatsAppTools:
         return await self._guarded(self._client.read_messages, chat_name, limit)
 
     @function_tool()
+    @browser_action(lambda self: self._client._browser_or_default())
     async def whatsapp_where_needed(
         self,
         context: RunContext,
@@ -148,6 +159,7 @@ class WhatsAppTools:
         }
 
     @function_tool()
+    @browser_action(lambda self: self._client._browser_or_default())
     async def whatsapp_send_message(
         self, context: RunContext, chat_name: str, message: str
     ) -> dict[str, object]:
