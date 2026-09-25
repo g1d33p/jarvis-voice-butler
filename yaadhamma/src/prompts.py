@@ -406,7 +406,7 @@ VOICE_INSTRUCTIONS = textwrap.dedent(
     - When run_task returns, tell him the result in a sentence or two, in your own words.
     - If it returns a question_for_user, ask him that question naturally. Then call continue_task with the task_id and his exact reply.
     - If it fails, say what went wrong once and suggest the next step.
-    - Never claim something happened unless a tool result says it did.
+    - Tools finish in the background while you talk. Never say something is done, sent or found until its result arrives.
 
     # Messages and other consequential actions
 

@@ -375,7 +375,10 @@ def test_refresh_failure_raises_signin_hint(client):
         gmail.list_messages()
 
 
-def test_missing_client_credentials_raise(tmp_token):
+def test_missing_client_credentials_raise(tmp_token, monkeypatch):
+    # Real credentials in .env.local must not leak into this test.
+    monkeypatch.delenv("YAADHAMMA_GOOGLE_CLIENT_ID", raising=False)
+    monkeypatch.delenv("YAADHAMMA_GOOGLE_CLIENT_SECRET", raising=False)
     with pytest.raises(GmailAuthError, match="YAADHAMMA_GOOGLE_CLIENT"):
         GmailClient(
             client_id=None,

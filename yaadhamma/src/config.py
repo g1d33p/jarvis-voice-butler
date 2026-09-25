@@ -17,9 +17,17 @@ META_BASE_URL = os.environ.get(
     "YAADHAMMA_MODEL_API_URL", "https://api.meta.ai/v1"
 ).rstrip("/")
 
-# "pipeline": Muse Spark (LLM) + Voice Transcribe (STT) + LiveKit TTS.
-# "realtime": the old Gemini Live speech-to-speech path.
-VOICE_MODE = os.environ.get("YAADHAMMA_VOICE_MODE", "pipeline").strip().lower()
+# "realtime" (default): Gemini Live hears, thinks and speaks in one model.
+# "pipeline": the Meta path (Muse Spark + Voice Transcribe + LiveKit TTS),
+# kept for two weeks as a rollback, then removed.
+VOICE_MODE = os.environ.get("YAADHAMMA_VOICE_MODE", "realtime").strip().lower()
+
+# Gemini Live voice (realtime mode).
+REALTIME_MODEL = os.environ.get("YAADHAMMA_REALTIME_MODEL", "gemini-3.8-live")
+# Jeevan picked Gacrux in Google AI Studio (2026-09-25).
+REALTIME_VOICE = os.environ.get("YAADHAMMA_REALTIME_VOICE", "Gacrux")
+# Empty = let Gemini detect the language (best for English/Telugu mixing).
+REALTIME_LANGUAGE = os.environ.get("YAADHAMMA_REALTIME_LANGUAGE", "").strip()
 
 # The voice brain: Muse Spark via the Meta Model API.
 VOICE_MODEL = os.environ.get("YAADHAMMA_VOICE_MODEL", "muse-spark-1.3")

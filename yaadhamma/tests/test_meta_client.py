@@ -39,7 +39,7 @@ def test_config_defaults() -> None:
     assert cfg.escalation_model == "muse-spark-1.3"
     assert cfg.stt_model == "muse-voice-transcribe-1.0"
     assert cfg.stt_ws_url == "wss://api.meta.ai/v1/asr/realtime"
-    assert cfg.voice_mode == "pipeline"
+    assert cfg.voice_mode == "realtime"  # Gemini Live default since 2026-09-25
 
 
 def test_config_reads_env(monkeypatch) -> None:

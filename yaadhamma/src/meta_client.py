@@ -82,7 +82,7 @@ class MetaConfig:
     stt_model: str = "muse-voice-transcribe-1.0"
     stt_ws_url: str = META_STT_WS_URL
     stt_mode: str = "ENDPOINTING"  # PUSH_TO_TALK | ENDPOINTING | DIARIZATION
-    voice_mode: str = "pipeline"  # "pipeline" | "realtime" (old Gemini Live path)
+    voice_mode: str = "realtime"  # "realtime" (Gemini Live) | "pipeline" (Meta rollback)
     tts_model: str = "fishaudio/s2.1-pro"
     tts_voice: str = "933563129e564b19a115bedd57b7406a"  # Sarah (Jeevan's pick)
 

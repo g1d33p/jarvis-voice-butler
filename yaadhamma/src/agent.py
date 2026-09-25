@@ -25,6 +25,7 @@ from echo_guard import EchoGuard, filter_echo_events
 from failover_llm import FailoverLLM, maybe_wrap_with_failover
 from file_tools import FileTools
 from gmail_tools import GmailTools
+from latency import VoiceMetrics
 from mac_tools import MacTools
 from memory_tools import MemoryTools
 from meta_client import (
@@ -61,18 +62,17 @@ def _current_time_note() -> str:
 def voice_components():
     """Build the (llm, stt, tts, mode) voice stack.
 
-    Default ("pipeline"): Muse Spark thinks, Voice Transcribe listens, and
-    LiveKit Inference speaks. Falls back to the old Gemini Live realtime path
-    with a loud warning when no Meta key is configured; YAADHAMMA_VOICE_MODE
-    set to "realtime" forces that path.
+    Default ("realtime"): Gemini Live (YAADHAMMA_REALTIME_MODEL, normally
+    gemini-3.8-live) hears, thinks and speaks in one model, with the voice
+    Jeevan chose. On 3.8 Live, tools run in the background by default, so she
+    can keep talking while a task works; results are spoken once she is idle.
 
-    In pipeline mode the Muse Spark LLM is additionally wrapped for runtime
-    failover (see failover_llm): if the Meta endpoint hangs mid-conversation,
-    the turn is re-issued against a Gemini text model instead of retrying the
-    dead endpoint. Active only when GOOGLE_API_KEY is set.
+    Rollback ("pipeline", set YAADHAMMA_VOICE_MODE=pipeline): the Meta path,
+    Muse Spark thinks, Voice Transcribe listens, LiveKit Inference speaks,
+    wrapped in the Gemini failover. Needs YAADHAMMA_MODEL_API_KEY.
     """
     cfg = MetaConfig.from_env()
-    if cfg.voice_mode != "realtime" and cfg.api_key:
+    if cfg.voice_mode == "pipeline" and cfg.api_key:
         client = create_async_client(cfg)
         # Meta is OpenAI-compatible but not OpenAI: it rejects strict tool
         # schemas and non-"auto" tool_choice (400s). _strict_tool_schema=False
@@ -89,23 +89,25 @@ def voice_components():
         # ("Yaadhamma" -> "Yaah-dh-um-ah") just before synthesis.
         tts = PronunciationTTS(model=cfg.tts_model, voice=cfg.tts_voice)
         return llm, stt, tts, "pipeline"
-    if cfg.voice_mode != "realtime":
+    if cfg.voice_mode == "pipeline":
         logger.warning(
-            "YAADHAMMA_MODEL_API_KEY is not set; falling back to the Gemini "
-            "Live realtime voice path. Set the key in .env.local for the "
-            "Meta pipeline."
+            "YAADHAMMA_VOICE_MODE=pipeline but YAADHAMMA_MODEL_API_KEY is not "
+            "set; falling back to the Gemini Live realtime voice."
         )
+    options = {
+        "model": config.REALTIME_MODEL,
+        "voice": config.REALTIME_VOICE,
+        # Speak tool results when she is not mid-sentence.
+        "tool_response_scheduling": genai_types.FunctionResponseScheduling.WHEN_IDLE,
+    }
+    if config.REALTIME_LANGUAGE:
+        options["language"] = config.REALTIME_LANGUAGE
     try:
-        llm = google.beta.realtime.RealtimeModel(
-            model="gemini-3.1-flash-live-preview",
-            voice="Enceladus",
-            language="en-GB",
-            tool_response_scheduling=genai_types.FunctionResponseScheduling.WHEN_IDLE,
-        )
+        llm = google.beta.realtime.RealtimeModel(**options)
     except Exception as exc:
         raise MetaConfigError(
-            "No voice backend is usable: set YAADHAMMA_MODEL_API_KEY for the "
-            "Meta pipeline or GOOGLE_API_KEY for the Gemini realtime fallback."
+            "The Gemini Live voice could not start: check GOOGLE_API_KEY in "
+            ".env.local (or set YAADHAMMA_VOICE_MODE=pipeline with a Meta key)."
         ) from exc
     return llm, None, None, "realtime"
 
@@ -236,6 +238,15 @@ async def my_agent(ctx: JobContext):
         voice_llm = assistant._voice_llm
         if isinstance(voice_llm, FailoverLLM):
             logger.info("LLM failover active and silent")
+
+    # Speed and cost: time every reply (you stop talking -> she starts
+    # speaking) and add up the voice model's token use. One line per reply in
+    # the console; a per-session summary in ~/.yaadhamma/voice_metrics.csv.
+    metrics = VoiceMetrics(mode=assistant.voice_mode)
+    session.on("user_state_changed", metrics.on_user_state)
+    session.on("agent_state_changed", metrics.on_agent_state)
+    session.on("metrics_collected", metrics.on_metrics)
+    ctx.add_shutdown_callback(metrics.write_summary)
 
     # Echo guard: remember what she says so her own TTS coming back through
     # the mic is not transcribed as Jeevan (Assistant.stt_node drops it).
