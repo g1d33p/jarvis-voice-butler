@@ -33,6 +33,9 @@ async def _bring_page_window_to_front(page: Page) -> None:
 
 
 DEFAULT_PROFILE_DIR = Path.home() / ".yaadhamma" / "chrome-profile"
+# The scheduled digest's own browser: a separate linked WhatsApp device, so it
+# never collides with the voice agent's browser.
+DIGEST_PROFILE_DIR = Path.home() / ".yaadhamma" / "digest-profile"
 
 
 def _pid_alive(pid: int) -> bool:
@@ -330,10 +333,13 @@ class BrowserManager:
         headless: bool = False,
         timeout_ms: int = 15_000,
         profile_dir: Path | None = None,
+        launch_args: list[str] | None = None,
     ) -> None:
         self._headless = headless
         self._timeout_ms = timeout_ms
         self._profile_dir = profile_dir or DEFAULT_PROFILE_DIR
+        # Extra Chromium flags, e.g. to keep the digest's window off-screen.
+        self._launch_args = list(launch_args or [])
         self._playwright = None
         self._browser = None
         self._context = None
@@ -364,6 +370,7 @@ class BrowserManager:
             self._context = await self._playwright.chromium.launch_persistent_context(
                 user_data_dir=str(self._profile_dir),
                 headless=self._headless,
+                args=self._launch_args,
             )
         except Exception as exc:
             with contextlib.suppress(Exception):

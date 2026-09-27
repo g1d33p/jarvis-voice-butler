@@ -99,3 +99,9 @@ WHATSAPP_WATCHLIST = [
     ).split(",")
     if part.strip()
 ]
+
+# His own "(You)" WhatsApp chat, found by its phone digits (the digest is
+# delivered there). Set YAADHAMMA_SELF_CHAT_NUMBER in .env.local.
+SELF_CHAT_NUMBER = "".join(
+    ch for ch in os.environ.get("YAADHAMMA_SELF_CHAT_NUMBER", "") if ch.isdigit()
+)

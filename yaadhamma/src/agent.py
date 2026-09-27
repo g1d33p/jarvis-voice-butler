@@ -21,6 +21,7 @@ import config
 from actions import ActionRegistry
 from audit import AuditLog
 from browser import BrowserManager
+from digest import DigestTools
 from echo_guard import EchoGuard, filter_echo_events
 from failover_llm import FailoverLLM, maybe_wrap_with_failover
 from file_tools import FileTools
@@ -195,7 +196,11 @@ class Assistant(Agent):
                 registry=ActionRegistry(*toolsets), store=TaskStore()
             )
             instructions = VOICE_INSTRUCTIONS
-            tools = [*voice_tools(*toolsets), *TaskTools(self.orchestrator).tools]
+            tools = [
+                *voice_tools(*toolsets),
+                *TaskTools(self.orchestrator).tools,
+                *DigestTools().tools,
+            ]
 
         super().__init__(
             # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response

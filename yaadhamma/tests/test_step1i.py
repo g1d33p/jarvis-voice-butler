@@ -1,6 +1,7 @@
 """Step 1i (2026-09-27): replies are read as replies."""
 
 from test_whatsapp import FakeBrowser, _chat
+
 from whatsapp import WhatsAppClient
 
 

@@ -25,7 +25,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from browser import BrowserError, BrowserManager
+from browser import DIGEST_PROFILE_DIR, BrowserError, BrowserManager
 from whatsapp import WhatsAppClient, WhatsAppNotPairedError
 
 # Seconds the sign-in window stays open after pairing is confirmed, so the
@@ -59,9 +59,17 @@ async def pair_then_release(
 
 
 async def main() -> int:
-    print("Opening WhatsApp Web in a visible browser window...")
+    # --digest pairs the scheduled digest's own browser (a second linked
+    # device), so the digest never collides with the voice agent.
+    digest = "--digest" in sys.argv[1:]
+    print(
+        "Opening WhatsApp Web in a visible browser window"
+        + (" for the scheduled digest..." if digest else "...")
+    )
     try:
-        browser = BrowserManager(headless=False)
+        browser = BrowserManager(
+            headless=False, profile_dir=DIGEST_PROFILE_DIR if digest else None
+        )
         client = WhatsAppClient(browser=browser)
         await client.ensure_tab(browser)
     except BrowserError as exc:
