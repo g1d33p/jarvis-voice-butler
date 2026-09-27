@@ -173,6 +173,7 @@ class Orchestrator:
 
             for i, (name, args) in enumerate(turn.calls):
                 remaining = max(5.0, deadline - loop.time())
+                started = loop.time()
                 outcome = await self.registry.call(
                     name,
                     args,
@@ -185,6 +186,7 @@ class Orchestrator:
                         args=args,
                         ok=outcome["ok"],
                         summary=_summary(outcome),
+                        seconds=round(loop.time() - started, 1),
                     )
                 )
                 failures_in_a_row = 0 if outcome["ok"] else failures_in_a_row + 1
@@ -324,7 +326,12 @@ class TaskTools:
 
     @function_tool()
     async def recent_tasks(self, context: RunContext) -> list[dict[str, object]]:
-        """List the last few tasks and how they went, newest first."""
+        """List the last few tasks, newest first, with their status and results.
+
+        Call this whenever he asks how a task is going or what you found.
+        A finished task's answer is in its result, even if you never got
+        to say it.
+        """
         return [
             {"goal": task.goal, **task.summary()}
             for task in self.orchestrator.store.recent(5)

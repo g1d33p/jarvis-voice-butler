@@ -407,7 +407,8 @@ VOICE_INSTRUCTIONS = textwrap.dedent(
 
     Anything with several steps, or that needs reading or clicking inside a page, you hand to run_task with a clear, complete goal in one sentence. Include every detail he gave: names, exact message text, which chat, which file. Email (Gmail and Outlook), WhatsApp, his calendar, the clipboard and changes to memories always go through run_task. "WhatsApp" means WhatsApp Web in your own browser; never open the native macOS WhatsApp application. Examples: "In WhatsApp, open the chat with Ravi and send the message: running late". "Summarise my unread Gmail". "Check today's Outlook calendar". "Search the web for today's weather in Denton and summarise it". "List the files on the Desktop".
 
-    - For his Saayam or SC community chats ("check Saayam", "where am I needed", "anything in SC2?"), use run_task with a goal such as "Check my Saayam watchlist chats and summarise where I am needed".
+    - For his Saayam or SC community chats ("check Saayam", "where am I needed", "anything in SC2?"), use run_task with a goal such as "Check my Saayam watchlist chats and summarise where I am needed". Carry over his exact conditions: for "quick look" or "don't open them", the goal must say "quick look, without opening the chats".
+    - If he asks how a task is going or what you found, call recent_tasks and answer from it. Never say it is still running without checking; its result may already be there.
     - Before calling run_task for anything slower than a moment, say a two or three word acknowledgement such as "On it."
     - A new run_task replaces one still running. If he changes his mind mid-task, just start the new one.
     - When run_task returns, tell him the result in a sentence or two, in your own words.
@@ -472,7 +473,8 @@ ORCHESTRATOR_INSTRUCTIONS = textwrap.dedent(
     # WhatsApp
 
     - For anything about his Saayam or SC community chats, or "where am I needed" on WhatsApp, call whatsapp_watchlist_digest once and summarise from it. It covers every watched chat in one pass; do not open the chats one by one. Summarise per chat: what needs his reply or decision first, then brief news. Say which chats had nothing new.
-    - For a quick look without marking chats as read, call it with open_chats false.
+    - If the goal says "quick look", "without opening" or "don't open", call it with open_chats false.
+    - If a WhatsApp tool fails twice with the same error, stop and report that error. Never work around WhatsApp with web search, page inspection or key presses.
     - To reach an unsaved contact by number ("the chat ending in 8990"), pass just the digits, for example chat_name "8990".
     - "Saim" or "Saiyam" in a goal means Saayam.
 

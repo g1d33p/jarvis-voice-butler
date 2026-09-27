@@ -32,6 +32,8 @@ class Step:
     args: dict
     ok: bool
     summary: str
+    # How long the tool took, so slow steps are visible in the task log.
+    seconds: float = 0.0
 
 
 @dataclass
