@@ -3,10 +3,11 @@
 import json
 import sqlite3
 
+from test_orchestrator import FakeModel, Toys, call, turn
+
 from actions import ActionRegistry
 from orchestrator import Orchestrator, TaskTools
 from task_manager import TaskStore
-from test_orchestrator import FakeModel, Toys, call, turn
 
 
 async def test_each_step_records_how_long_it_took(tmp_path) -> None:

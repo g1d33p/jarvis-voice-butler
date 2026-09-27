@@ -49,6 +49,12 @@ function waRowTitle(row) {
   // found"). The unread count comes ONLY from the badge (waRowUnread).
   var t = row.querySelector('[data-testid="cell-frame-title"]');
   if (!t) return "";
+  // Primary (2026-09-25): the exact name sits in a [title] attribute inside
+  // the title box. The box's text also holds the unread badge, which turned
+  // "SC1-Organization1" with 4 unread into "SC1-Organization14".
+  var titled = t.querySelector ? t.querySelector("[title]") : null;
+  var attr = titled ? (titled.getAttribute("title") || "").trim() : "";
+  if (attr) return attr;
   var text = (t.textContent || "").trim();
   // Defensive: in some layouts the unread badge nests inside the title
   // container, so its text lands in textContent. Strip a leading
@@ -130,8 +136,17 @@ function waClickChat(doc, name) {
   for (var i = 0; i < rows.length; i++) {
     if (waRowTitle(rows[i]).toLowerCase() === target) {
       if (rows[i].scrollIntoView) rows[i].scrollIntoView();
+      // 2026-09-25: WhatsApp Web ignores script clicks now; only a real
+      // mouse click opens a chat. Return the row's centre so the Python side
+      // clicks it with the real mouse. (The script click stays: harmless.)
       rows[i].click();
-      return { opened: true, matched: waRowTitle(rows[i]) };
+      var out = { opened: true, matched: waRowTitle(rows[i]) };
+      if (rows[i].getBoundingClientRect) {
+        var r = rows[i].getBoundingClientRect();
+        out.x = r.left + r.width / 2;
+        out.y = r.top + r.height / 2;
+      }
+      return out;
     }
   }
   return { opened: false, reason: "not-visible" };
@@ -192,7 +207,13 @@ function waReadMessages(doc, limit) {
       : "";
     var host = el.closest('[data-testid="msg-container"]') || el;
     var cls = String((host.className || "") + " " + (el.className || ""));
-    out.push({ meta: meta, text: text, outgoing: /message-out/.test(cls) });
+    // Direction: the message's data-id starts with "true_" when he sent it
+    // (the message-out class is gone from the 2026 layout); class kept as a
+    // fallback for older layouts.
+    var idHost = el.closest ? el.closest("[data-id]") : null;
+    var dataId = idHost ? idHost.getAttribute("data-id") || "" : "";
+    var outgoing = /^true_/.test(dataId) || /message-out/.test(cls);
+    out.push({ meta: meta, text: text, outgoing: outgoing });
   }
   // A genuinely empty chat shows a "No messages here yet" placeholder; the
   // Python side treats that as loaded (not flaky) so it does not retry.
@@ -242,9 +263,15 @@ function waLastMessage(doc) {
 function waConversationTitle(doc) {
   var main = doc.querySelector("#main");
   if (!main) return { title: "" };
-  var header = main.querySelector("header");
+  // 2026 layout: the conversation header is marked conversation-header and
+  // its title conversation-info-header-chat-title. Other <header>s on the
+  // page belong to the chat list and side drawers ("Profile details").
+  var header =
+    main.querySelector('header[data-testid="conversation-header"]') ||
+    main.querySelector("header");
   if (!header) return { title: "" };
   var el =
+    header.querySelector('[data-testid="conversation-info-header-chat-title"]') ||
     header.querySelector('[data-testid="conversation-title"]') ||
     header.querySelector('[data-testid="cell-frame-title"]');
   var text = el ? (el.textContent || "").trim() : "";

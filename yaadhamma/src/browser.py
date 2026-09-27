@@ -615,6 +615,19 @@ class BrowserManager:
             # If we cannot tell, treat Enter as consequential.
             return {"consequential": "unknown", "label": ""}
 
+    async def click_at(self, x: float, y: float) -> None:
+        """Click the active tab with the real mouse at page coordinates.
+
+        Some sites (WhatsApp Web, 2026) ignore clicks sent from a script and
+        only react to genuine mouse events.
+        """
+        page = await self._get_page()
+        async with self._lock:
+            try:
+                await page.mouse.click(x, y)
+            except Exception as exc:
+                raise BrowserError(f"I could not click there: {exc}") from exc
+
     async def press_key(self, key: str) -> dict[str, str]:
         allowed_keys = {
             "Enter",

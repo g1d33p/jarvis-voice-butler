@@ -180,7 +180,6 @@ test("last message returns the newest message", () => {
   assert.equal(message.meta, "[10:33, 24/09/2026] Ravi Kumar: ");
 });
 
-console.log(`\n${passed} passed`);
 
 // --- Conversation header title (wrong-chat protection) -------------------
 
@@ -231,3 +230,48 @@ test("waScrollMessagesUp fails cleanly when there is no message pane", () => {
   const r = ex.waScrollMessagesUp(qrDoc());
   assert.equal(r.ok, false);
 });
+
+// --- 2026-09-25 layout (probe run on Jeevan's Mac) ------------------------
+const { El, docWith } = require("./dom_fake");
+
+test("row title comes from the inner [title], not the badge-polluted text", () => {
+  // Live: "SC1-Organization1" with 4 unread was read as "SC1-Organization14".
+  const titleBox = new El("div", { "data-testid": "cell-frame-title" }, [
+    new El("span", { title: "SC1-Organization1" }, ["SC1-Organization1"]),
+    new El("span", {}, ["4"]),
+    new El("span", { "aria-label": "4 unread messages" }, ["4 unread messages"]),
+  ]);
+  const row = new El("div", { "data-testid": "cell-frame-container" }, [titleBox]);
+  const doc = docWith([new El("div", { id: "pane-side" }, [row])]);
+  const { chats } = ex.waListChats(doc);
+  assert.equal(chats[0].name, "SC1-Organization1");
+  assert.equal(chats[0].unread, 4);
+});
+
+test("conversation title uses the 2026 chat-title testid in the conversation header", () => {
+  const drawerHeader = new El("header", {}, [new El("span", { title: "Profile details" }, ["Profile details"])]);
+  const convHeader = new El("header", { "data-testid": "conversation-header" }, [
+    new El("div", { "data-testid": "conversation-info-header-chat-title" }, ["SC1-Executives"]),
+  ]);
+  const doc = docWith([new El("div", { id: "main" }, [drawerHeader, convHeader])]);
+  assert.equal(ex.waConversationTitle(doc).title, "SC1-Executives");
+});
+
+test("message direction comes from data-id when the message-out class is gone", () => {
+  const msg = (id, meta) =>
+    new El("div", { "data-id": id }, [
+      new El("div", { "data-testid": "msg-container" }, [
+        new El("div", { "data-pre-plain-text": meta }, [new El("div", { class: "copyable-text" }, ["x"])]),
+      ]),
+    ]);
+  const doc = docWith([
+    new El("div", { id: "main" }, [
+      msg("false_120363@g.us_ABC", "[10:30, 25/09/2026] Ravi: "),
+      msg("true_120363@g.us_DEF", "[10:31, 25/09/2026] Jeevan: "),
+    ]),
+  ]);
+  const { messages } = ex.waReadMessages(doc, 10);
+  assert.deepEqual(messages.map((m) => m.outgoing), [false, true]);
+});
+
+console.log(`\n${passed} passed`);

@@ -150,6 +150,19 @@ class WhatsAppClient:
         except BrowserError as exc:
             raise WhatsAppError(f"WhatsApp Web did not respond: {exc}") from exc
 
+    async def _mouse_click(self, x: float, y: float) -> None:
+        """A real mouse click at page coordinates (in the WhatsApp tab)."""
+        browser = self._browser_or_default()
+        click_at = getattr(browser, "click_at", None)
+        if click_at is None:  # test doubles without a mouse
+            return
+        from browser import BrowserError
+
+        try:
+            await click_at(x, y)
+        except BrowserError as exc:
+            raise WhatsAppError(f"WhatsApp Web did not respond: {exc}") from exc
+
     async def ensure_tab(self, browser=None) -> None:
         """Make a WhatsApp Web tab the active tab, opening one if needed."""
         browser = browser or self._browser_or_default()
@@ -318,6 +331,10 @@ class WhatsAppClient:
         last_error: WhatsAppError | None = None
         for _ in range(max(1, attempts)):
             clicked = await self._evaluate("waClickChat", exact_name)
+            if clicked.get("opened") and "x" in clicked:
+                # WhatsApp Web only opens a chat on a real mouse click now
+                # (script clicks are ignored; probe run 2026-09-25).
+                await self._mouse_click(clicked["x"], clicked["y"])
             if not clicked.get("opened"):
                 last_error = WhatsAppError(
                     f"The chat {exact_name!r} is not visible right now. "
