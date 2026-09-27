@@ -10,6 +10,7 @@ takes screenshots, and returns short text rather than page contents.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -60,7 +61,8 @@ async def observe(
     """Take one observation of the Mac and Yaadhamma's browser."""
     note = ""
     try:
-        app_info = (read_app or read_active_app)()
+        # osascript can take up to a second; keep it off the voice's loop.
+        app_info = await asyncio.to_thread(read_app or read_active_app)
     except ToolError as exc:
         app_info = {"app": "", "window_title": ""}
         note = str(exc)

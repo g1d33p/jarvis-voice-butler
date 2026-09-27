@@ -476,7 +476,9 @@ ORCHESTRATOR_INSTRUCTIONS = textwrap.dedent(
     - For anything about his Saayam or SC community chats, or "where am I needed" on WhatsApp, call whatsapp_watchlist_digest once and summarise from it. It covers every watched chat in one pass; do not open the chats one by one. Summarise per chat: what needs his reply or decision first, then brief news. Say which chats had nothing new.
     - If the goal says "quick look", "without opening" or "don't open", call it with open_chats false.
     - If a WhatsApp tool fails twice with the same error, stop and report that error. Never work around WhatsApp with web search, page inspection or key presses.
-    - To reach an unsaved contact by number ("the chat ending in 8990"), pass just the digits, for example chat_name "8990".
+    - To reach an unsaved contact by number ("the chat ending in 8990", "+1 940 843 8446"), pass just the digits, for example chat_name "8990" or "9408438446".
+    - His chat with himself is listed under his own number followed by "(You)"; find it by its digits.
+    - There is no "currently open chat" target. If the goal does not name a chat, ask which one with QUESTION.
     - "Saim" or "Saiyam" in a goal means Saayam.
     - If a WhatsApp tool says several chats match, ask which one with QUESTION. When he answers, call the same tool again with the chat he chose. approve_pending_action is only for approvals, never for answering which chat.
 

@@ -628,6 +628,16 @@ class BrowserManager:
             except Exception as exc:
                 raise BrowserError(f"I could not click there: {exc}") from exc
 
+    async def clear_focused_field(self) -> None:
+        """Select everything in the focused field and delete it (internal use)."""
+        page = await self._get_page()
+        async with self._lock:
+            try:
+                await page.keyboard.press("ControlOrMeta+A")
+                await page.keyboard.press("Backspace")
+            except Exception as exc:
+                raise BrowserError(f"I could not clear that field: {exc}") from exc
+
     async def insert_text(self, text: str) -> None:
         """Type text into the focused field with the real keyboard."""
         page = await self._get_page()

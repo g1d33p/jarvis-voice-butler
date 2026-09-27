@@ -101,6 +101,9 @@ class FakeBrowser:
             return {"ok": True}
         if "return waScrollChats(document" in script:
             return {"before": len(self.chats)}
+        if "return waSearchBox(document" in script:
+            # Default fake: no usable search box, so the scroll path runs.
+            return {"found": False}
         if "return waClickChat(document" in script:
             self.click_calls += 1
             name = _script_arg(script)

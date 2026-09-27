@@ -274,4 +274,31 @@ test("message direction comes from data-id when the message-out class is gone", 
   assert.deepEqual(messages.map((m) => m.outgoing), [false, true]);
 });
 
+test("a reply's own text is read, and the quoted message kept separately", () => {
+  // Live 2026-09-27: Jeevan replied "Mm" to "yeahhhhhhh"; the reader
+  // returned the quoted "yeahhhhhhh" as his message.
+  const quote = new El("div", { role: "button", "aria-label": "Quoted message" }, [
+    new El("span", { class: "quoted-mention" }, [
+      new El("span", { class: "selectable-text" }, ["yeahhhhhhh"]),
+    ]),
+  ]);
+  const own = new El("span", { class: "selectable-text copyable-text" }, ["Mm"]);
+  const block = new El("div", { "data-pre-plain-text": "[23:24, 26/9/2026] Jeevan: " }, [quote, own]);
+  const doc = docWith([new El("div", { id: "main" }, [block])]);
+  const [msg] = ex.waReadMessages(doc, 5).messages;
+  assert.equal(msg.text, "Mm");
+  assert.equal(msg.quoted, "yeahhhhhhh");
+});
+
+test("a plain message has no quoted field", () => {
+  const block = new El("div", { "data-pre-plain-text": "[1:00, 1/1/2026] A: " }, [
+    new El("span", { class: "selectable-text copyable-text" }, ["hello"]),
+  ]);
+  const doc = docWith([new El("div", { id: "main" }, [block])]);
+  const [msg] = ex.waReadMessages(doc, 5).messages;
+  assert.equal(msg.text, "hello");
+  assert.equal(msg.quoted, undefined);
+});
+
+
 console.log(`\n${passed} passed`);

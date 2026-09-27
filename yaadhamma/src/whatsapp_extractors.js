@@ -214,6 +214,32 @@ function waIsOutgoing(doc, el, cls) {
   return /message-out/.test(cls || "");
 }
 
+// The chat-list search box ("Search or start a new chat"): its centre and
+// whether it holds text. Searching finds any chat, however far down the list.
+function waSearchBox(doc) {
+  var scope = doc.querySelector("#side") || doc;
+  var cands = scope.querySelectorAll('[contenteditable="true"], input');
+  for (var i = 0; i < cands.length; i++) {
+    var el = cands[i];
+    var hint = (
+      (el.getAttribute("aria-label") || "") + " " +
+      (el.getAttribute("aria-placeholder") || "") + " " +
+      (el.getAttribute("placeholder") || "") + " " +
+      (el.getAttribute("title") || "")
+    ).toLowerCase();
+    if (hint.indexOf("search") === -1) continue;
+    var value = el.tagName === "INPUT" ? el.value || "" : el.textContent || "";
+    var out = { found: true, hasText: !!value.trim() };
+    if (el.getBoundingClientRect) {
+      var r = el.getBoundingClientRect();
+      out.x = r.left + Math.min(r.width / 2, 60);
+      out.y = r.top + r.height / 2;
+    }
+    return out;
+  }
+  return { found: false };
+}
+
 // The message box: its centre, so it can be focused with a real mouse click.
 function waComposerBox(doc) {
   var box =
@@ -231,6 +257,44 @@ function waComposerBox(doc) {
   return out;
 }
 
+// Is `node` inside a quoted-reply block within the message `root`?
+function _inQuote(node, root) {
+  for (var a = node; a && a !== root; a = a.parentElement) {
+    var testid = (a.getAttribute && a.getAttribute("data-testid")) || "";
+    var label = ((a.getAttribute && a.getAttribute("aria-label")) || "").toLowerCase();
+    var role = (a.getAttribute && a.getAttribute("role")) || "";
+    if (/quote/i.test(testid) || label.indexOf("quot") !== -1 || role === "button") {
+      return true;
+    }
+  }
+  return false;
+}
+
+// A message's own text, and the message it replies to (if any).
+// 2026-09-27: Jeevan replied "Mm" to "yeahhhhhhh"; the reader returned the
+// quoted "yeahhhhhhh" as his message, because the quote comes first inside
+// the bubble. The reply's own text is the last text outside the quote.
+function waMessageText(el) {
+  var nodes = el.querySelectorAll("span.selectable-text, .copyable-text");
+  var own = null;
+  var quoted = null;
+  for (var i = 0; i < nodes.length; i++) {
+    if (_inQuote(nodes[i], el)) {
+      if (!quoted) quoted = nodes[i];
+    } else {
+      own = nodes[i];
+    }
+  }
+  var textOf = function (n) {
+    return n ? (n.innerText || n.textContent || "").trim() : "";
+  };
+  if (!own && !quoted) {
+    // No recognisable text element: fall back to the block's own text.
+    return { text: (el.innerText || el.textContent || "").trim(), quoted: "" };
+  }
+  return { text: textOf(own), quoted: textOf(quoted) };
+}
+
 function waReadMessages(doc, limit) {
   var main = doc.querySelector("#main");
   if (!main) return { messages: [], error: "no-open-chat" };
@@ -241,13 +305,12 @@ function waReadMessages(doc, limit) {
   for (var i = start; i < nodes.length; i++) {
     var el = nodes[i];
     var meta = el.getAttribute("data-pre-plain-text") || "";
-    var textEl = el.querySelector(".copyable-text");
-    var text = textEl
-      ? textEl.innerText || textEl.textContent || ""
-      : "";
+    var parts = waMessageText(el);
     var host = el.closest('[data-testid="msg-container"]') || el;
     var cls = String((host.className || "") + " " + (el.className || ""));
-    out.push({ meta: meta, text: text, outgoing: waIsOutgoing(doc, el, cls) });
+    var msg = { meta: meta, text: parts.text, outgoing: waIsOutgoing(doc, el, cls) };
+    if (parts.quoted) msg.quoted = parts.quoted;
+    out.push(msg);
   }
   // A genuinely empty chat shows a "No messages here yet" placeholder; the
   // Python side treats that as loaded (not flaky) so it does not retry.
@@ -356,5 +419,6 @@ if (typeof module !== "undefined" && module.exports) {
     waLastMessage: waLastMessage,
     waIsOutgoing: waIsOutgoing,
     waComposerBox: waComposerBox,
+    waSearchBox: waSearchBox,
   };
 }

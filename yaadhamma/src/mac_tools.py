@@ -1,3 +1,4 @@
+import asyncio
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -218,7 +219,8 @@ class MacTools:
         image itself is not sent anywhere. Tell the user the folder name, not the
         full path. For the browser page, use the browser screenshot tool instead.
         """
-        return capture_screen_to_file()
+        # screencapture blocks for a moment; run it off the voice's loop.
+        return await asyncio.to_thread(capture_screen_to_file)
 
 
 def capture_screen_to_file(directory: Path | None = None) -> dict[str, object]:

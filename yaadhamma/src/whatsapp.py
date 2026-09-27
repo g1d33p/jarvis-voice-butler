@@ -126,8 +126,13 @@ def matches_watchlist(chat_name: str, patterns: list[str]) -> bool:
 
 
 def _norm_chat_name(name: str) -> str:
-    """Normalized for comparing a resolved chat name with the on-screen header."""
-    return " ".join(str(name).casefold().split())
+    """Normalized for comparing a resolved chat name with the on-screen header.
+
+    Letters and digits only: the header draws emoji as pictures, so
+    "7k group💵🤑💵" in the list reads as "7k group" in the header
+    (live mismatch 2026-09-27).
+    """
+    return "".join(ch for ch in str(name).casefold() if ch.isalnum())
 
 
 def _js_call(name: str, *args: object) -> str:
@@ -312,22 +317,73 @@ class WhatsAppClient:
                 return
             await asyncio.sleep(1.0)
 
-    async def list_all_chats(self, max_rounds: int = 8) -> list[dict]:
+    async def _search_box(self) -> dict:
+        return await self._evaluate("waSearchBox")
+
+    async def _clear_search(self) -> None:
+        """Empty the chat-list search box, so the full list shows again."""
+        box = await self._search_box()
+        browser = self._browser_or_default()
+        if (
+            not box.get("hasText")
+            or "x" not in box
+            or not hasattr(browser, "clear_focused_field")
+        ):
+            return
+        await self._mouse_click(box["x"], box["y"])
+        await browser.clear_focused_field()
+        await asyncio.sleep(0.8)
+
+    async def _search_for(self, query: str) -> list[dict]:
+        """Type `query` into WhatsApp's own search box; return the rows shown.
+
+        Finds chats however far down the list they are (2026-09-27: a chat
+        deep in the list was never reached by scrolling). Returns [] if the
+        search box can't be used, so callers fall back to scrolling.
+        """
+        browser = self._browser_or_default()
+        if not (hasattr(browser, "click_at") and hasattr(browser, "insert_text")):
+            return []
+        box = await self._search_box()
+        if not box.get("found") or "x" not in box:
+            return []
+        await self._clear_search()
+        await self._mouse_click(box["x"], box["y"])
+        await browser.insert_text(query)
+        await asyncio.sleep(1.5)  # results appear as you type
+        return (await self._evaluate("waListChats")).get("chats", [])
+
+    async def list_all_chats(self, max_rounds: int = 25) -> list[dict]:
         """Every chat, scrolling the (virtualized) list top-down until stable."""
         await self._require_login()
+        await self._clear_search()
         seen: dict[str, dict] = {}
         async for chats in self._chat_windows(max_rounds):
             for chat in chats:
                 seen.setdefault(chat.get("name", ""), chat)
         return [c for c in seen.values() if c.get("name")]
 
-    async def find_chat(self, name: str, max_rounds: int = 8) -> str:
+    async def find_chat(self, name: str, max_rounds: int = 25) -> str:
         """Resolve `name` to the exact chat title, scrolling to find it.
 
         Raises WhatsAppError naming candidates when ambiguous, or saying
         plainly when nothing matches. Never guesses.
         """
         await self._require_login()
+        # Fastest and deepest: ask WhatsApp's own search, then fall back to
+        # scrolling through the list.
+        results = await self._search_for(name)
+        if results:
+            matches = find_chats(name, results)
+            if len(matches) == 1:
+                return matches[0]["name"]
+            if len(matches) > 1:
+                candidates = ", ".join(repr(c["name"]) for c in matches)
+                raise WhatsAppError(
+                    f"Several WhatsApp chats match {name!r}: {candidates}. "
+                    "Which one did you mean?"
+                )
+        await self._clear_search()
         async for chats in self._chat_windows(max_rounds):
             matches = find_chats(name, chats)
             if len(matches) == 1:
@@ -384,6 +440,11 @@ class WhatsAppClient:
                     loaded = True
                     break
                 await asyncio.sleep(poll_s)
+            if loaded:
+                # The pane fills in progressively: wait until the number of
+                # rendered messages stops growing (2026-09-27: a read taken
+                # the moment the first bubble appeared returned 1 of many).
+                await self._wait_for_messages_to_settle(poll_s)
             if not loaded:
                 last_error = WhatsAppError(
                     f"Opened {exact_name!r} but its messages would not load."
@@ -398,6 +459,20 @@ class WhatsAppClient:
         raise last_error or WhatsAppError(
             f"The chat {exact_name!r} is not visible right now."
         )
+
+    async def _wait_for_messages_to_settle(
+        self, poll_s: float = 0.5, max_wait_s: float = 3.0
+    ) -> None:
+        last = -1
+        deadline = time.monotonic() + max_wait_s
+        while time.monotonic() < deadline:
+            count = len(
+                (await self._evaluate("waReadMessages", 200)).get("messages", [])
+            )
+            if count == last:
+                return
+            last = count
+            await asyncio.sleep(poll_s)
 
     async def _verify_conversation_header(self, exact_name: str) -> None:
         """Raise if the open conversation header is not the requested chat.
@@ -425,14 +500,16 @@ class WhatsAppClient:
         messages = []
         for raw in result.get("messages", []):
             timestamp, sender = parse_message_meta(raw.get("meta", ""))
-            messages.append(
-                {
-                    "sender": sender,
-                    "time": timestamp,
-                    "text": raw.get("text", ""),
-                    "outgoing": bool(raw.get("outgoing")),
-                }
-            )
+            message = {
+                "sender": sender,
+                "time": timestamp,
+                "text": raw.get("text", ""),
+                "outgoing": bool(raw.get("outgoing")),
+            }
+            if raw.get("quoted"):
+                # The earlier message this one replies to.
+                message["replying_to"] = raw["quoted"]
+            messages.append(message)
         return messages
 
     async def read_messages(
