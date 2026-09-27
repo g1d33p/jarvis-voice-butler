@@ -69,7 +69,9 @@ const findRow = (query) => {
 };
 """
 
-ROW_JS = HELPERS + r"""
+ROW_JS = (
+    HELPERS
+    + r"""
 (query) => {
   const rows = rowsOf();
   const i = findRow(query);
@@ -94,8 +96,11 @@ ROW_JS = HELPERS + r"""
   };
 }
 """
+)
 
-CLICK_JS = HELPERS + r"""
+CLICK_JS = (
+    HELPERS
+    + r"""
 (query) => {
   const rows = rowsOf();
   const i = findRow(query);
@@ -105,8 +110,11 @@ CLICK_JS = HELPERS + r"""
   return { clicked: true, index: i };
 }
 """
+)
 
-ROW_BOX_JS = HELPERS + r"""
+ROW_BOX_JS = (
+    HELPERS
+    + r"""
 (query) => {
   const rows = rowsOf();
   const i = findRow(query);
@@ -116,8 +124,11 @@ ROW_BOX_JS = HELPERS + r"""
   return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
 }
 """
+)
 
-OPEN_JS = HELPERS + r"""
+OPEN_JS = (
+    HELPERS
+    + r"""
 () => {
   const composer = document.querySelector(
     'footer [contenteditable="true"], [contenteditable="true"][data-tab="10"], ' +
@@ -167,6 +178,17 @@ OPEN_JS = HELPERS + r"""
       .map(h => ({ ...describe(h), testids: Array.from(h.querySelectorAll('[data-testid]'))
         .map(e => e.getAttribute('data-testid')).slice(0, 12) })),
     copyable_text_on_page: document.querySelectorAll('.copyable-text').length,
+    // Who sent the last few messages, judged two ways (no content shown).
+    directions: stamped.slice(-8).map(el => {
+      const panel = el.closest('[data-testid="conversation-panel-messages"]');
+      const b = el.getBoundingClientRect(), p = panel ? panel.getBoundingClientRect() : null;
+      const idHost = el.closest('[data-id]');
+      const id = idHost ? idHost.getAttribute('data-id') || '' : '';
+      return {
+        side: p ? ((b.left + b.right) / 2 > (p.left + p.right) / 2 ? 'right' : 'left') : '?',
+        data_id_starts: /^true_/.test(id) ? 'true_' : /^false_/.test(id) ? 'false_' : 'other',
+      };
+    }),
     message_in_out: [
       document.querySelectorAll('.message-in').length,
       document.querySelectorAll('.message-out').length,
@@ -174,6 +196,7 @@ OPEN_JS = HELPERS + r"""
   };
 }
 """
+)
 
 
 async def probe_chat(browser: BrowserManager, page, name: str) -> None:

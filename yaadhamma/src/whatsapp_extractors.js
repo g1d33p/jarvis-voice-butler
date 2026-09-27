@@ -191,6 +191,46 @@ function waScrollChats(doc) {
   return { before: rows.length, advanced: advanced };
 }
 
+// Who sent a message. 2026-09-27: reading a one-to-one chat attributed the
+// other person's messages to Jeevan, so direction is now decided by where
+// the bubble sits: his messages are right-aligned, everyone else's left.
+// That is how the page looks to a person, so it survives markup changes.
+// Fallbacks for layouts where positions are unavailable: a data-id that
+// starts with "true_"/"false_", then the old message-out class.
+function waIsOutgoing(doc, el, cls) {
+  var panel =
+    (el.closest && el.closest('[data-testid="conversation-panel-messages"]')) ||
+    doc.querySelector("#main");
+  if (el.getBoundingClientRect && panel && panel.getBoundingClientRect) {
+    var b = el.getBoundingClientRect();
+    var p = panel.getBoundingClientRect();
+    if (p.width > 0 && b.width > 0) {
+      return (b.left + b.right) / 2 > (p.left + p.right) / 2;
+    }
+  }
+  var idHost = el.closest ? el.closest("[data-id]") : null;
+  var dataId = idHost ? idHost.getAttribute("data-id") || "" : "";
+  if (/^(true|false)_/.test(dataId)) return dataId.indexOf("true_") === 0;
+  return /message-out/.test(cls || "");
+}
+
+// The message box: its centre, so it can be focused with a real mouse click.
+function waComposerBox(doc) {
+  var box =
+    doc.querySelector('[data-testid="conversation-compose-box-input"]') ||
+    doc.querySelector('div[contenteditable="true"][data-tab="10"]') ||
+    doc.querySelector('div[contenteditable="true"][data-lexical-editor="true"]') ||
+    doc.querySelector("#main div[contenteditable='true']");
+  if (!box) return { found: false };
+  var out = { found: true, empty: !(box.textContent || "").trim() };
+  if (box.getBoundingClientRect) {
+    var r = box.getBoundingClientRect();
+    out.x = r.left + Math.min(r.width / 2, 40);
+    out.y = r.top + r.height / 2;
+  }
+  return out;
+}
+
 function waReadMessages(doc, limit) {
   var main = doc.querySelector("#main");
   if (!main) return { messages: [], error: "no-open-chat" };
@@ -207,13 +247,7 @@ function waReadMessages(doc, limit) {
       : "";
     var host = el.closest('[data-testid="msg-container"]') || el;
     var cls = String((host.className || "") + " " + (el.className || ""));
-    // Direction: the message's data-id starts with "true_" when he sent it
-    // (the message-out class is gone from the 2026 layout); class kept as a
-    // fallback for older layouts.
-    var idHost = el.closest ? el.closest("[data-id]") : null;
-    var dataId = idHost ? idHost.getAttribute("data-id") || "" : "";
-    var outgoing = /^true_/.test(dataId) || /message-out/.test(cls);
-    out.push({ meta: meta, text: text, outgoing: outgoing });
+    out.push({ meta: meta, text: text, outgoing: waIsOutgoing(doc, el, cls) });
   }
   // A genuinely empty chat shows a "No messages here yet" placeholder; the
   // Python side treats that as loaded (not flaky) so it does not retry.
@@ -320,5 +354,7 @@ if (typeof module !== "undefined" && module.exports) {
     waScrollMessagesUp: waScrollMessagesUp,
     waTypeAndSend: waTypeAndSend,
     waLastMessage: waLastMessage,
+    waIsOutgoing: waIsOutgoing,
+    waComposerBox: waComposerBox,
   };
 }

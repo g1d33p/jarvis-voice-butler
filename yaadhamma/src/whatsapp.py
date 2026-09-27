@@ -71,6 +71,30 @@ def _digits(text: str) -> str:
     return "".join(ch for ch in str(text) if ch.isdigit())
 
 
+_NUMBER_WORDS = {
+    "zero": "0",
+    "one": "1",
+    "two": "2",
+    "three": "3",
+    "four": "4",
+    "five": "5",
+    "six": "6",
+    "seven": "7",
+    "eight": "8",
+    "nine": "9",
+    "ten": "10",
+}
+
+
+def _loose(name: str) -> str:
+    """Compare chat names the way they are spoken: "SC1 organization one"
+    and "SC1-Organization1" are the same chat."""
+    words = str(name).casefold().replace("-", " ").replace("_", " ").split()
+    return "".join(
+        ch for word in words for ch in _NUMBER_WORDS.get(word, word) if ch.isalnum()
+    )
+
+
 def find_chats(name: str, chats: list[dict]) -> list[dict]:
     """Exact name matches if any, else case-insensitive substring matches.
 
@@ -87,6 +111,11 @@ def find_chats(name: str, chats: list[dict]) -> list[dict]:
     digits = _digits(target)
     if len(digits) >= 3 and not any(ch.isalpha() for ch in target):
         return [c for c in chats if _digits(c.get("name", "")).endswith(digits)]
+    loose = _loose(target)
+    if loose:
+        spoken = [c for c in chats if _loose(c.get("name", "")) == loose]
+        if spoken:
+            return spoken
     return [c for c in chats if target in c.get("name", "").casefold()]
 
 
@@ -465,16 +494,34 @@ class WhatsAppClient:
         before = _message_signature(
             (await self._evaluate("waLastMessage")).get("message")
         )
-        typed = await self._evaluate("waTypeAndSend", text)
-        if not typed.get("typed"):
-            raise WhatsAppError(
-                "Could not type into the WhatsApp message box "
-                f"({typed.get('reason', 'unknown reason')}). Nothing was sent."
-            )
-        if not typed.get("clickedSend"):
-            # The Send button was not found; Enter sends in WhatsApp Web.
-            browser = self._browser_or_default()
+        browser = self._browser_or_default()
+        if getattr(browser, "click_at", None) and getattr(browser, "insert_text", None):
+            # 2026 WhatsApp Web ignores script input: focus the message box
+            # with a real mouse click, type with the real keyboard, then send
+            # with a real Enter (probe run 2026-09-25).
+            box = await self._evaluate("waComposerBox")
+            if not box.get("found") or "x" not in box:
+                raise WhatsAppError(
+                    "Could not find the WhatsApp message box. Nothing was sent."
+                )
+            if not box.get("empty", True):
+                raise WhatsAppError(
+                    "The WhatsApp message box already contains a draft, so I "
+                    "did not add to it. Nothing was sent."
+                )
+            await self._mouse_click(box["x"], box["y"])
+            await browser.insert_text(text)
             await browser.press_key("Enter")
+        else:
+            typed = await self._evaluate("waTypeAndSend", text)
+            if not typed.get("typed"):
+                raise WhatsAppError(
+                    "Could not type into the WhatsApp message box "
+                    f"({typed.get('reason', 'unknown reason')}). Nothing was sent."
+                )
+            if not typed.get("clickedSend"):
+                # The Send button was not found; Enter sends in WhatsApp Web.
+                await browser.press_key("Enter")
 
         deadline = time.monotonic() + 12
         while time.monotonic() < deadline:

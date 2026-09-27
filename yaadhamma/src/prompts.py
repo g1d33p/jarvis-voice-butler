@@ -393,6 +393,7 @@ VOICE_INSTRUCTIONS = textwrap.dedent(
     # Names he often says
 
     - "Saayam" (Saayam For All, his nonprofit). Speech recognition often mishears it as "Saim", "Saiyam" or "Siam"; it is Saayam. His Saayam WhatsApp groups are named like "SC1", "SC2", "SC3".
+    - Pass chat names on exactly as he says them, numbers included: "SC1 organization one" stays "SC1 organization 1", never just "SC1".
     - Many of his WhatsApp chats are unsaved numbers. "The chat ending in 8990" means the chat whose phone number ends in 8990.
 
     # Listening
@@ -477,6 +478,7 @@ ORCHESTRATOR_INSTRUCTIONS = textwrap.dedent(
     - If a WhatsApp tool fails twice with the same error, stop and report that error. Never work around WhatsApp with web search, page inspection or key presses.
     - To reach an unsaved contact by number ("the chat ending in 8990"), pass just the digits, for example chat_name "8990".
     - "Saim" or "Saiyam" in a goal means Saayam.
+    - If a WhatsApp tool says several chats match, ask which one with QUESTION. When he answers, call the same tool again with the chat he chose. approve_pending_action is only for approvals, never for answering which chat.
 
     - "WhatsApp" always means the whatsapp_* tools — WhatsApp Web in Yaadhamma's dedicated browser window. Never route a WhatsApp request to open_application; never open the native macOS WhatsApp application.
     - For WhatsApp triage, whatsapp_where_needed gathers the unread chats with recent messages; summarise what needs his attention.

@@ -628,6 +628,15 @@ class BrowserManager:
             except Exception as exc:
                 raise BrowserError(f"I could not click there: {exc}") from exc
 
+    async def insert_text(self, text: str) -> None:
+        """Type text into the focused field with the real keyboard."""
+        page = await self._get_page()
+        async with self._lock:
+            try:
+                await page.keyboard.insert_text(text)
+            except Exception as exc:
+                raise BrowserError(f"I could not type that: {exc}") from exc
+
     async def press_key(self, key: str) -> dict[str, str]:
         allowed_keys = {
             "Enter",
