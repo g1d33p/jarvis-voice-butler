@@ -7,6 +7,8 @@ so it never collides with the voice agent. Its window opens off-screen.
 Manual run:
     cd ~/jarvis-voice-butler/yaadhamma
     uv run scripts/digest_run.py
+Delivery test (sends one line to your own "(You)" chat, nothing else):
+    uv run scripts/digest_run.py --test
 """
 
 import asyncio
@@ -18,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from browser import DIGEST_PROFILE_DIR, BrowserManager
-from digest import DigestStore, run_digest
+from digest import DigestStore, run_digest, send_test_message
 from meta_client import brain_client_from_config
 from whatsapp import WhatsAppClient
 
@@ -39,6 +41,10 @@ async def main() -> int:
         )
         client = WhatsAppClient(browser=browser)
         try:
+            if "--test" in sys.argv[1:]:
+                chat = await send_test_message(client)
+                print(f"Test message sent to {chat}. Check your phone.")
+                return 0
             result = await run_digest(client, brain_client_from_config(), DigestStore())
         finally:
             await browser.close()

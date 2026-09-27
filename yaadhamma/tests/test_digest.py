@@ -150,3 +150,28 @@ def test_schedule_runs_four_times_a_day_in_local_time(tmp_path) -> None:
     ]
     assert plist["WorkingDirectory"] == str(tmp_path)
     plistlib.dumps(plist)  # valid for macOS
+
+
+async def test_delivery_test_goes_only_to_his_own_chat() -> None:
+    from digest import send_test_message
+
+    client = FakeClient(CHATS)
+    chat = await send_test_message(client)
+    assert chat == "+1 (940) 843-8446 (You)"
+    assert client.sent == [
+        ("+1 (940) 843-8446 (You)", "Yaadhamma digest test: delivery works.")
+    ]
+
+
+async def test_own_chat_accepted_by_full_number_without_you_label(monkeypatch) -> None:
+    """Live: the chat's name label is just the number; "(You)" sits beside it."""
+    monkeypatch.setattr(config, "SELF_CHAT_NUMBER", "19408438446")
+    client = FakeClient([_chat("+1 (940) 843-8446"), _chat("+1 (940) 364-0413")])
+    assert await find_self_chat(client) == "+1 (940) 843-8446"
+
+
+async def test_short_number_never_counts_as_his_own_chat(monkeypatch) -> None:
+    monkeypatch.setattr(config, "SELF_CHAT_NUMBER", "8446")
+    client = FakeClient([_chat("+1 (940) 843-8446")])
+    with pytest.raises(WhatsAppError, match="not his own chat"):
+        await find_self_chat(client)

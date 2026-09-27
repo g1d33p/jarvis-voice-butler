@@ -47,8 +47,9 @@ async def pair_then_release(
     """
     await client.wait_for_login(timeout_s=300)
     print()
-    print("Paired! The session is saved in ~/.yaadhamma/chrome-profile,")
-    print("so Yaadhamma stays logged in.")
+    where = getattr(browser, "_profile_dir", "Yaadhamma's browser profile")
+    print(f"Paired! The session is saved in {where},")
+    print("so it stays logged in.")
     print(
         f"This window will close in {grace_s:.0f} seconds — Yaadhamma's own "
         "browser takes over from here. It never uses your regular Chrome, "

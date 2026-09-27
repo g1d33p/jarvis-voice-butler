@@ -105,13 +105,29 @@ class DigestStore:
 
 
 async def find_self_chat(client) -> str:
-    """Resolve his own "(You)" chat. Refuses anything else."""
-    name = await client.find_chat(config.SELF_CHAT_NUMBER or SELF_CHAT_MARKER)
-    if SELF_CHAT_MARKER.casefold() not in name.casefold():
+    """Resolve his own chat. Refuses anything else.
+
+    Accepted only if the chat is marked "(You)" or its number is exactly his
+    configured full number (10+ digits). 2026-09-27: WhatsApp keeps "(You)"
+    outside the chat's name label, so the number is the reliable check.
+    """
+    own_number = config.SELF_CHAT_NUMBER
+    name = await client.find_chat(own_number or SELF_CHAT_MARKER)
+    digits = "".join(ch for ch in name if ch.isdigit())
+    marked = SELF_CHAT_MARKER.casefold() in name.casefold()
+    by_number = len(own_number) >= 10 and digits.endswith(own_number[-10:])
+    if not (marked or by_number):
         raise WhatsAppError(
             f"Refusing to send the digest to {name!r}: not his own chat."
         )
     return name
+
+
+async def send_test_message(client) -> str:
+    """Prove the delivery path: send a one-line test to his own chat only."""
+    self_chat = await find_self_chat(client)
+    await client.send_message(self_chat, "Yaadhamma digest test: delivery works.")
+    return self_chat
 
 
 async def run_digest(client, brain, store: DigestStore) -> DigestResult:
