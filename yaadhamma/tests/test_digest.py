@@ -175,3 +175,117 @@ async def test_short_number_never_counts_as_his_own_chat(monkeypatch) -> None:
     client = FakeClient([_chat("+1 (940) 843-8446")])
     with pytest.raises(WhatsAppError, match="not his own chat"):
         await find_self_chat(client)
+
+
+# ----------------------------------------------------------------- email
+
+
+class FakeGmail:
+    def __init__(self, label, emails=(), broken=False):
+        self.label = label
+        self.emails = list(emails)
+        self.broken = broken
+        self.queries = []
+
+    def search_mail(self, query, limit=10):
+        self.queries.append(query)
+        if self.broken:
+            raise RuntimeError("token expired")
+        return self.emails
+
+
+RECRUITER = {
+    "from": "Priya <priya@acme.com>",
+    "subject": "Interview slot for Thursday?",
+    "snippet": "Could you confirm 2pm Thursday?",
+    "internal_date": 2,
+}
+
+
+async def test_email_alone_is_enough_for_a_digest(tmp_path) -> None:
+    """Jeevan: email should appear even when the Saayam chats are quiet."""
+    client = FakeClient(
+        [_chat("SC1-Executives", unread=0), _chat("+1 (940) 843-8446 (You)")]
+    )
+    brain = FakeBrain("*Needs you*\n- Priya asks you to confirm Thursday 2pm (email).")
+    gmail = [FakeGmail("personal1", [RECRUITER])]
+
+    result = await run_digest(
+        client, brain, DigestStore(tmp_path / "db"), gmail_clients=gmail
+    )
+
+    assert result.status == "sent"
+    assert result.emails == 1
+    sent_to, text = client.sent[0]
+    assert sent_to == "+1 (940) 843-8446 (You)"
+    assert "Priya" in text
+    payload = brain.calls[0][1]["content"]
+    assert "Interview slot for Thursday?" in payload
+
+
+async def test_email_search_skips_promotions_and_uses_the_last_digest_time(
+    tmp_path,
+) -> None:
+    from datetime import datetime
+
+    store = DigestStore(tmp_path / "db")
+    client = FakeClient(
+        [_chat("SC1-Executives", unread=0), _chat("+1 (940) 843-8446 (You)")]
+    )
+    await run_digest(
+        client, FakeBrain(), store, gmail_clients=[FakeGmail("p1")]
+    )  # quiet
+    last = store.last_success()
+
+    gmail = FakeGmail("p1")
+    await run_digest(client, FakeBrain(), store, gmail_clients=[gmail])
+
+    query = gmail.queries[0]
+    assert "is:unread" in query and "-category:promotions" in query
+    assert "-category:social" in query
+    assert f"after:{int(last.timestamp())}" in query
+    assert isinstance(last, datetime)
+
+
+async def test_one_broken_gmail_account_does_not_sink_the_digest(tmp_path) -> None:
+    client = FakeClient(
+        [_chat("SC1-Executives", unread=0), _chat("+1 (940) 843-8446 (You)")]
+    )
+    gmail = [FakeGmail("p1", broken=True), FakeGmail("p2", [RECRUITER])]
+
+    result = await run_digest(
+        client, FakeBrain(), DigestStore(tmp_path / "db"), gmail_clients=gmail
+    )
+
+    assert result.status == "sent"
+    assert result.emails == 1
+
+
+def test_email_window_first_run_and_cap(tmp_path) -> None:
+    from datetime import datetime, timedelta
+
+    from digest import email_since
+
+    store = DigestStore(tmp_path / "db")
+    now = datetime(2026, 9, 27, 13, 0)
+    assert email_since(store, now) == now - timedelta(hours=4)  # first run
+
+
+def test_old_digest_table_is_upgraded_in_place(tmp_path) -> None:
+    """Jeevan's database already has a digests table without the emails column."""
+    import sqlite3
+
+    path = tmp_path / "db"
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "CREATE TABLE digests (started TEXT NOT NULL, finished TEXT NOT NULL, "
+            "status TEXT NOT NULL, unread_chats INTEGER NOT NULL, summary TEXT NOT NULL, "
+            "error TEXT NOT NULL, tokens INTEGER NOT NULL)"
+        )
+        db.execute(
+            "INSERT INTO digests VALUES ('2026-09-27T12:00:00', '2026-09-27T12:01:00', "
+            "'quiet', 0, 'old', '', 0)"
+        )
+    store = DigestStore(path)
+    assert store.latest()["summary"] == "old"
+    assert store.last_success().hour == 12

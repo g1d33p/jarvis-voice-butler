@@ -1,8 +1,9 @@
-"""The scheduled Saayam digest (runs in the background, 4 times a day).
+"""The scheduled digest (runs in the background, 4 times a day).
 
 Each run:
   1. reads the unread messages in Jeevan's watched WhatsApp chats
-     (Saayam, SC1, SC2, SC3 by default),
+     (Saayam, SC1, SC2, SC3 by default) and his new unread Gmail (all linked
+     accounts; promotions/social skipped; read-only),
   2. asks the background brain (Gemini) for a short summary: where he is
      needed first, then brief news,
   3. sends it to his own "(You)" WhatsApp chat, and
@@ -18,7 +19,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from livekit.agents import RunContext, function_tool
@@ -29,24 +30,37 @@ from whatsapp import WhatsAppError, WhatsAppNotPairedError
 from whatsapp_tools import collect_watchlist
 
 SELF_CHAT_MARKER = "(You)"
-MAX_DIGEST_CHARS = 1500
+MAX_DIGEST_CHARS = 2000
+# Gmail search for the digest: new, unread, and not promotions/social/forums.
+EMAIL_FILTER = (
+    "in:inbox is:unread -category:promotions -category:social -category:forums"
+)
+# First run (or after a long gap): look back this far for email.
+FIRST_WINDOW = timedelta(hours=4)
+MAX_WINDOW = timedelta(hours=24)
 
-DIGEST_INSTRUCTIONS = """You write Jeevan's WhatsApp digest for his Saayam community chats.
-You get the unread messages from each watched chat as JSON. Write one WhatsApp
-message, plain text, under 1,200 characters:
+DIGEST_INSTRUCTIONS = """You write Jeevan's digest: his Saayam community WhatsApp chats and his
+new email. You get JSON with "whatsapp" (unread messages per watched chat) and
+"email" (new unread emails: account, from, subject, snippet). Write one WhatsApp
+message, plain text, under 1,500 characters:
 
 *Needs you*
-- one line per item that needs his reply, decision or action: who, what, which chat.
+- one line per chat message or email that needs his reply, decision or action:
+  who, what, and where (chat name, or "email").
 
-*FYI*
+*Saayam chats*
 - one short line per chat with anything else worth knowing.
 
-End with: Quiet: <chats with nothing new>, if any.
+*Email*
+- one short line per notable email or group of similar ones (e.g. "3 job alerts").
+  Skip pure noise such as marketing.
+
+End with: Quiet: <watched chats with nothing new>, if any.
 
 Rules: be specific (names, dates, asks). Never invent anything that is not in
-the messages. If nothing needs him, say "Nothing needs you right now." under
-*Needs you*. Messages marked outgoing are his own; use them to tell what he has
-already answered."""
+the data. Leave out a section that has nothing in it. If nothing needs him, say
+"Nothing needs you right now." under *Needs you*. WhatsApp messages marked
+outgoing are his own; use them to tell what he has already answered."""
 
 
 @dataclass
@@ -56,6 +70,7 @@ class DigestResult:
     unread_chats: int = 0
     error: str = ""
     tokens: int = 0
+    emails: int = 0
 
 
 class DigestStore:
@@ -76,11 +91,17 @@ class DigestStore:
                     tokens INTEGER NOT NULL
                 )"""
             )
+            columns = {row[1] for row in db.execute("PRAGMA table_info(digests)")}
+            if "emails" not in columns:
+                db.execute(
+                    "ALTER TABLE digests ADD COLUMN emails INTEGER NOT NULL DEFAULT 0"
+                )
 
     def record(self, started: datetime, result: DigestResult) -> None:
         with sqlite3.connect(self.path) as db:
             db.execute(
-                "INSERT INTO digests VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO digests (started, finished, status, unread_chats, "
+                "summary, error, tokens, emails) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     started.isoformat(timespec="seconds"),
                     datetime.now().isoformat(timespec="seconds"),
@@ -89,8 +110,18 @@ class DigestStore:
                     result.summary,
                     result.error,
                     result.tokens,
+                    result.emails,
                 ),
             )
+
+    def last_success(self) -> datetime | None:
+        """When the last digest that worked (sent or quiet) started."""
+        with sqlite3.connect(self.path) as db:
+            row = db.execute(
+                "SELECT started FROM digests WHERE status IN ('sent', 'quiet') "
+                "ORDER BY started DESC LIMIT 1"
+            ).fetchone()
+        return datetime.fromisoformat(row[0]) if row else None
 
     def latest(self) -> dict | None:
         with sqlite3.connect(self.path) as db:
@@ -102,6 +133,43 @@ class DigestStore:
             return None
         keys = ("time", "status", "unread_chats", "summary", "error")
         return dict(zip(keys, row, strict=True))
+
+
+def email_since(store: DigestStore, now: datetime) -> datetime:
+    """Email window: since the last successful digest, within sensible limits."""
+    last = store.last_success()
+    if last is None or now - last > MAX_WINDOW:
+        return now - (FIRST_WINDOW if last is None else MAX_WINDOW)
+    return last
+
+
+async def collect_email(gmail_clients, since: datetime, limit: int = 25) -> dict:
+    """New unread inbox email across all linked Gmail accounts. Read-only:
+    nothing is marked read, archived or changed."""
+    import asyncio
+
+    query = f"{EMAIL_FILTER} after:{int(since.timestamp())}"
+    emails, errors = [], []
+    for client in gmail_clients or []:
+        try:
+            found = await asyncio.to_thread(client.search_mail, query, limit=limit)
+        except Exception as exc:  # one broken account must not sink the digest
+            errors.append(f"{getattr(client, 'label', 'gmail')}: {exc}")
+            continue
+        for m in found:
+            emails.append(
+                {
+                    "account": getattr(client, "label", ""),
+                    "from": m.get("from", ""),
+                    "subject": m.get("subject", ""),
+                    "snippet": (m.get("snippet") or "")[:200],
+                    "internal_date": m.get("internal_date", 0),
+                }
+            )
+    emails.sort(key=lambda e: e["internal_date"], reverse=True)
+    for e in emails:
+        e.pop("internal_date")
+    return {"emails": emails, "errors": errors}
 
 
 async def find_self_chat(client) -> str:
@@ -130,24 +198,33 @@ async def send_test_message(client) -> str:
     return self_chat
 
 
-async def run_digest(client, brain, store: DigestStore) -> DigestResult:
+async def run_digest(
+    client, brain, store: DigestStore, gmail_clients=None
+) -> DigestResult:
     """One scheduled digest run. Never raises; the outcome is recorded."""
     started = datetime.now()
     try:
-        data = await collect_watchlist(
+        chats = await collect_watchlist(
             client, config.WHATSAPP_WATCHLIST, open_chats=True, max_chats=20
         )
-        unread = int(data.get("unread_watched_chats", 0))
-        if unread == 0:
+        unread = int(chats.get("unread_watched_chats", 0))
+        email = await collect_email(gmail_clients, email_since(store, started))
+        new_emails = len(email["emails"])
+        if unread == 0 and new_emails == 0:
             result = DigestResult(
-                status="quiet", summary="Nothing new in the watched chats."
+                status="quiet", summary="Nothing new in the watched chats or email."
             )
         else:
             turn = await brain.generate(
                 config.BRAIN_MODEL,
                 [
                     {"role": "system", "content": DIGEST_INSTRUCTIONS},
-                    {"role": "user", "content": json.dumps(data, ensure_ascii=False)},
+                    {
+                        "role": "user",
+                        "content": json.dumps(
+                            {"whatsapp": chats, "email": email}, ensure_ascii=False
+                        ),
+                    },
                 ],
                 [],
             )
@@ -161,6 +238,7 @@ async def run_digest(client, brain, store: DigestStore) -> DigestResult:
                 status="sent",
                 summary=summary,
                 unread_chats=unread,
+                emails=new_emails,
                 tokens=turn.tokens_in + turn.tokens_out,
             )
     except WhatsAppNotPairedError:

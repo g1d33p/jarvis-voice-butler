@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from browser import DIGEST_PROFILE_DIR, BrowserManager
 from digest import DigestStore, run_digest, send_test_message
+from gmail import GmailClient, discover_labels
 from meta_client import brain_client_from_config
 from whatsapp import WhatsAppClient
 
@@ -45,7 +46,10 @@ async def main() -> int:
                 chat = await send_test_message(client)
                 print(f"Test message sent to {chat}. Check your phone.")
                 return 0
-            result = await run_digest(client, brain_client_from_config(), DigestStore())
+            gmail = [GmailClient(label=label) for label in discover_labels()]
+            result = await run_digest(
+                client, brain_client_from_config(), DigestStore(), gmail_clients=gmail
+            )
         finally:
             await browser.close()
     print(f"Digest {result.status}. {result.error or result.summary[:200]}")
