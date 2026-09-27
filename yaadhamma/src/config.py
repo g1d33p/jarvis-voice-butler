@@ -105,3 +105,22 @@ WHATSAPP_WATCHLIST = [
 SELF_CHAT_NUMBER = "".join(
     ch for ch in os.environ.get("YAADHAMMA_SELF_CHAT_NUMBER", "") if ch.isdigit()
 )
+
+# Words that pull an email out of Gmail's Promotions/Social tabs into the
+# digest (job mail often lands there).
+EMAIL_KEYWORDS = [
+    w.strip()
+    for w in os.environ.get(
+        "YAADHAMMA_EMAIL_KEYWORDS",
+        "job,jobs,interview,recruiter,recruiting,hiring,job offer,application,"
+        "applied,position,opportunity,Saayam",
+    ).split(",")
+    if w.strip()
+]
+
+# Digest email: include emails he already opened (default) or only unread.
+EMAIL_UNREAD_ONLY = os.environ.get("YAADHAMMA_EMAIL_UNREAD_ONLY", "").strip() in {
+    "1",
+    "true",
+    "yes",
+}

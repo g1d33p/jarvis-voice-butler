@@ -2,7 +2,7 @@
 
 Each run:
   1. reads the unread messages in Jeevan's watched WhatsApp chats
-     (Saayam, SC1, SC2, SC3 by default) and his new unread Gmail (all linked
+     (Saayam, SC1, SC2, SC3 by default) and every new Gmail email (all linked
      accounts; promotions/social skipped; read-only),
   2. asks the background brain (Gemini) for a short summary: where he is
      needed first, then brief news,
@@ -16,6 +16,7 @@ Nothing is sent when no watched chat has unread messages.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sqlite3
 from dataclasses import dataclass
@@ -32,16 +33,19 @@ from whatsapp_tools import collect_watchlist
 SELF_CHAT_MARKER = "(You)"
 MAX_DIGEST_CHARS = 2000
 # Gmail search for the digest: new, unread, and not promotions/social/forums.
-EMAIL_FILTER = (
-    "in:inbox is:unread -category:promotions -category:social -category:forums"
-)
+EMAIL_FILTER = "in:inbox -category:promotions -category:social -category:forums"
+# Promotions/Social still hold things he cares about (job mail lands there):
+# a second search picks those out by keyword. Change the words in .env.local
+# with YAADHAMMA_EMAIL_KEYWORDS (comma-separated).
+PROMO_SOCIAL_FILTER = "in:inbox {category:promotions category:social}"
 # First run (or after a long gap): look back this far for email.
 FIRST_WINDOW = timedelta(hours=4)
 MAX_WINDOW = timedelta(hours=24)
 
 DIGEST_INSTRUCTIONS = """You write Jeevan's digest: his Saayam community WhatsApp chats and his
 new email. You get JSON with "whatsapp" (unread messages per watched chat) and
-"email" (new unread emails: account, from, subject, snippet). Write one WhatsApp
+"email" (new emails since the last digest: account address, from, subject,
+snippet, and "unread" = he has not opened it yet). Write one WhatsApp
 message, plain text, under 1,500 characters:
 
 *Needs you*
@@ -56,6 +60,12 @@ message, plain text, under 1,500 characters:
   Skip pure noise such as marketing.
 
 End with: Quiet: <watched chats with nothing new>, if any.
+
+Emails he has not opened yet deserve more attention; opened ones can be FYI
+unless they still need action. Name the account only when it helps (e.g. a
+work vs personal address).
+
+Mark emails he has not opened yet with "(unread)".
 
 Rules: be specific (names, dates, asks). Never invent anything that is not in
 the data. Leave out a section that has nothing in it. If nothing needs him, say
@@ -143,33 +153,111 @@ def email_since(store: DigestStore, now: datetime) -> datetime:
     return last
 
 
-async def collect_email(gmail_clients, since: datetime, limit: int = 25) -> dict:
-    """New unread inbox email across all linked Gmail accounts. Read-only:
-    nothing is marked read, archived or changed."""
+async def _account_name(client) -> str:
+    """The account's real address (e.g. name@gmail.com), not its internal
+    label, so the digest says which inbox an email is in."""
     import asyncio
 
-    query = f"{EMAIL_FILTER} after:{int(since.timestamp())}"
-    emails, errors = [], []
+    cached = getattr(client, "_digest_address", None)
+    if cached:
+        return cached
+    label = getattr(client, "label", "gmail")
+    try:
+        address = (await asyncio.to_thread(client.get_profile)).get("email") or label
+    except Exception:
+        address = label
+    with contextlib.suppress(AttributeError):
+        client._digest_address = address
+    return address
+
+
+def email_queries(since: datetime) -> list[str]:
+    """The Gmail searches for one digest: the main inbox, plus Promotions and
+    Social mail that mentions one of his keywords (jobs, interviews, ...)."""
+    after = f"after:{int(since.timestamp())}"
+    # Read or not: an email he glanced at on his phone still belongs in the
+    # digest (2026-09-27). Each digest only covers the time since the last
+    # one, so nothing repeats. YAADHAMMA_EMAIL_UNREAD_ONLY=1 restores the
+    # unread-only behaviour.
+    if config.EMAIL_UNREAD_ONLY:
+        after = f"is:unread {after}"
+    queries = [f"{EMAIL_FILTER} {after}"]
+    words = [w for w in config.EMAIL_KEYWORDS if w]
+    if words:
+        either = " ".join(f'"{w}"' if " " in w else w for w in words)
+        queries.append(f"{PROMO_SOCIAL_FILTER} {{{either}}} {after}")
+    return queries
+
+
+async def collect_email(gmail_clients, since: datetime, limit: int = 25) -> dict:
+    """Every new inbox email (read or not) across all linked Gmail accounts.
+    Read-only: nothing is marked read, archived or changed."""
+    import asyncio
+
+    emails, errors, seen = [], [], set()
     for client in gmail_clients or []:
-        try:
-            found = await asyncio.to_thread(client.search_mail, query, limit=limit)
-        except Exception as exc:  # one broken account must not sink the digest
-            errors.append(f"{getattr(client, 'label', 'gmail')}: {exc}")
-            continue
-        for m in found:
-            emails.append(
-                {
-                    "account": getattr(client, "label", ""),
-                    "from": m.get("from", ""),
-                    "subject": m.get("subject", ""),
-                    "snippet": (m.get("snippet") or "")[:200],
-                    "internal_date": m.get("internal_date", 0),
-                }
-            )
+        label = await _account_name(client)
+        for query in email_queries(since):
+            try:
+                found = await asyncio.to_thread(client.search_mail, query, limit=limit)
+            except Exception as exc:  # one broken account must not sink the digest
+                errors.append(f"{label}: {exc}")
+                break
+            for m in found:
+                key = (label, m.get("id") or (m.get("subject"), m.get("internal_date")))
+                if key in seen:
+                    continue
+                seen.add(key)
+                emails.append(
+                    {
+                        "account": label,
+                        "from": m.get("from", ""),
+                        "subject": m.get("subject", ""),
+                        "snippet": (m.get("snippet") or "")[:200],
+                        "unread": not m.get("is_read", False),
+                        "internal_date": m.get("internal_date", 0),
+                    }
+                )
     emails.sort(key=lambda e: e["internal_date"], reverse=True)
     for e in emails:
         e.pop("internal_date")
     return {"emails": emails, "errors": errors}
+
+
+async def preview_email(gmail_clients, brain, hours: float) -> dict:
+    """Test run for email only: gather the last `hours` of email and write the
+    summary, WITHOUT sending anything or touching WhatsApp."""
+    since = datetime.now() - timedelta(hours=hours)
+    accounts = [await _account_name(c) for c in gmail_clients or []]
+    email = await collect_email(gmail_clients, since)
+    summary = ""
+    if email["emails"]:
+        turn = await brain.generate(
+            config.BRAIN_MODEL,
+            [
+                {"role": "system", "content": DIGEST_INSTRUCTIONS},
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "whatsapp": {"note": "not checked in this preview"},
+                            "email": email,
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ],
+            [],
+        )
+        summary = (turn.text or "").strip()[:MAX_DIGEST_CHARS]
+    duplicates = sorted({a for a in accounts if accounts.count(a) > 1})
+    return {
+        "found": len(email["emails"]),
+        "errors": email["errors"],
+        "summary": summary,
+        "accounts": accounts,
+        "duplicate_accounts": duplicates,
+    }
 
 
 async def find_self_chat(client) -> str:

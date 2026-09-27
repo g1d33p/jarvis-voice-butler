@@ -241,7 +241,7 @@ async def test_email_search_skips_promotions_and_uses_the_last_digest_time(
     await run_digest(client, FakeBrain(), store, gmail_clients=[gmail])
 
     query = gmail.queries[0]
-    assert "is:unread" in query and "-category:promotions" in query
+    assert "-category:promotions" in query
     assert "-category:social" in query
     assert f"after:{int(last.timestamp())}" in query
     assert isinstance(last, datetime)
@@ -289,3 +289,116 @@ def test_old_digest_table_is_upgraded_in_place(tmp_path) -> None:
     store = DigestStore(path)
     assert store.latest()["summary"] == "old"
     assert store.last_success().hour == 12
+
+
+# ----------------------------------------------------------------- promotions / social
+
+
+def test_job_mail_is_picked_out_of_promotions_and_social(monkeypatch) -> None:
+    from datetime import datetime
+
+    from digest import email_queries
+
+    monkeypatch.setattr(config, "EMAIL_KEYWORDS", ["interview", "job offer", "Saayam"])
+    main, promo = email_queries(datetime(2026, 9, 27, 9, 0))
+
+    assert "-category:promotions" in main
+    assert "{category:promotions category:social}" in promo
+    assert '{interview "job offer" Saayam}' in promo
+    assert "in:inbox" in promo
+
+
+async def test_an_email_found_by_both_searches_is_listed_once(
+    tmp_path, monkeypatch
+) -> None:
+    from datetime import datetime
+
+    from digest import collect_email
+
+    monkeypatch.setattr(config, "EMAIL_KEYWORDS", ["interview"])
+    same = {**RECRUITER, "id": "abc"}
+    result = await collect_email([FakeGmail("p1", [same])], datetime(2026, 9, 27))
+
+    assert len(result["emails"]) == 1
+
+
+async def test_email_preview_sends_nothing() -> None:
+    from digest import preview_email
+
+    brain = FakeBrain("*Email*\n- Priya: confirm Thursday 2pm.")
+    result = await preview_email([FakeGmail("p1", [RECRUITER])], brain, hours=24)
+
+    assert result["found"] == 1
+    assert "Priya" in result["summary"]
+    assert "not checked in this preview" in brain.calls[0][1]["content"]
+
+
+def test_opened_emails_are_included_unless_unread_only(monkeypatch) -> None:
+    """Jeevan reads email on his phone; opened mail still belongs in the digest."""
+    from datetime import datetime
+
+    from digest import email_queries
+
+    monkeypatch.setattr(config, "EMAIL_UNREAD_ONLY", False)
+    assert all("is:unread" not in q for q in email_queries(datetime(2026, 9, 27)))
+    monkeypatch.setattr(config, "EMAIL_UNREAD_ONLY", True)
+    assert all("is:unread" in q for q in email_queries(datetime(2026, 9, 27)))
+
+
+async def test_digest_names_the_real_account_and_marks_unread() -> None:
+    from datetime import datetime
+
+    from digest import collect_email
+
+    class Named(FakeGmail):
+        def get_profile(self):
+            return {"email": "deep.jeevan21@gmail.com"}
+
+    opened = {**RECRUITER, "id": "x1", "is_read": True}
+    result = await collect_email([Named("personal2", [opened])], datetime(2026, 9, 27))
+
+    [email] = result["emails"]
+    assert email["account"] == "deep.jeevan21@gmail.com"
+    assert email["unread"] is False
+
+
+async def test_opened_emails_are_included_and_marked(tmp_path) -> None:
+    from datetime import datetime
+
+    from digest import collect_email
+
+    opened = {**RECRUITER, "id": "r1", "is_read": True}
+    fresh = {
+        **RECRUITER,
+        "id": "r2",
+        "subject": "New role",
+        "is_read": False,
+        "internal_date": 3,
+    }
+    result = await collect_email(
+        [FakeGmail("p1", [opened, fresh])], datetime(2026, 9, 27)
+    )
+
+    flags = {e["subject"]: e["unread"] for e in result["emails"]}
+    assert flags == {"Interview slot for Thursday?": False, "New role": True}
+
+
+async def test_preview_warns_when_one_account_is_linked_twice() -> None:
+    from digest import preview_email
+
+    class Named(FakeGmail):
+        def __init__(self, label, address):
+            super().__init__(label)
+            self.address = address
+
+        def get_profile(self):
+            return {"email": self.address}
+
+    clients = [
+        Named("personal1", "deep.jeevan98@gmail.com"),
+        Named("personal2", "deep.jeevan21@gmail.com"),
+        Named("personal3", "deep.jeevan98@gmail.com"),
+    ]
+    result = await preview_email(clients, FakeBrain(), hours=24)
+
+    assert result["duplicate_accounts"] == ["deep.jeevan98@gmail.com"]
