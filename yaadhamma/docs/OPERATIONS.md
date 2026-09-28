@@ -64,6 +64,13 @@ space, and recent errors from the audit log. Read-only; changes nothing.
    `uv run --extra wake --extra ui python scripts/yaadhamma_daemon.py` —
    stop it with Ctrl+C when it fails.
 2. Also check the tail: `tail -30 ~/.yaadhamma/daemon.log`.
+   If the worker (the voice session) keeps crashing on launch, the daemon
+   log says so loudly and the worker's own last output is captured in
+   `~/.yaadhamma/voice-worker.log` — read that file first. After 3
+   launch failures in a row the daemon stops retrying for 10 minutes
+   rather than crash-looping on every wake word; fix the launch, then
+   `python scripts/daemon_control.py stop` and
+   `python scripts/daemon_control.py start`.
 3. Usual causes: microphone permission (System Settings > Privacy & Security
    > Microphone, then restart), a missing extra (`uv sync --extra wake`
    and/or `--extra ui`), or a bad value in `.env.local`.

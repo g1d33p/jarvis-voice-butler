@@ -36,6 +36,7 @@ from memory_store import MemoryStore
 from memory_tools import MemoryTools
 from permissions import ApprovalManager
 from scorecard import Scorecard
+from tool_schemas import check_voice_tool_schemas
 from whatsapp import WhatsAppError
 from whatsapp_tools import WhatsAppTools
 
@@ -446,3 +447,16 @@ def register(card: Scorecard) -> None:
         assert total > 0, report
         assert "voice" in report.get("by_feature", {}), report
         return f"7-day spend ${total:.4f}; voice row present"
+
+    # ---------------------------------------------------------------- Meta
+
+    @card.case("meta: every voice tool builds a Gemini schema", category="meta")
+    async def _voice_tool_schemas(ctx):
+        # A tool whose type hints cannot be resolved crashes Gemini Live at
+        # session startup (2026-09-28: planner.py's _RunContext). This runs
+        # the exact LiveKit -> Gemini conversion over every voice tool, so
+        # an undescribable tool fails the scorecard instead of a live run.
+        # Synchronous on purpose: LiveKit plugin registration must happen
+        # on the main thread.
+        names = check_voice_tool_schemas(_tmp(ctx))
+        return f"{len(names)} voice tools describe cleanly to Gemini"

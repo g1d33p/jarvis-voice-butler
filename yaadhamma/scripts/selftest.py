@@ -355,6 +355,22 @@ def _wake_config():
     return f"engine={settings['engine']}, phrase={settings['phrase']!r}"
 
 
+@check("voice tools build Gemini schemas")
+def _voice_tool_schemas():
+    # A tool whose type hints cannot be resolved crashes Gemini Live at
+    # session startup (2026-09-28: planner.py's _RunContext). Build every
+    # voice tool's schema the way the realtime session does, before a live
+    # run. Stores go under a scratch dir; nothing is called.
+    import tempfile
+    from pathlib import Path
+
+    from tool_schemas import check_voice_tool_schemas
+
+    with tempfile.TemporaryDirectory(prefix="yaadhamma-selftest-") as tmp:
+        names = check_voice_tool_schemas(Path(tmp))
+    return f"{len(names)} voice tools describe cleanly to Gemini"
+
+
 def main() -> int:
     # HOME is repointed per-check; start from a clean slate.
     os.environ.pop("HOME", None)

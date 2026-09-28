@@ -15,6 +15,7 @@ Mute comes from the menu bar (stage 4), which writes
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import logging
 import subprocess
@@ -58,19 +59,40 @@ class VoiceWorker:
 
     QUICK_EXIT_S: a healthy worker lives for minutes; if the process is
     already gone this soon after start, the launch itself failed (e.g. a
-    bad command line) and the daemon says so loudly instead of silently
-    dropping back to idle.
+    bad command line, an unresolvable tool schema) and the daemon says so
+    loudly instead of silently dropping back to idle.
+
+    The worker's own stdout/stderr is captured to
+    ~/.yaadhamma/voice-worker.log (one launch per file); on a launch
+    failure the tail is logged loudly so the crash reason is visible in
+    the daemon log too.
+
+    After MAX_QUICK_FAILURES consecutive launch failures the daemon stops
+    retrying for SUPPRESS_S: a broken launch would otherwise crash-loop on
+    every wake word. start() returns False while suppressed.
     """
 
     QUICK_EXIT_S = 5.0
+    MAX_QUICK_FAILURES = 3
+    SUPPRESS_S = 600.0
+    LOG_TAIL_LINES = 40
 
-    def __init__(self) -> None:
+    def __init__(self, log_path: Path | None = None) -> None:
         self._proc: subprocess.Popen | None = None
         self._started_at: float | None = None
+        self._log_path = log_path or Path.home() / ".yaadhamma" / "voice-worker.log"
+        self._log_file = None
+        self._quick_failures = 0
+        self._suppress_until = 0.0
+        self._suppress_logged = False
 
     @property
     def running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
+
+    @property
+    def suppressed(self) -> bool:
+        return time.monotonic() < self._suppress_until
 
     def quick_exit_code(self) -> int | None:
         """Exit code if the worker already exited within QUICK_EXIT_S of
@@ -85,9 +107,25 @@ class VoiceWorker:
             return code
         return None
 
-    def start(self) -> None:
+    def start(self) -> bool:
+        """Launch the worker. Returns False without launching when starts
+        are suppressed after repeated launch failures."""
         if self.running:
-            return
+            return True
+        now = time.monotonic()
+        if now < self._suppress_until:
+            if not self._suppress_logged:
+                self._suppress_logged = True
+                log.warning(
+                    "voice worker start suppressed for %.0f s more after %d "
+                    "consecutive launch failures — wake words will not start "
+                    "a worker until it lapses; fix the launch, then restart "
+                    "the daemon: python scripts/daemon_control.py stop && "
+                    "python scripts/daemon_control.py start",
+                    self._suppress_until - now,
+                    self._quick_failures,
+                )
+            return False
         uv = _which("uv")
         # Keep the extras on the command line (see daemon_control._program):
         # a bare `uv run` re-syncs the environment, which would uninstall the
@@ -100,18 +138,85 @@ class VoiceWorker:
             else [sys.executable, "src/agent.py", "console"]
         )
         log.info("wake: starting voice worker: %s", " ".join(cmd))
+        self._close_log()
+        try:
+            self._log_path.parent.mkdir(parents=True, exist_ok=True)
+            # The handle stays open while the child runs; closed in
+            # _close_log()/stop().
+            self._log_file = open(self._log_path, "w")  # noqa: SIM115
+        except OSError as exc:
+            log.warning("could not open worker log %s: %s", self._log_path, exc)
+            self._log_file = None
         self._proc = subprocess.Popen(
             cmd,
             cwd=str(PROJECT),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=self._log_file if self._log_file is not None else subprocess.DEVNULL,
+            stderr=subprocess.STDOUT,
         )
         self._started_at = time.monotonic()
         # Silence is measured from the moment the session opens.
         note_speech_activity(time.monotonic())
+        return True
+
+    def note_exit(self) -> None:
+        """The wake loop saw the worker gone.
+
+        A launch failure is logged loudly together with the worker's own
+        last output; after MAX_QUICK_FAILURES in a row, further starts are
+        suppressed for SUPPRESS_S. A worker that lived past the launch
+        window resets the failure counter.
+        """
+        if self._proc is None:
+            return  # suppressed start: nothing was launched, nothing to record
+        self._close_log()
+        code = self.quick_exit_code()
+        if code is None:
+            self._quick_failures = 0
+            return
+        self._quick_failures += 1
+        tail = self._read_log_tail()
+        if self._quick_failures >= self.MAX_QUICK_FAILURES:
+            self._suppress_until = time.monotonic() + self.SUPPRESS_S
+            self._suppress_logged = False
+            log.error(
+                "voice worker failed to launch %d times in a row (exit code "
+                "%s); not retrying for %.0f minutes. Last worker output:\n"
+                "%s\nFix the launch, then restart the daemon: "
+                "python scripts/daemon_control.py stop && "
+                "python scripts/daemon_control.py start",
+                self._quick_failures,
+                code,
+                self.SUPPRESS_S / 60,
+                tail,
+            )
+        else:
+            log.error(
+                "voice worker exited within %.0f s of starting (exit code "
+                "%s): the launch failed — the launch command is logged "
+                "above; she heard the wake word but could not start talking. "
+                "Last worker output:\n%s",
+                self.QUICK_EXIT_S,
+                code,
+                tail,
+            )
+
+    def _read_log_tail(self) -> str:
+        try:
+            lines = self._log_path.read_text().splitlines()
+        except OSError:
+            return "(no worker output captured)"
+        tail = lines[-self.LOG_TAIL_LINES :]
+        return "\n".join(tail) if tail else "(worker produced no output)"
+
+    def _close_log(self) -> None:
+        fh, self._log_file = self._log_file, None
+        if fh is not None:
+            with contextlib.suppress(OSError):
+                fh.close()
 
     def stop(self) -> None:
         proc, self._proc = self._proc, None
+        self._close_log()
         if proc is None:
             return
         if proc.poll() is not None:
@@ -321,17 +426,12 @@ def _wake_loop(machine, detector, mic, worker, settings, mic_state) -> None:
                 if machine.tick(now):
                     log.info("90 s without speech: conversation closed")
                 # If the worker died on its own, go back to idle honestly.
+                # note_exit() logs a launch failure loudly (with the
+                # worker's own output) and suppresses further starts after
+                # repeated failures, so a broken launch cannot crash-loop
+                # on every wake word.
                 if not worker.running:
-                    code = worker.quick_exit_code()
-                    if code is not None:
-                        log.error(
-                            "voice worker exited within %.0f s of starting "
-                            "(exit code %s): the launch failed — the launch "
-                            "command is logged above; she heard the wake "
-                            "word but could not start talking",
-                            worker.QUICK_EXIT_S,
-                            code,
-                        )
+                    worker.note_exit()
                     machine.tick(now + settings["idle_timeout_s"])
                 time.sleep(POLL_S)
             else:  # muted or listening stopped

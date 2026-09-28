@@ -54,7 +54,7 @@ def test_control_file_round_trip(daemon, monkeypatch, tmp_path) -> None:
     assert daemon._read_control() == {"muted": False, "listening": True}
 
 
-def test_voice_worker_start_stop(daemon, monkeypatch) -> None:
+def test_voice_worker_start_stop(daemon, monkeypatch, tmp_path) -> None:
     started = []
 
     class FakeProc:
@@ -79,7 +79,7 @@ def test_voice_worker_start_stop(daemon, monkeypatch) -> None:
         daemon, "_which", lambda name: "/usr/bin/uv" if name == "uv" else None
     )
 
-    worker = daemon.VoiceWorker()
+    worker = daemon.VoiceWorker(log_path=tmp_path / "voice-worker.log")
     worker.start()
     assert worker.running
     assert started[0][:2] == ["/usr/bin/uv", "run"]
@@ -195,7 +195,7 @@ def test_daemon_control_program_without_uv(monkeypatch) -> None:
     assert prog[-1] == "scripts/yaadhamma_daemon.py"
 
 
-def test_voice_worker_keeps_extras(daemon, monkeypatch) -> None:
+def test_voice_worker_keeps_extras(daemon, monkeypatch, tmp_path) -> None:
     """The voice worker is spawned by the running daemon via `uv run`; a bare
     `uv run` would re-sync and uninstall the wake/UI packages out from under
     the daemon's own lazy imports (sounddevice, openwakeword, pynput)."""
@@ -217,7 +217,7 @@ def test_voice_worker_keeps_extras(daemon, monkeypatch) -> None:
     monkeypatch.setattr(daemon.subprocess, "Popen", FakeProc)
     monkeypatch.setattr(daemon, "_which", lambda name: "/usr/bin/uv")
 
-    worker = daemon.VoiceWorker()
+    worker = daemon.VoiceWorker(log_path=tmp_path / "voice-worker.log")
     worker.start()
     assert started[0][:2] == ["/usr/bin/uv", "run"]
     assert "wake" in started[0] and "ui" in started[0]
@@ -243,7 +243,9 @@ def _set_package_presence(
     monkeypatch.setattr(importlib.util, "find_spec", fake)
 
 
-def test_voice_worker_launches_console_subcommand(daemon, monkeypatch) -> None:
+def test_voice_worker_launches_console_subcommand(
+    daemon, monkeypatch, tmp_path
+) -> None:
     """The LiveKit CLI needs a subcommand: without `console`, `uv run
     src/agent.py` prints help and exits immediately."""
     started = []
@@ -263,13 +265,13 @@ def test_voice_worker_launches_console_subcommand(daemon, monkeypatch) -> None:
 
     monkeypatch.setattr(daemon.subprocess, "Popen", FakeProc)
     monkeypatch.setattr(daemon, "_which", lambda name: "/usr/bin/uv")
-    worker = daemon.VoiceWorker()
+    worker = daemon.VoiceWorker(log_path=tmp_path / "voice-worker.log")
     worker.start()
     assert started[0][-1] == "console"
     worker.stop()
 
 
-def test_worker_quick_exit_detected(daemon, monkeypatch) -> None:
+def test_worker_quick_exit_detected(daemon, monkeypatch, tmp_path) -> None:
     """A worker that is already gone within seconds of starting failed to
     launch — the daemon must notice instead of silently going back to idle."""
 
@@ -288,12 +290,12 @@ def test_worker_quick_exit_detected(daemon, monkeypatch) -> None:
 
     monkeypatch.setattr(daemon.subprocess, "Popen", FakeProc)
     monkeypatch.setattr(daemon, "_which", lambda name: "/usr/bin/uv")
-    worker = daemon.VoiceWorker()
+    worker = daemon.VoiceWorker(log_path=tmp_path / "voice-worker.log")
     worker.start()
     assert worker.quick_exit_code() == 1
 
 
-def test_worker_slow_exit_not_flagged_as_quick(daemon, monkeypatch) -> None:
+def test_worker_slow_exit_not_flagged_as_quick(daemon, monkeypatch, tmp_path) -> None:
     """A worker that ran for a while and then died is a runtime failure,
     not a launch failure: no loud launch-failure report."""
 
@@ -314,10 +316,112 @@ def test_worker_slow_exit_not_flagged_as_quick(daemon, monkeypatch) -> None:
     monkeypatch.setattr(daemon, "_which", lambda name: "/usr/bin/uv")
     now = [1000.0]
     monkeypatch.setattr(daemon.time, "monotonic", lambda: now[0])
-    worker = daemon.VoiceWorker()
+    worker = daemon.VoiceWorker(log_path=tmp_path / "voice-worker.log")
     worker.start()
     now[0] += 10.0  # the worker ran a while, then died: not a launch failure
     assert worker.quick_exit_code() is None
+
+
+def _quick_fail_daemon(daemon, monkeypatch):
+    """Popen double that exits immediately, leaving a traceback in the
+    worker's captured stdout — the shape of a real launch crash."""
+
+    class QuickFailProc:
+        def __init__(self, cmd, **kwargs):
+            out = kwargs.get("stdout")
+            if out is not None and out is not daemon.subprocess.DEVNULL:
+                out.write(
+                    "Traceback (most recent call last):\n"
+                    '  File "src/agent.py", line 1, in <module>\n'
+                    "NameError: name '_RunContext' is not defined\n"
+                )
+                out.flush()
+
+        def poll(self):
+            return 1
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 1
+
+    monkeypatch.setattr(daemon.subprocess, "Popen", QuickFailProc)
+    monkeypatch.setattr(daemon, "_which", lambda name: "/usr/bin/uv")
+
+
+def test_worker_quick_exit_logs_loudly_with_output(
+    daemon, monkeypatch, tmp_path, caplog
+) -> None:
+    """A launch failure is logged loudly together with the worker's own
+    last output, and the full output stays in the worker log file."""
+    import logging
+
+    _quick_fail_daemon(daemon, monkeypatch)
+    log_file = tmp_path / "voice-worker.log"
+    worker = daemon.VoiceWorker(log_path=log_file)
+    assert worker.start() is True
+    with caplog.at_level(logging.ERROR, logger="yaadhamma.daemon"):
+        worker.note_exit()
+    assert "could not start talking" in caplog.text
+    assert "_RunContext" in caplog.text  # the worker's own last words
+    assert "_RunContext" in log_file.read_text()
+
+
+def test_worker_suppresses_after_repeated_quick_failures(
+    daemon, monkeypatch, tmp_path
+) -> None:
+    """After MAX_QUICK_FAILURES consecutive launch failures the daemon
+    stops retrying: start() returns False until the cooldown lapses."""
+    _quick_fail_daemon(daemon, monkeypatch)
+    now = [1000.0]
+    monkeypatch.setattr(daemon.time, "monotonic", lambda: now[0])
+    worker = daemon.VoiceWorker(log_path=tmp_path / "voice-worker.log")
+    for _ in range(worker.MAX_QUICK_FAILURES):
+        assert worker.start() is True
+        worker.note_exit()
+    assert worker.suppressed
+    assert worker.start() is False  # no silent retry on the next wake
+    now[0] += worker.SUPPRESS_S + 1.0
+    assert not worker.suppressed
+    assert worker.start() is True
+
+
+def test_worker_suppressed_start_warns_once(
+    daemon, monkeypatch, tmp_path, caplog
+) -> None:
+    """While suppressed, wake words do not launch anything; the warning
+    is logged once per suppression period, not on every wake."""
+    import logging
+
+    _quick_fail_daemon(daemon, monkeypatch)
+    now = [1000.0]
+    monkeypatch.setattr(daemon.time, "monotonic", lambda: now[0])
+    worker = daemon.VoiceWorker(log_path=tmp_path / "voice-worker.log")
+    for _ in range(worker.MAX_QUICK_FAILURES):
+        worker.start()
+        worker.note_exit()
+    with caplog.at_level(logging.WARNING, logger="yaadhamma.daemon"):
+        assert worker.start() is False
+        assert worker.start() is False
+    assert caplog.text.count("start suppressed") == 1
+
+
+def test_worker_healthy_run_resets_failures(daemon, monkeypatch, tmp_path) -> None:
+    """A worker that lived past the launch window clears the failure
+    counter: one bad launch long ago must not suppress a good one."""
+    _quick_fail_daemon(daemon, monkeypatch)
+    now = [1000.0]
+    monkeypatch.setattr(daemon.time, "monotonic", lambda: now[0])
+    worker = daemon.VoiceWorker(log_path=tmp_path / "voice-worker.log")
+    worker.start()
+    worker.note_exit()
+    assert worker._quick_failures == 1
+    worker.start()
+    now[0] += 10.0  # this run lived: a slow death is not a launch failure
+    worker.note_exit()
+    assert worker._quick_failures == 0
+    assert not worker.suppressed
 
 
 def test_check_extras_fails_fast_on_missing_wake(daemon, monkeypatch, caplog) -> None:
