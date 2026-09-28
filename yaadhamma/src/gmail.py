@@ -439,18 +439,56 @@ class GmailClient:
         return base64.urlsafe_b64encode(rfc822.encode("utf-8")).decode().rstrip("=")
 
     def send_mail(self, to: str, subject: str, body: str) -> dict:
-        """Send an email. Call only after the approval gate clears it."""
+        """Send an email. Call only after the approval gate clears it.
+
+        The Gmail API accepting the request is not proof the message was
+        sent, so the returned id is re-fetched and confirmed to carry the
+        SENT label. A failed confirmation is reported honestly as
+        verified=False; it is never claimed as sent.
+        """
         resp = self._post(
             "/users/me/messages/send",
             {"raw": self._raw_message(to, subject, body)},
         )
+        message_id = resp.get("id")
+        verified, verification = self._confirm_in_sent(message_id)
         return {
             "sent": True,
             "to": to,
-            "id": resp.get("id"),
-            "verified": True,
-            "verification": ("the Gmail API accepted the message and returned an id"),
+            "id": message_id,
+            "verified": verified,
+            "verification": verification,
         }
+
+    def _confirm_in_sent(self, message_id: str | None) -> tuple[bool, str]:
+        """Re-fetch a sent message id and check for the SENT label."""
+        if not message_id:
+            return (
+                False,
+                "the Gmail API accepted the request but returned no message id, "
+                "so nothing could be confirmed in SENT",
+            )
+        try:
+            fetched = self._get(
+                f"/users/me/messages/{message_id}", {"format": "minimal"}
+            )
+        except Exception as exc:
+            return (
+                False,
+                f"the Gmail API accepted the send but re-fetching message "
+                f"{message_id} failed ({exc}); the send is unconfirmed",
+            )
+        labels = fetched.get("labelIds", []) or []
+        if "SENT" in labels:
+            return (
+                True,
+                f"message {message_id} was re-fetched and carries the SENT label",
+            )
+        return (
+            False,
+            f"message {message_id} was re-fetched but has no SENT label "
+            f"(labels: {', '.join(labels) or 'none'}); the send is unconfirmed",
+        )
 
     def create_draft(self, to: str, subject: str, body: str) -> dict:
         """Save a draft without sending; returns its id."""

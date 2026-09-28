@@ -16,8 +16,9 @@ from meta_client import MetaBrainClient
 
 
 def test_estimate_cost_known_model() -> None:
-    # gemini-3.5-flash-lite: $0.00010/1K in, $0.00040/1K out.
-    assert estimate_cost("gemini-3.5-flash-lite", 1000, 1000) == pytest.approx(0.00050)
+    # gemini-3.5-flash-lite: $0.00030/1K in, $0.00250/1K out
+    # (published $0.30/$2.50 per 1M, checked 2026-09-28).
+    assert estimate_cost("gemini-3.5-flash-lite", 1000, 1000) == pytest.approx(0.00280)
 
 
 def test_estimate_cost_unknown_model_uses_default() -> None:
@@ -28,14 +29,47 @@ def test_estimate_cost_zero_tokens_is_zero() -> None:
     assert estimate_cost("gemini-3.5-flash-lite", 0, 0) == 0.0
 
 
+def test_estimate_cost_flash_introductory_rate() -> None:
+    # gemini-3.8-flash: $0.00075/1K in, $0.00375/1K out (introductory,
+    # through 2026-12-31).
+    assert estimate_cost("gemini-3.8-flash", 1000, 1000) == pytest.approx(0.00450)
+
+
+def test_estimate_live_cost_uses_four_stream_rates() -> None:
+    from costs import estimate_live_cost
+
+    # 1M audio in + 1M audio out: $3.00 + $12.00.
+    assert estimate_live_cost(audio_in=1_000_000, audio_out=1_000_000) == pytest.approx(
+        15.0
+    )
+    # 1M text in + 1M text out: $0.75 + $4.50.
+    assert estimate_live_cost(text_in=1_000_000, text_out=1_000_000) == pytest.approx(
+        5.25
+    )
+
+
 def test_record_returns_cost_and_stores_row(tmp_path) -> None:
     store = CostStore(path=tmp_path / "c.db")
     cost = store.record("digest", "gemini-3.5-flash-lite", 2000, 500)
-    assert cost == pytest.approx(0.00040)
+    assert cost == pytest.approx(0.00185)
     rows = sqlite3.connect(store.path).execute("SELECT * FROM model_calls").fetchall()
     assert len(rows) == 1
     assert rows[0][2] == "digest"
     assert rows[0][3] == "gemini-3.5-flash-lite"
+
+
+def test_record_accepts_a_precise_cost_override(tmp_path) -> None:
+    # Voice sessions price audio and text separately, then record the exact
+    # figure instead of the single-pair estimate.
+    store = CostStore(path=tmp_path / "c.db")
+    cost = store.record("voice", "gemini-3.8-live", 10_000, 5_000, cost_usd=0.042)
+    assert cost == pytest.approx(0.042)
+    rows = (
+        sqlite3.connect(store.path)
+        .execute("SELECT feature, cost_usd FROM model_calls")
+        .fetchall()
+    )
+    assert rows == [("voice", 0.042)]
 
 
 def test_record_never_raises(tmp_path) -> None:
@@ -78,7 +112,7 @@ def test_summary_ignores_calls_older_than_7_days(tmp_path) -> None:
 def test_month_to_date_counts_this_month_only(tmp_path) -> None:
     store = CostStore(path=tmp_path / "c.db")
     store.record("digest", "gemini-3.5-flash-lite", 1000, 0)
-    assert store.month_to_date_usd() == pytest.approx(0.00010)
+    assert store.month_to_date_usd() == pytest.approx(0.00030)
     last_month = (datetime.now() - timedelta(days=40)).isoformat(timespec="seconds")
     with sqlite3.connect(store.path) as db:
         db.execute(
@@ -87,7 +121,7 @@ def test_month_to_date_counts_this_month_only(tmp_path) -> None:
             "VALUES (?, 'digest', 'm', 1, 0, 50.0)",
             (last_month,),
         )
-    assert store.month_to_date_usd() == pytest.approx(0.00010)
+    assert store.month_to_date_usd() == pytest.approx(0.00030)
 
 
 def test_over_budget_warns_without_blocking(tmp_path, monkeypatch) -> None:
@@ -96,7 +130,7 @@ def test_over_budget_warns_without_blocking(tmp_path, monkeypatch) -> None:
     store.record("digest", "gemini-3.5-flash-lite", 1000, 0)
     exceeded, spent, budget = store.over_budget()
     assert exceeded is True
-    assert spent == pytest.approx(0.00010)
+    assert spent == pytest.approx(0.00030)
     assert budget == pytest.approx(0.00001)
 
 
@@ -137,7 +171,7 @@ def test_generate_records_the_call_with_its_feature(tmp_path) -> None:
     summary = CostStore().summary_7d()
     assert summary["calls"] == 1
     assert summary["by_feature"]["digest"]["calls"] == 1
-    assert summary["usd"] == pytest.approx(0.00010 + 0.00020)
+    assert summary["usd"] == pytest.approx(0.00030 + 0.00125)
 
 
 def test_generate_still_works_when_cost_recording_breaks(monkeypatch) -> None:

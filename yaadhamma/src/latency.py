@@ -23,24 +23,27 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from costs import LIVE_PRICE_PER_1K
+
 logger = logging.getLogger("yaadhamma.latency")
 
 DEFAULT_CSV = Path.home() / ".yaadhamma" / "voice_metrics.csv"
 
-# Gemini Live price per 1M tokens (Gemini API pricing page, Sep 2026):
-# audio in $3, audio out $12; text in $0.75, text out $4.50.
-PRICE_PER_MILLION = {
-    "audio_in": 3.00,
-    "audio_out": 12.00,
-    "text_in": 0.75,
-    "text_out": 4.50,
-}
+# Gemini Live price per 1M tokens, derived from the published per-1K rates in
+# costs.LIVE_PRICE_PER_1K (checked 2026-09-28). One table, two views: costs.py
+# is the source of truth so the voice meter and the cost dashboard agree.
+PRICE_PER_MILLION = {key: rate * 1000 for key, rate in LIVE_PRICE_PER_1K.items()}
 
 
 @dataclass
 class VoiceMetrics:
     mode: str = "realtime"
     csv_path: Path = DEFAULT_CSV
+    # Model whose tokens are being counted (for the cost record).
+    model: str = "gemini-3.8-live"
+    # Local cost database for this session's voice row; None means the
+    # default ~/.yaadhamma/yaadhamma.db. Tests point it at tmp_path.
+    cost_db: Path | None = None
     # The voice detector says "stopped" only after this much silence.
     speech_end_offset_s: float = 0.0
     # False when no local voice detector runs: the Gemini plugin then marks
@@ -124,7 +127,9 @@ class VoiceMetrics:
         }
 
     async def write_summary(self, *_args) -> None:
-        """Append this session's summary row to the CSV (called at shutdown)."""
+        """Append this session's summary row to the CSV (called at shutdown),
+        and record the session's voice cost in the cost store under the
+        "voice" feature. Neither may break shutdown."""
         row = self.summary()
         logger.info("voice session summary: %s", row)
         try:
@@ -137,3 +142,22 @@ class VoiceMetrics:
                 writer.writerow(row)
         except OSError as exc:  # metrics must never break shutdown
             logger.warning("could not write voice metrics: %s", exc)
+        try:
+            from costs import CostStore, estimate_live_cost
+
+            store = CostStore(path=self.cost_db) if self.cost_db else CostStore()
+            cost = estimate_live_cost(
+                audio_in=self.tokens["audio_in"],
+                text_in=self.tokens["text_in"],
+                audio_out=self.tokens["audio_out"],
+                text_out=self.tokens["text_out"],
+            )
+            store.record(
+                "voice",
+                self.model,
+                self.tokens["audio_in"] + self.tokens["text_in"],
+                self.tokens["audio_out"] + self.tokens["text_out"],
+                cost_usd=cost,
+            )
+        except Exception:  # cost recording must never break shutdown either
+            logger.warning("could not record voice cost", exc_info=True)

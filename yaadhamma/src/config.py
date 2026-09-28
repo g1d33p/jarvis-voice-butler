@@ -138,4 +138,4 @@ PLAN_WEB_RESEARCH = os.environ.get("YAADHAMMA_PLAN_WEB", "on").strip().lower() !
 
 # Monthly model-spend budget, USD. When the month-to-date estimate passes
 # this, the morning brief says so loudly — but calls are never blocked.
-MONTHLY_BUDGET_USD = float(os.environ.get("YAADHAMMA_MONTHLY_BUDGET_USD", "20"))
+MONTHLY_BUDGET_USD = float(os.environ.get("YAADHAMMA_MONTHLY_BUDGET_USD", "35"))

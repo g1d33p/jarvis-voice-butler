@@ -63,7 +63,7 @@ def test_cost_estimate_uses_published_rates(tmp_path) -> None:
 
 async def test_summary_row_is_appended_to_csv(tmp_path) -> None:
     path = tmp_path / "sub" / "voice_metrics.csv"
-    m = VoiceMetrics(csv_path=path)
+    m = VoiceMetrics(csv_path=path, cost_db=tmp_path / "costs.db")
     for start, spoke in ((0, 0.5), (10, 11.0), (20, 20.7)):
         m.on_user_state(_user("speaking", "listening", start))
         m.on_agent_state(_agent("speaking", spoke))
@@ -99,3 +99,56 @@ def test_cached_input_is_counted_separately(tmp_path) -> None:
     event.metrics.input_token_details.cached_tokens = 700
     m.on_metrics(event)
     assert m.summary()["cached_in"] == 700
+
+
+def test_latency_rates_agree_with_costs_table() -> None:
+    """The voice meter and the cost dashboard price from one table."""
+    from costs import LIVE_PRICE_PER_1K
+
+    assert {
+        key: rate * 1000 for key, rate in LIVE_PRICE_PER_1K.items()
+    } == PRICE_PER_MILLION
+    assert PRICE_PER_MILLION == {
+        "audio_in": 3.00,
+        "text_in": 0.75,
+        "audio_out": 12.00,
+        "text_out": 4.50,
+    }
+
+
+async def test_voice_session_cost_is_recorded_under_voice(tmp_path) -> None:
+    """Stage 0: voice tokens reach the 7-day cost report as feature 'voice'."""
+    from costs import CostStore
+
+    m = VoiceMetrics(csv_path=tmp_path / "m.csv", cost_db=tmp_path / "c.db")
+    m.on_metrics(
+        _realtime_metrics(
+            audio_in=1_000_000, text_in=1_000_000, audio_out=500_000, text_out=2_000_000
+        )
+    )
+
+    await m.write_summary()
+
+    summary = CostStore(path=tmp_path / "c.db").summary_7d()
+    voice = summary["by_feature"]["voice"]
+    assert voice["calls"] == 1
+    # 1M audio in ($3) + 1M text in ($0.75) + 0.5M audio out ($6) + 2M text out ($9).
+    assert voice["usd"] == pytest.approx(18.75)
+    assert summary["usd"] == pytest.approx(18.75)
+
+
+async def test_voice_cost_recording_never_breaks_shutdown(
+    tmp_path, monkeypatch
+) -> None:
+    """A broken cost database must not take down session shutdown."""
+
+    def boom(*args, **kwargs):
+        raise OSError("disk is gone")
+
+    monkeypatch.setattr("costs.CostStore", boom)
+    m = VoiceMetrics(csv_path=tmp_path / "m.csv")
+    m.on_metrics(_realtime_metrics(audio_in=100))
+
+    await m.write_summary()  # must not raise
+
+    assert (tmp_path / "m.csv").exists()

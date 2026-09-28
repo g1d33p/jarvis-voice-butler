@@ -26,6 +26,11 @@ from permissions import (
     latest_user_message,
 )
 from policy import can_send_without_asking
+from untrusted import wrap as _wrap_untrusted
+
+# Message fields that come from the outside world and must be wrapped as
+# untrusted content before a model sees them.
+_UNTRUSTED_FIELDS = ("from", "subject", "snippet", "body_text")
 
 _SIGNIN_HINT = (
     "No Gmail accounts are linked yet. On the Mac, run "
@@ -89,6 +94,11 @@ class GmailTools:
         tagged["account"] = client.label
         # Composite id routes gmail_read_email back to the right account.
         tagged["id"] = f"{client.label}:{message.get('id')}"
+        # Everything from the message itself is outside-world content.
+        source = f"Gmail {client.label}"
+        for key in _UNTRUSTED_FIELDS:
+            if tagged.get(key):
+                tagged[key] = _wrap_untrusted(tagged[key], source)
         return tagged
 
     def _merge(self, per_account: list[tuple[GmailClient, list[dict]]], limit: int):

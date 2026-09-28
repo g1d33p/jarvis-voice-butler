@@ -20,6 +20,7 @@ from livekit.agents.llm import ToolError
 
 from browser import BrowserManager
 from mac_tools import read_active_app
+from untrusted import wrap as _wrap_untrusted
 
 
 @dataclass
@@ -31,10 +32,12 @@ class Observation:
     note: str = ""
 
     def to_dict(self) -> dict[str, object]:
+        # Window and page titles come from the outside world (any app, any
+        # web page). They are data for the model, never instructions.
         data: dict[str, object] = {
             "time": self.at,
             "front_app": self.app or "unknown",
-            "window_title": self.window_title,
+            "window_title": _wrap_untrusted(self.window_title, "Mac window title"),
         }
         if self.browser is None:
             data["yaadhamma_browser"] = "not open"
@@ -42,10 +45,13 @@ class Observation:
             active = self.browser.get("active_tab") or {}
             data["yaadhamma_browser"] = {
                 "tab_count": self.browser.get("tab_count", 0),
-                "active_tab": active.get("title", ""),
+                "active_tab": _wrap_untrusted(
+                    str(active.get("title", "")), "browser tab title"
+                ),
                 "active_url": active.get("url", ""),
                 "tabs": [
-                    f"{tab['number']}: {tab['title'] or tab['url']}"
+                    f"{tab['number']}: "
+                    f"{_wrap_untrusted(str(tab['title'] or ''), 'browser tab title') or tab['url']}"
                     for tab in self.browser.get("tabs", [])
                 ],
             }
@@ -82,7 +88,11 @@ def _tabs_by_url(browser: dict | None) -> dict[str, str]:
 
 
 def diff(before: Observation, after: Observation) -> list[str]:
-    """Describe, in short sentences, what changed between two observations."""
+    """Describe, in short sentences, what changed between two observations.
+
+    Titles in these sentences come from the outside world, so they are
+    wrapped as untrusted content just like in Observation.to_dict().
+    """
     changes: list[str] = []
 
     if before.app != after.app:
@@ -90,7 +100,10 @@ def diff(before: Observation, after: Observation) -> list[str]:
             f"Front app changed from {before.app or 'unknown'} to {after.app or 'unknown'}."
         )
     elif before.window_title != after.window_title and after.window_title:
-        changes.append(f"Window changed to {after.window_title!r}.")
+        changes.append(
+            "Window changed to "
+            f"{_wrap_untrusted(after.window_title, 'Mac window title')!r}."
+        )
 
     if before.browser is None and after.browser is not None:
         changes.append("Yaadhamma's browser was opened.")
@@ -99,14 +112,20 @@ def diff(before: Observation, after: Observation) -> list[str]:
     elif before.browser is not None and after.browser is not None:
         old_tabs, new_tabs = _tabs_by_url(before.browser), _tabs_by_url(after.browser)
         for url in new_tabs.keys() - old_tabs.keys():
-            changes.append(f"Page opened: {new_tabs[url]}.")
+            changes.append(
+                f"Page opened: {_wrap_untrusted(new_tabs[url], 'browser tab title')}."
+            )
         for url in old_tabs.keys() - new_tabs.keys():
-            changes.append(f"Page no longer open: {old_tabs[url]}.")
+            changes.append(
+                "Page no longer open: "
+                f"{_wrap_untrusted(old_tabs[url], 'browser tab title')}."
+            )
         old_active = (before.browser.get("active_tab") or {}).get("url")
         new_active = after.browser.get("active_tab") or {}
         if old_active != new_active.get("url") and new_active:
             changes.append(
-                f"Active tab is now {new_active.get('title') or new_active.get('url')}."
+                "Active tab is now "
+                f"{_wrap_untrusted(str(new_active.get('title') or new_active.get('url')), 'browser tab title')}."
             )
 
     return changes

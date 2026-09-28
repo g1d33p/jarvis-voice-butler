@@ -314,12 +314,60 @@ def test_get_message_falls_back_to_stripped_html(client):
 def test_send_mail_posts_base64url_rfc822(client):
     gmail, http = _authed(client)
     http.add("POST", f"{API_BASE}/users/me/messages/send", {"id": "sent1"})
-    gmail.send_mail(to="c@example.com", subject="Re: Hello", body="Sounds good.")
-    call = http.calls[-1]
+    http.add(
+        "GET",
+        f"{API_BASE}/users/me/messages/sent1",
+        {"id": "sent1", "labelIds": ["SENT"]},
+    )
+    result = gmail.send_mail(
+        to="c@example.com", subject="Re: Hello", body="Sounds good."
+    )
+    call = http.calls[-2]
     raw = base64.urlsafe_b64decode(call["json_body"]["raw"] + "===").decode()
     assert "To: c@example.com" in raw
     assert "Subject: Re: Hello" in raw
     assert "Sounds good." in raw
+    assert result["verified"] is True
+    assert "SENT" in result["verification"]
+
+
+def test_send_mail_verifies_by_refetching_in_sent(client):
+    gmail, http = _authed(client)
+    http.add("POST", f"{API_BASE}/users/me/messages/send", {"id": "sent9"})
+    http.add(
+        "GET",
+        f"{API_BASE}/users/me/messages/sent9",
+        {"id": "sent9", "labelIds": ["SENT", "INBOX"]},
+    )
+    result = gmail.send_mail(to="c@example.com", subject="Hi", body="x")
+    assert result["verified"] is True
+    assert result["id"] == "sent9"
+
+
+def test_send_mail_reports_unverified_when_refetch_fails(client):
+    gmail, http = _authed(client)
+    http.add("POST", f"{API_BASE}/users/me/messages/send", {"id": "sent2"})
+    http.add(
+        "GET",
+        f"{API_BASE}/users/me/messages/sent2",
+        GmailAuthError("message not found"),
+    )
+    result = gmail.send_mail(to="c@example.com", subject="Hi", body="x")
+    assert result["verified"] is False
+    assert "unconfirmed" in result["verification"]
+
+
+def test_send_mail_reports_unverified_without_sent_label(client):
+    gmail, http = _authed(client)
+    http.add("POST", f"{API_BASE}/users/me/messages/send", {"id": "sent3"})
+    http.add(
+        "GET",
+        f"{API_BASE}/users/me/messages/sent3",
+        {"id": "sent3", "labelIds": ["INBOX"]},
+    )
+    result = gmail.send_mail(to="c@example.com", subject="Hi", body="x")
+    assert result["verified"] is False
+    assert "no SENT label" in result["verification"]
 
 
 def test_create_draft_posts_to_drafts_endpoint(client):
