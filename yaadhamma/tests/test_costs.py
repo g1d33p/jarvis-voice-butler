@@ -12,7 +12,7 @@ import pytest
 import config
 import costs
 from costs import CostStore, estimate_cost
-from meta_client import MetaBrainClient
+from meta_client import GeminiBrainClient
 
 
 def test_estimate_cost_known_model() -> None:
@@ -160,7 +160,7 @@ class _FakeOpenAI:
 
 
 def test_generate_records_the_call_with_its_feature(tmp_path) -> None:
-    brain = MetaBrainClient(client=_FakeOpenAI())
+    brain = GeminiBrainClient(client=_FakeOpenAI())
 
     async def run():
         return await brain.generate(
@@ -179,7 +179,7 @@ def test_generate_still_works_when_cost_recording_breaks(monkeypatch) -> None:
         raise OSError("disk is gone")
 
     monkeypatch.setattr(costs, "CostStore", boom)
-    brain = MetaBrainClient(client=_FakeOpenAI())
+    brain = GeminiBrainClient(client=_FakeOpenAI())
 
     async def run():
         return await brain.generate("m", [{"role": "user"}], [])

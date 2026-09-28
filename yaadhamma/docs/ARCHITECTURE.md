@@ -7,21 +7,16 @@ morning brief, overnight learning, file tidy).
 
 ## Voice stack
 
-Default (`YAADHAMMA_VOICE_MODE=realtime`):
+## Voice
 
-```text
 Microphone -> Gemini Live (gemini-3.8-live, speech-to-speech)
     -> Speaker
-```
 
 `src/agent.py` wires a LiveKit `AgentSession` to Gemini Live. The model
 hears, thinks and speaks in one realtime session, so interruption and
 barge-in work natively. The voice is Sulafat (Jeevan's pick).
 
-The old Meta pipeline (`YAADHAMMA_VOICE_MODE=pipeline`: Meta Voice
-Transcribe -> Muse Spark -> LiveKit Inference TTS) is kept in the code as
-a rollback option. Per the hardening plan it is retired only after the
-Gemini path proves itself.
+(The old Meta pipeline was deleted in v1 Stage 1; there is no rollback.)
 
 `src/latency.py` records per-reply latency (target < 1s) and a token cost
 estimate to `~/.yaadhamma/voice_metrics.csv`.
@@ -56,7 +51,6 @@ by module:
 | `file_tools.py` | Create, rename, move, copy, trash files and folders |
 | `memory_tools.py` | Remember, recall, correct, forget, export memories |
 | `gmail_tools.py`, `gmail.py` | Read and send Gmail (approval-gated) |
-| `outlook_tools.py`, `outlook.py` | Read and send Outlook (approval-gated) |
 | `calendar_tools.py`, `gcal.py` | Read and create Google Calendar events |
 | `whatsapp_tools.py`, `whatsapp.py` | WhatsApp Web chats and sending (approval-gated) |
 | `mac_tools.py` | macOS control (open apps, volume, quit with confirmation) |

@@ -11,7 +11,12 @@ from openai.types.chat import ChatCompletionMessageToolCall
 
 import meta_client
 from browser import ActionLock, browser_action
-from meta_client import GEMINI_OPENAI_URL, GeminiBrainClient, MetaConfigError, ModelTurn
+from meta_client import (
+    GEMINI_OPENAI_URL,
+    BrainConfigError,
+    GeminiBrainClient,
+    ModelTurn,
+)
 from orchestrator import VOICE_TOOL_NAMES, _assistant_message
 
 # ----------------------------------------------------------------- brain
@@ -83,7 +88,7 @@ def test_gemini_brain_uses_googles_endpoint_and_key(monkeypatch) -> None:
 
 def test_gemini_brain_without_key_is_a_clear_error(monkeypatch) -> None:
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-    with pytest.raises(MetaConfigError, match="GOOGLE_API_KEY"):
+    with pytest.raises(BrainConfigError, match="GOOGLE_API_KEY"):
         asyncio.run(GeminiBrainClient().generate("m", [], []))
 
 
@@ -118,12 +123,6 @@ def test_stale_muse_model_name_is_ignored_for_gemini(fresh_config) -> None:
     """An old .env.local line must not send 'muse-spark-1.3' to Google."""
     config = fresh_config(YAADHAMMA_BRAIN_MODEL="muse-spark-1.3")
     assert config.BRAIN_MODEL == "gemini-3.5-flash-lite"
-
-
-def test_meta_brain_is_still_available_as_rollback(fresh_config) -> None:
-    config = fresh_config(YAADHAMMA_BRAIN_PROVIDER="meta")
-    assert config.BRAIN_MODEL == "muse-spark-1.3"
-    assert type(meta_client.brain_client_from_config()).__name__ == "MetaBrainClient"
 
 
 # ----------------------------------------------------------------- voice cost

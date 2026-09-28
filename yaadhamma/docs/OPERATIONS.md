@@ -29,7 +29,6 @@ space, and recent errors from the audit log. Read-only; changes nothing.
 |---|---|---|
 | WhatsApp | `scripts/whatsapp_signin.py` | Stop the agent first (the Chromium profile is single-window), then scan the QR with the phone |
 | Gmail | `scripts/gmail_signin.py` | One token per account label, owner-only permissions |
-| Outlook | `scripts/outlook_signin.py` | Needs the Azure app registration first |
 | Calendar | `scripts/calendar_signin.py` | Google OAuth, same pattern as Gmail |
 
 Tokens live under `~/.yaadhamma/` and are never committed.

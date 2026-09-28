@@ -11,16 +11,8 @@ load_dotenv(".env.local")
 # work (Phase 3). "direct": the voice model does everything itself, as before.
 MODE = os.environ.get("YAADHAMMA_MODE", "split").strip().lower()
 
-# Meta Model API (dev.meta.ai): Yaadhamma's brain and ears.
-META_API_KEY = os.environ.get("YAADHAMMA_MODEL_API_KEY")
-META_BASE_URL = os.environ.get(
-    "YAADHAMMA_MODEL_API_URL", "https://api.meta.ai/v1"
-).rstrip("/")
-
-# "realtime" (default): Gemini Live hears, thinks and speaks in one model.
-# "pipeline": the Meta path (Muse Spark + Voice Transcribe + LiveKit TTS),
-# kept for two weeks as a rollback, then removed.
-VOICE_MODE = os.environ.get("YAADHAMMA_VOICE_MODE", "realtime").strip().lower()
+# Voice: Gemini Live speech-to-speech only (the Meta pipeline was deleted in
+# v1 Stage 1 by the owner's 2026-09-28 decision).
 
 # Gemini Live voice (realtime mode).
 REALTIME_MODEL = os.environ.get("YAADHAMMA_REALTIME_MODEL", "gemini-3.8-live")
@@ -42,46 +34,29 @@ CONTEXT_TARGET_TOKENS = int(os.environ.get("YAADHAMMA_CONTEXT_TARGET_TOKENS", "8
 LOCAL_VAD = os.environ.get("YAADHAMMA_LOCAL_VAD", "on").strip().lower() != "off"
 LOCAL_VAD_SILENCE_S = 0.25
 
-# The voice brain: Muse Spark via the Meta Model API.
-VOICE_MODEL = os.environ.get("YAADHAMMA_VOICE_MODEL", "muse-spark-1.3")
-
-# The background "brain" for multi-step tasks.
-# "gemini" (default since 2026-09-25): cheap, fast Gemini via Google's
-# OpenAI-compatible API. "meta": Muse Spark (rollback only).
-BRAIN_PROVIDER = os.environ.get("YAADHAMMA_BRAIN_PROVIDER", "gemini").strip().lower()
+# The voice brain is Gemini Live itself (speech-to-speech). The background
+# "brain" for multi-step tasks is the cheaper Gemini text models.
 _BRAIN_DEFAULTS = {
     "gemini": ("gemini-3.5-flash-lite", "gemini-3.8-flash"),
-    "meta": ("muse-spark-1.3", "muse-spark-1.3"),
 }
-_brain, _escalation = _BRAIN_DEFAULTS.get(BRAIN_PROVIDER, _BRAIN_DEFAULTS["gemini"])
+BRAIN_PROVIDER = "gemini"
+_brain, _escalation = _BRAIN_DEFAULTS[BRAIN_PROVIDER]
 
 
 def _model_setting(name: str, default: str) -> str:
-    """Read a model name, ignoring one left over from the other provider.
+    """Read a model name, ignoring one left over from the old Meta setup.
 
     An old .env.local may still say muse-spark-1.3; sending that to Gemini
-    would fail, so a name that does not match the provider falls back.
+    would fail, so a name that does not start with "gemini" falls back.
     """
     value = os.environ.get(name, "").strip()
-    prefix = "gemini" if BRAIN_PROVIDER == "gemini" else "muse"
-    return value if value.startswith(prefix) else default
+    return value if value.startswith("gemini") else default
 
 
 BRAIN_MODEL = _model_setting("YAADHAMMA_BRAIN_MODEL", _brain)
 # Used after two failed steps in a row.
 ESCALATION_MODEL = _model_setting("YAADHAMMA_ESCALATION_MODEL", _escalation)
 ESCALATION_EFFORT = os.environ.get("YAADHAMMA_ESCALATION_EFFORT", "high")
-
-# Speech-to-text for the voice pipeline.
-STT_MODEL = os.environ.get("YAADHAMMA_STT_MODEL", "muse-voice-transcribe-1.0")
-# PUSH_TO_TALK | ENDPOINTING | DIARIZATION. ENDPOINTING lets the model itself
-# decide when Jeevan has finished speaking.
-STT_MODE = os.environ.get("YAADHAMMA_STT_MODE", "ENDPOINTING")
-
-# Speech output (LiveKit Inference; Meta has no TTS). Jeevan picked Sarah
-# in Phase 2; override with YAADHAMMA_TTS_VOICE to try another voice.
-TTS_MODEL = os.environ.get("YAADHAMMA_TTS_MODEL", "fishaudio/s2.1-pro")
-TTS_VOICE = os.environ.get("YAADHAMMA_TTS_VOICE", "933563129e564b19a115bedd57b7406a")
 
 # Limits for one task.
 MAX_TASK_STEPS = int(os.environ.get("YAADHAMMA_MAX_TASK_STEPS", "15"))
