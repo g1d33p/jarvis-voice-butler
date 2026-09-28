@@ -107,7 +107,7 @@ def test_export_returns_oldest_first(store) -> None:
 
 
 def test_kinds_cover_plan_categories() -> None:
-    assert set(KINDS) == {"fact", "preference", "routine", "person"}
+    assert set(KINDS) == {"fact", "preference", "routine", "person", "commitment"}
 
 
 class _Context:

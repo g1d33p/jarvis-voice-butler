@@ -16,7 +16,8 @@ from pathlib import Path
 
 DEFAULT_DB = Path.home() / ".yaadhamma" / "memory.db"
 
-KINDS = ("fact", "preference", "routine", "person")
+# "commitment": something he promised someone (for follow-up reminders).
+KINDS = ("fact", "preference", "routine", "person", "commitment")
 
 
 def _utcnow() -> str:

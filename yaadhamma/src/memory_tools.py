@@ -66,7 +66,7 @@ class MemoryTools:
         like passwords, or anything the user did not mean to keep.
 
         Args:
-            kind: One of "fact", "preference", "routine", "person".
+            kind: One of "fact", "preference", "routine", "person", "commitment".
             content: The memory itself, phrased to make sense months later.
         """
         try:
@@ -93,7 +93,7 @@ class MemoryTools:
 
         Args:
             query: What to look for, in the user's own words.
-            kind: Optional filter: "fact", "preference", "routine", "person".
+            kind: Optional filter: "fact", "preference", "routine", "person", "commitment".
         """
         memories = self._store.recall(query, kind=kind or None)
         return {

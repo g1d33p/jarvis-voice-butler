@@ -9,6 +9,8 @@ Manual run:
     uv run scripts/digest_run.py
 Delivery test (sends one line to your own "(You)" chat, nothing else):
     uv run scripts/digest_run.py --test
+Overnight learning (2 am; chats, email and calendar into memory):
+    uv run scripts/digest_run.py --learn
 Morning brief (today's calendar and this week's clashes):
     uv run scripts/digest_run.py --morning
 Email preview (last 24 hours; prints the summary here, sends nothing):
@@ -90,6 +92,30 @@ async def main() -> int:
             calendar = (
                 CalendarClient() if CalendarClient().token_path.exists() else None
             )
+            if "--learn" in sys.argv[1:]:
+                from learning import LearningLog, run_learning
+                from memory_store import MemoryStore
+
+                gmail = [GmailClient(label=label) for label in discover_labels()]
+                learned = await run_learning(
+                    client,
+                    brain_client_from_config(),
+                    MemoryStore(),
+                    LearningLog(),
+                    gmail_clients=gmail,
+                    calendar=calendar,
+                )
+                print(
+                    f"Learning {learned.status}: {len(learned.added)} new, "
+                    f"{len(learned.updated)} updated. {learned.error}"
+                )
+                for item in learned.added:
+                    print("  +", item)
+                if learned.skipped_unread:
+                    print(
+                        f"  (skipped {learned.skipped_unread} personal chats with unread messages)"
+                    )
+                return 0 if learned.status != "failed" else 1
             if "--morning" in sys.argv[1:]:
                 if calendar is None:
                     print(

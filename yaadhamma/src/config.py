@@ -124,3 +124,7 @@ EMAIL_UNREAD_ONLY = os.environ.get("YAADHAMMA_EMAIL_UNREAD_ONLY", "").strip() in
     "true",
     "yes",
 }
+
+# Overnight learning reads a day of messages and must judge what matters, so
+# it uses the stronger Flash model (a few cents a night).
+LEARNING_MODEL = os.environ.get("YAADHAMMA_LEARNING_MODEL", ESCALATION_MODEL)

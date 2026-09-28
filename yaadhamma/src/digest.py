@@ -343,6 +343,29 @@ def morning_brief_text(today_events: list[dict], clashes: list, now: datetime) -
     return "\n".join(lines)
 
 
+def _learning_line() -> str:
+    """One line about last night's learning, for the morning brief."""
+    try:
+        from learning import LearningLog
+
+        latest = LearningLog().latest()
+    except Exception:
+        return ""
+    if not latest:
+        return ""
+    started = datetime.fromisoformat(latest["time"])
+    if datetime.now() - started > timedelta(hours=12):
+        return ""
+    if latest["status"] == "failed":
+        return "\n\nOvernight learning failed: " + latest["error"][:120]
+    if latest["added"] or latest["updated"]:
+        return (
+            f"\n\nLearned overnight: {latest['added']} new, {latest['updated']} updated. "
+            'Ask Yaadhamma "what did you learn?" to review.'
+        )
+    return ""
+
+
 async def run_morning_brief(client, calendar, store: DigestStore) -> DigestResult:
     """Today's schedule and this week's clashes, sent to his own chat at 8:45."""
     import asyncio
@@ -361,7 +384,7 @@ async def run_morning_brief(client, calendar, store: DigestStore) -> DigestResul
         store.new_clash_keys(
             [c.key for c in clashes]
         )  # the 9am digest won't repeat them
-        text = morning_brief_text(today, clashes, now)
+        text = morning_brief_text(today, clashes, now) + _learning_line()
         self_chat = await find_self_chat(client)
         await client.send_message(self_chat, text)
         result = DigestResult(status="morning", summary=text)
@@ -469,7 +492,7 @@ class DigestTools:
 
     @property
     def tools(self) -> list:
-        return [self.latest_digest]
+        return [self.latest_digest, self.learned_overnight]
 
     @function_tool()
     async def latest_digest(self, context: RunContext) -> dict[str, object]:
@@ -480,3 +503,17 @@ class DigestTools:
         """
         latest = self.store.latest()
         return latest or {"status": "none", "note": "No digest has run yet."}
+
+    @function_tool()
+    async def learned_overnight(self, context: RunContext) -> dict[str, object]:
+        """What overnight learning saved to memory last time, so he can review it.
+
+        Use when he asks "what did you learn?". To fix or remove an item, use
+        the memory tools (correct or forget) through run_task.
+        """
+        from learning import LearningLog
+
+        return LearningLog().latest() or {
+            "status": "none",
+            "note": "Nothing learned yet.",
+        }
