@@ -139,15 +139,24 @@ async def test_voice_can_ask_for_the_latest_digest(tmp_path) -> None:
     assert "budget review" in latest["summary"]
 
 
-def test_schedule_runs_four_times_a_day_in_local_time(tmp_path) -> None:
-    plist = digest_schedule.build_plist("/usr/local/bin/uv", project=tmp_path)
-    times = [(e["Hour"], e["Minute"]) for e in plist["StartCalendarInterval"]]
-    assert times == [(9, 0), (13, 0), (17, 0), (21, 0)]
+def test_schedule_has_the_morning_brief_and_four_digests(tmp_path) -> None:
+    jobs = {label: (times, extra) for label, times, extra, _ in digest_schedule.JOBS}
+    assert jobs["com.yaadhamma.morning"] == ([(8, 45)], ["--morning"])
+    assert jobs["com.yaadhamma.digest"][0] == [(9, 0), (13, 0), (17, 0), (21, 0)]
+    plist = digest_schedule.build_plist(
+        "/usr/local/bin/uv",
+        "com.yaadhamma.morning",
+        [(8, 45)],
+        ["--morning"],
+        project=tmp_path,
+    )
     assert plist["ProgramArguments"] == [
         "/usr/local/bin/uv",
         "run",
         "scripts/digest_run.py",
+        "--morning",
     ]
+    assert plist["StartCalendarInterval"] == [{"Hour": 8, "Minute": 45}]
     assert plist["WorkingDirectory"] == str(tmp_path)
     plistlib.dumps(plist)  # valid for macOS
 
@@ -330,7 +339,7 @@ async def test_email_preview_sends_nothing() -> None:
 
     assert result["found"] == 1
     assert "Priya" in result["summary"]
-    assert "not checked in this preview" in brain.calls[0][1]["content"]
+    assert '"checked": false' in brain.calls[0][1]["content"]  # says nothing about chats
 
 
 def test_opened_emails_are_included_unless_unread_only(monkeypatch) -> None:

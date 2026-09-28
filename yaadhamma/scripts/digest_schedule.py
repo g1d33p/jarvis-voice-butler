@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Turn the scheduled Saayam digest on or off (macOS launchd).
+"""Turn the scheduled digest and morning brief on or off (macOS launchd).
 
-    uv run scripts/digest_schedule.py install     # 9am, 1pm, 5pm, 9pm daily
+    uv run scripts/digest_schedule.py install     # brief 8:45; digests 9am, 1pm, 5pm, 9pm
     uv run scripts/digest_schedule.py uninstall
     uv run scripts/digest_schedule.py status
 
 Times are the Mac's local time. If the Mac is asleep at a scheduled time,
-macOS runs the missed digest when it wakes.
+macOS runs the missed job when it wakes.
 """
 
 import plistlib
@@ -15,23 +15,38 @@ import subprocess
 import sys
 from pathlib import Path
 
-LABEL = "com.yaadhamma.digest"
-HOURS = (9, 13, 17, 21)
-PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 PROJECT = Path(__file__).resolve().parent.parent
 LOG = Path.home() / ".yaadhamma" / "logs" / "digest.log"
+AGENTS = Path.home() / "Library" / "LaunchAgents"
+
+# (launchd label, [(hour, minute), ...], extra arguments, description)
+JOBS = [
+    ("com.yaadhamma.morning", [(8, 45)], ["--morning"], "Morning brief at 8:45am"),
+    (
+        "com.yaadhamma.digest",
+        [(9, 0), (13, 0), (17, 0), (21, 0)],
+        [],
+        "Digest at 9am, 1pm, 5pm and 9pm",
+    ),
+]
 
 
-def build_plist(uv_path: str, project: Path = PROJECT, hours=HOURS) -> dict:
+def build_plist(
+    uv_path: str, label: str, times, extra, project: Path = PROJECT
+) -> dict:
     return {
-        "Label": LABEL,
-        "ProgramArguments": [uv_path, "run", "scripts/digest_run.py"],
+        "Label": label,
+        "ProgramArguments": [uv_path, "run", "scripts/digest_run.py", *extra],
         "WorkingDirectory": str(project),
-        "StartCalendarInterval": [{"Hour": h, "Minute": 0} for h in hours],
+        "StartCalendarInterval": [{"Hour": h, "Minute": m} for h, m in times],
         "StandardOutPath": str(LOG),
         "StandardErrorPath": str(LOG),
         "RunAtLoad": False,
     }
+
+
+def _plist_path(label: str) -> Path:
+    return AGENTS / f"{label}.plist"
 
 
 def install() -> int:
@@ -42,35 +57,40 @@ def install() -> int:
         )
         return 1
     LOG.parent.mkdir(parents=True, exist_ok=True)
-    PLIST.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["launchctl", "unload", str(PLIST)], capture_output=True)
-    with open(PLIST, "wb") as f:
-        plistlib.dump(build_plist(uv), f)
-    done = subprocess.run(
-        ["launchctl", "load", str(PLIST)], capture_output=True, text=True
-    )
-    if done.returncode != 0:
-        print(f"macOS refused the schedule: {done.stderr.strip()}")
-        return 1
-    times = ", ".join(f"{h % 12 or 12}{'am' if h < 12 else 'pm'}" for h in HOURS)
-    print(f"Digest scheduled daily at {times} (Mac local time).")
+    AGENTS.mkdir(parents=True, exist_ok=True)
+    for label, times, extra, description in JOBS:
+        path = _plist_path(label)
+        subprocess.run(["launchctl", "unload", str(path)], capture_output=True)
+        with open(path, "wb") as f:
+            plistlib.dump(build_plist(uv, label, times, extra), f)
+        done = subprocess.run(
+            ["launchctl", "load", str(path)], capture_output=True, text=True
+        )
+        if done.returncode != 0:
+            print(f"macOS refused {label}: {done.stderr.strip()}")
+            return 1
+        print(f"Scheduled: {description} (Mac local time).")
     print(f"Log: {LOG}")
     return 0
 
 
 def uninstall() -> int:
-    subprocess.run(["launchctl", "unload", str(PLIST)], capture_output=True)
-    PLIST.unlink(missing_ok=True)
-    print("Digest schedule removed.")
+    for label, *_ in JOBS:
+        path = _plist_path(label)
+        subprocess.run(["launchctl", "unload", str(path)], capture_output=True)
+        path.unlink(missing_ok=True)
+    print("Morning brief and digest schedules removed.")
     return 0
 
 
 def status() -> int:
-    loaded = (
-        subprocess.run(["launchctl", "list", LABEL], capture_output=True).returncode
-        == 0
-    )
-    print(f"Scheduled: {'yes' if loaded and PLIST.exists() else 'no'}")
+    for label, _times, _extra, description in JOBS:
+        loaded = (
+            subprocess.run(["launchctl", "list", label], capture_output=True).returncode
+            == 0
+        )
+        on = loaded and _plist_path(label).exists()
+        print(f"{description}: {'on' if on else 'off'}")
     return 0
 
 

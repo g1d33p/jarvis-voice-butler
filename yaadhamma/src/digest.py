@@ -59,6 +59,9 @@ message, plain text, under 1,500 characters:
 - one short line per notable email or group of similar ones (e.g. "3 job alerts").
   Skip pure noise such as marketing.
 
+*Calendar*
+- new clashes and events starting in the next few hours, from "calendar".
+
 End with: Quiet: <watched chats with nothing new>, if any.
 
 Emails he has not opened yet deserve more attention; opened ones can be FYI
@@ -66,6 +69,11 @@ unless they still need action. Name the account only when it helps (e.g. a
 work vs personal address).
 
 Mark emails he has not opened yet with "(unread)".
+
+Group only true noise (marketing, newsletters, routine alerts of one kind).
+Anything that looks like a real account, security, billing, work or project
+notice gets its own line, even if short.
+If "whatsapp" has "checked": false, say nothing at all about the chats.
 
 Rules: be specific (names, dates, asks). Never invent anything that is not in
 the data. Leave out a section that has nothing in it. If nothing needs him, say
@@ -123,6 +131,27 @@ class DigestStore:
                     result.emails,
                 ),
             )
+
+    def new_clash_keys(self, keys: list[str]) -> list[str]:
+        """Which clashes have not been reported before (and remember them)."""
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS reported_clashes "
+                "(key TEXT PRIMARY KEY, reported TEXT NOT NULL)"
+            )
+            fresh = [
+                k
+                for k in keys
+                if not db.execute(
+                    "SELECT 1 FROM reported_clashes WHERE key = ?", (k,)
+                ).fetchone()
+            ]
+            now = datetime.now().isoformat(timespec="seconds")
+            db.executemany(
+                "INSERT OR IGNORE INTO reported_clashes VALUES (?, ?)",
+                [(k, now) for k in fresh],
+            )
+        return fresh
 
     def last_success(self) -> datetime | None:
         """When the last digest that worked (sent or quiet) started."""
@@ -240,7 +269,7 @@ async def preview_email(gmail_clients, brain, hours: float) -> dict:
                     "role": "user",
                     "content": json.dumps(
                         {
-                            "whatsapp": {"note": "not checked in this preview"},
+                            "whatsapp": {"checked": False},
                             "email": email,
                         },
                         ensure_ascii=False,
@@ -258,6 +287,94 @@ async def preview_email(gmail_clients, brain, hours: float) -> dict:
         "accounts": accounts,
         "duplicate_accounts": duplicates,
     }
+
+
+async def calendar_update(calendar, store: DigestStore, now: datetime) -> dict:
+    """New clashes in the next 7 days and events starting in the next 4 hours.
+
+    Clashes are reported once; later digests stay quiet about them. A calendar
+    problem never sinks the digest: it is returned as an error instead.
+    """
+    import asyncio
+
+    if calendar is None:
+        return {}
+    from gcal import find_clashes, format_event, local_zone
+
+    start = (
+        now.astimezone(local_zone()) if now.tzinfo else now.replace(tzinfo=local_zone())
+    )
+    try:
+        week = await asyncio.to_thread(
+            calendar.list_events, start, start + timedelta(days=7)
+        )
+    except Exception as exc:
+        return {"error": str(exc)[:200]}
+    clashes = find_clashes(week)
+    fresh = set(store.new_clash_keys([c.key for c in clashes]))
+    soon_end = start + timedelta(hours=4)
+    soon = [
+        format_event(e)
+        for e in week
+        if not e["all_day"]
+        and not e["declined"]
+        and start <= datetime.fromisoformat(e["start"]) < soon_end
+    ]
+    return {
+        "new_clashes": [c.describe() for c in clashes if c.key in fresh],
+        "starting_soon": soon,
+    }
+
+
+def morning_brief_text(today_events: list[dict], clashes: list, now: datetime) -> str:
+    """The 8:45 brief, built directly from the calendar (no model, nothing invented)."""
+    from gcal import format_event
+
+    lines = [f"Good morning. {now:%A %d %B}", ""]
+    visible = [e for e in today_events if not e["declined"]]
+    if visible:
+        lines.append("*Today*")
+        lines += [f"- {format_event(e)}" for e in visible]
+    else:
+        lines.append("*Today*: nothing on your calendar.")
+    if clashes:
+        lines += ["", "*Clashes this week*"]
+        lines += [f"- {c.describe()}" for c in clashes]
+    return "\n".join(lines)
+
+
+async def run_morning_brief(client, calendar, store: DigestStore) -> DigestResult:
+    """Today's schedule and this week's clashes, sent to his own chat at 8:45."""
+    import asyncio
+
+    from gcal import day_bounds, find_clashes, local_zone
+
+    started = datetime.now()
+    try:
+        now = datetime.now(local_zone())
+        day_start, day_end = day_bounds(now.date())
+        today = await asyncio.to_thread(calendar.list_events, day_start, day_end)
+        week = await asyncio.to_thread(
+            calendar.list_events, day_start, day_start + timedelta(days=7)
+        )
+        clashes = find_clashes(week)
+        store.new_clash_keys(
+            [c.key for c in clashes]
+        )  # the 9am digest won't repeat them
+        text = morning_brief_text(today, clashes, now)
+        self_chat = await find_self_chat(client)
+        await client.send_message(self_chat, text)
+        result = DigestResult(status="morning", summary=text)
+    except WhatsAppNotPairedError:
+        result = DigestResult(
+            status="failed",
+            error="The digest's WhatsApp is not paired. Run: "
+            "uv run scripts/whatsapp_signin.py --digest",
+        )
+    except Exception as exc:
+        result = DigestResult(status="failed", error=str(exc)[:500])
+    store.record(started, result)
+    return result
 
 
 async def find_self_chat(client) -> str:
@@ -287,7 +404,7 @@ async def send_test_message(client) -> str:
 
 
 async def run_digest(
-    client, brain, store: DigestStore, gmail_clients=None
+    client, brain, store: DigestStore, gmail_clients=None, calendar=None
 ) -> DigestResult:
     """One scheduled digest run. Never raises; the outcome is recorded."""
     started = datetime.now()
@@ -298,7 +415,9 @@ async def run_digest(
         unread = int(chats.get("unread_watched_chats", 0))
         email = await collect_email(gmail_clients, email_since(store, started))
         new_emails = len(email["emails"])
-        if unread == 0 and new_emails == 0:
+        cal = await calendar_update(calendar, store, started)
+        calendar_news = bool(cal.get("new_clashes") or cal.get("starting_soon"))
+        if unread == 0 and new_emails == 0 and not calendar_news:
             result = DigestResult(
                 status="quiet", summary="Nothing new in the watched chats or email."
             )
@@ -310,7 +429,8 @@ async def run_digest(
                     {
                         "role": "user",
                         "content": json.dumps(
-                            {"whatsapp": chats, "email": email}, ensure_ascii=False
+                            {"whatsapp": chats, "email": email, "calendar": cal},
+                            ensure_ascii=False,
                         ),
                     },
                 ],

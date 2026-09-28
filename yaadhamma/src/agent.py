@@ -21,6 +21,7 @@ import config
 from actions import ActionRegistry
 from audit import AuditLog
 from browser import BrowserManager
+from calendar_tools import CalendarTools
 from digest import DigestTools
 from echo_guard import EchoGuard, filter_echo_events
 from failover_llm import FailoverLLM, maybe_wrap_with_failover
@@ -165,6 +166,7 @@ class Assistant(Agent):
         self.whatsapp_tools = WhatsAppTools(
             browser=self.browser, approvals=self.approvals
         )
+        self.calendar_tools = CalendarTools(approvals=self.approvals)
         toolsets = (
             self.browser_tools,
             self.mac_tools,
@@ -175,6 +177,7 @@ class Assistant(Agent):
             self.memory_tools,
             self.outlook_tools,
             self.whatsapp_tools,
+            self.calendar_tools,
         )
         self._end_call_tool = EndCallTool(
             extra_description=(

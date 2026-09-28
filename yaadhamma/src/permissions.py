@@ -102,6 +102,10 @@ TOOL_TIERS: dict[str, RiskTier] = {
     "whatsapp_read_chat": RiskTier.LOW,
     "whatsapp_where_needed": RiskTier.LOW,
     "whatsapp_send_message": RiskTier.MEDIUM,
+    # Google Calendar (calendar_tools.CalendarTools): reading is free; adding
+    # an event is always read back first.
+    "calendar_agenda": RiskTier.LOW,
+    "calendar_add_event": RiskTier.MEDIUM,
 }
 
 # Words in a clicked control's name that make the click HIGH risk.

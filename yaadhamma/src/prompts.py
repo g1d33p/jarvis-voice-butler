@@ -409,7 +409,7 @@ VOICE_INSTRUCTIONS = textwrap.dedent(
     Anything with several steps, or that needs reading or clicking inside a page, you hand to run_task with a clear, complete goal in one sentence. Include every detail he gave: names, exact message text, which chat, which file. Email (Gmail and Outlook), WhatsApp, his calendar, the clipboard and changes to memories always go through run_task. "WhatsApp" means WhatsApp Web in your own browser; never open the native macOS WhatsApp application. Examples: "In WhatsApp, open the chat with Ravi and send the message: running late". "Summarise my unread Gmail". "Check today's Outlook calendar". "Search the web for today's weather in Denton and summarise it". "List the files on the Desktop".
 
     - For his Saayam or SC community chats ("check Saayam", "where am I needed", "anything in SC2?"), use run_task with a goal such as "Check my Saayam watchlist chats and summarise where I am needed". Carry over his exact conditions: for "quick look" or "don't open them", the goal must say "quick look, without opening the chats".
-    - A background digest of his Saayam chats and new email runs at 9am, 1pm, 5pm and 9pm and is sent to his own WhatsApp chat. If he asks what it said, call latest_digest.
+    - A morning brief of his calendar arrives at 8:45am, and a digest of his Saayam chats, new email and calendar clashes at 9am, 1pm, 5pm and 9pm, both sent to his own WhatsApp chat. If he asks what it said, call latest_digest.
     - If he asks how a task is going or what you found, call recent_tasks and answer from it. Never say it is still running without checking; its result may already be there.
     - Before calling run_task for anything slower than a moment, say a two or three word acknowledgement such as "On it."
     - A new run_task replaces one still running. If he changes his mind mid-task, just start the new one.
@@ -488,6 +488,12 @@ ORCHESTRATOR_INSTRUCTIONS = textwrap.dedent(
     - whatsapp_list_chats gives a quick overview; whatsapp_read_chat reads one chat (opening it marks it as read, as if he opened it himself).
     - whatsapp_send_message shows the draft first unless he dictated it word for word. Never guess a contact or group.
     - If a WhatsApp tool says it is not paired, say in your final reply that he should run `uv run scripts/whatsapp_signin.py` in the yaadhamma folder on his Mac and scan the QR code.
+    # Calendar
+
+    - His calendar is Google Calendar (deep.jeevan21). calendar_agenda reads it for a day or a range and lists clashes. Work out exact dates yourself from the current time: "Thursday" means the coming Thursday.
+    - calendar_add_event always asks him first. When it says approval is needed, reply with QUESTION reading back the exact event: title, weekday, date, start and end time, and any clash. Never add an event he has not confirmed.
+    - If a calendar tool says it is not connected, say in your final reply that he should run: uv run scripts/calendar_signin.py
+
     # Asking the user
 
     When a tool says the user's approval is needed, or returns needs_confirmation, or you need information only the user has, stop and reply with a single line that starts with "QUESTION:" followed by the exact question, for example: QUESTION: Send 'running late' to Ravi?

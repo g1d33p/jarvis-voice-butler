@@ -9,6 +9,8 @@ Manual run:
     uv run scripts/digest_run.py
 Delivery test (sends one line to your own "(You)" chat, nothing else):
     uv run scripts/digest_run.py --test
+Morning brief (today's calendar and this week's clashes):
+    uv run scripts/digest_run.py --morning
 Email preview (last 24 hours; prints the summary here, sends nothing):
     uv run scripts/digest_run.py --email-preview 24
 """
@@ -22,7 +24,14 @@ from pathlib import Path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from browser import DIGEST_PROFILE_DIR, BrowserManager
-from digest import DigestStore, preview_email, run_digest, send_test_message
+from digest import (
+    DigestStore,
+    preview_email,
+    run_digest,
+    run_morning_brief,
+    send_test_message,
+)
+from gcal import CalendarClient
 from gmail import GmailClient, discover_labels
 from meta_client import brain_client_from_config
 from whatsapp import WhatsAppClient
@@ -58,10 +67,16 @@ async def main() -> int:
         return await email_preview(float(after[0]) if after else 24)
     LOCK.parent.mkdir(parents=True, exist_ok=True)
     with open(LOCK, "w") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            print("A digest is already running; skipping this one.")
+        # The 8:45 brief may still be running at 9:00: wait for it (up to 5
+        # minutes) rather than skip the digest.
+        for _ in range(60):
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                await asyncio.sleep(5)
+        else:
+            print("Another digest has been running for 5 minutes; skipping this one.")
             return 0
         browser = BrowserManager(
             headless=False, profile_dir=DIGEST_PROFILE_DIR, launch_args=OFF_SCREEN
@@ -72,10 +87,25 @@ async def main() -> int:
                 chat = await send_test_message(client)
                 print(f"Test message sent to {chat}. Check your phone.")
                 return 0
-            gmail = [GmailClient(label=label) for label in discover_labels()]
-            result = await run_digest(
-                client, brain_client_from_config(), DigestStore(), gmail_clients=gmail
+            calendar = (
+                CalendarClient() if CalendarClient().token_path.exists() else None
             )
+            if "--morning" in sys.argv[1:]:
+                if calendar is None:
+                    print(
+                        "Google Calendar is not connected: uv run scripts/calendar_signin.py"
+                    )
+                    return 1
+                result = await run_morning_brief(client, calendar, DigestStore())
+            else:
+                gmail = [GmailClient(label=label) for label in discover_labels()]
+                result = await run_digest(
+                    client,
+                    brain_client_from_config(),
+                    DigestStore(),
+                    gmail_clients=gmail,
+                    calendar=calendar,
+                )
         finally:
             await browser.close()
     print(f"Digest {result.status}. {result.error or result.summary[:200]}")

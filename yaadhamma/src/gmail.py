@@ -142,7 +142,17 @@ def discover_labels(token_dir: Path | None = None) -> list[str]:
 
 
 class GmailClient:
-    """Gmail REST client with per-account OAuth2 tokens."""
+    """Gmail REST client with per-account OAuth2 tokens.
+
+    The OAuth plumbing (sign-in, token cache, refresh) is shared with the
+    Google Calendar client, which overrides the class attributes below.
+    """
+
+    SCOPES = _SCOPES
+    API = API_BASE
+    TOKEN_PREFIX = "gmail-token-"
+    SERVICE = "Gmail"
+    SIGNIN_COMMAND = "uv run scripts/gmail_signin.py"
 
     def __init__(
         self,
@@ -165,7 +175,7 @@ class GmailClient:
         if token_path:
             self.token_path = Path(token_path)
         else:
-            self.token_path = DEFAULT_TOKEN_DIR / f"gmail-token-{label}.json"
+            self.token_path = DEFAULT_TOKEN_DIR / f"{self.TOKEN_PREFIX}{label}.json"
         self._http = http or _default_http
 
     def _credentials(self) -> tuple[str, str]:
@@ -186,7 +196,7 @@ class GmailClient:
             "client_id": client_id,
             "redirect_uri": redirect_uri,
             "response_type": "code",
-            "scope": _SCOPES,
+            "scope": self.SCOPES,
             "access_type": "offline",  # ask for a refresh token
             "prompt": "consent",  # re-grant, so re-linking keeps working
             "include_granted_scopes": "true",
@@ -283,9 +293,9 @@ class GmailClient:
         )
         if resp.get("error"):
             raise GmailAuthError(
-                f"Gmail session for '{self.label}' expired "
+                f"{self.SERVICE} session for '{self.label}' expired "
                 f"({resp.get('error_description', resp['error'])}). Sign in "
-                f"again: uv run scripts/gmail_signin.py {self.label}"
+                f"again: {self.SIGNIN_COMMAND} {self.label}"
             )
         if not resp.get("refresh_token"):
             resp["refresh_token"] = refresh_token  # Google may omit it
@@ -296,8 +306,8 @@ class GmailClient:
         token = self._load_token()
         if not token or not token.get("access_token"):
             raise GmailAuthError(
-                f"Gmail account '{self.label}' is not signed in. Run: "
-                f"uv run scripts/gmail_signin.py {self.label}"
+                f"{self.SERVICE} account '{self.label}' is not signed in. Run: "
+                f"{self.SIGNIN_COMMAND} {self.label}"
             )
         expires_at = datetime.fromisoformat(token["expires_at"])
         if expires_at.tzinfo is None:
@@ -308,7 +318,7 @@ class GmailClient:
 
     # -- gmail api ---------------------------------------------------------
     def _get(self, path: str, params: dict | None = None) -> dict:
-        url = f"{API_BASE}{path}"
+        url = f"{self.API}{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params)
         return self._http(
@@ -318,7 +328,7 @@ class GmailClient:
     def _post(self, path: str, payload: dict) -> dict:
         return self._http(
             "POST",
-            f"{API_BASE}{path}",
+            f"{self.API}{path}",
             json_body=payload,
             headers={"Authorization": f"Bearer {self._access_token()}"},
         )
