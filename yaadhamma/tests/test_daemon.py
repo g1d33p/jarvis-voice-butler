@@ -221,5 +221,130 @@ def test_voice_worker_keeps_extras(daemon, monkeypatch) -> None:
     worker.start()
     assert started[0][:2] == ["/usr/bin/uv", "run"]
     assert "wake" in started[0] and "ui" in started[0]
-    assert started[0][-1] == "src/agent.py"
+    assert started[0][-2] == "src/agent.py"
+    assert started[0][-1] == "console"
     worker.stop()
+
+
+def _set_package_presence(
+    monkeypatch, present: tuple = (), missing: tuple = ()
+) -> None:
+    import importlib.util
+
+    real_find_spec = importlib.util.find_spec
+
+    def fake(name: str):
+        if name in missing:
+            return None
+        if name in present:
+            return object()  # any truthy spec stands in for "importable"
+        return real_find_spec(name)
+
+    monkeypatch.setattr(importlib.util, "find_spec", fake)
+
+
+def test_voice_worker_launches_console_subcommand(daemon, monkeypatch) -> None:
+    """The LiveKit CLI needs a subcommand: without `console`, `uv run
+    src/agent.py` prints help and exits immediately."""
+    started = []
+
+    class FakeProc:
+        def __init__(self, cmd, **kwargs):
+            started.append(cmd)
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(daemon.subprocess, "Popen", FakeProc)
+    monkeypatch.setattr(daemon, "_which", lambda name: "/usr/bin/uv")
+    worker = daemon.VoiceWorker()
+    worker.start()
+    assert started[0][-1] == "console"
+    worker.stop()
+
+
+def test_worker_quick_exit_detected(daemon, monkeypatch) -> None:
+    """A worker that is already gone within seconds of starting failed to
+    launch — the daemon must notice instead of silently going back to idle."""
+
+    class FakeProc:
+        def __init__(self, cmd, **kwargs):
+            pass
+
+        def poll(self):
+            return 1  # exited immediately
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(daemon.subprocess, "Popen", FakeProc)
+    monkeypatch.setattr(daemon, "_which", lambda name: "/usr/bin/uv")
+    worker = daemon.VoiceWorker()
+    worker.start()
+    assert worker.quick_exit_code() == 1
+
+
+def test_worker_slow_exit_not_flagged_as_quick(daemon, monkeypatch) -> None:
+    """A worker that ran for a while and then died is a runtime failure,
+    not a launch failure: no loud launch-failure report."""
+
+    class FakeProc:
+        def __init__(self, cmd, **kwargs):
+            pass
+
+        def poll(self):
+            return 1
+
+        def terminate(self):
+            pass
+
+        def wait(self, timeout=None):
+            return 0
+
+    monkeypatch.setattr(daemon.subprocess, "Popen", FakeProc)
+    monkeypatch.setattr(daemon, "_which", lambda name: "/usr/bin/uv")
+    now = [1000.0]
+    monkeypatch.setattr(daemon.time, "monotonic", lambda: now[0])
+    worker = daemon.VoiceWorker()
+    worker.start()
+    now[0] += 10.0  # the worker ran a while, then died: not a launch failure
+    assert worker.quick_exit_code() is None
+
+
+def test_check_extras_fails_fast_on_missing_wake(daemon, monkeypatch, caplog) -> None:
+    import logging
+
+    _set_package_presence(monkeypatch, missing=("openwakeword",))
+    with caplog.at_level(logging.ERROR, logger="yaadhamma.daemon"):
+        assert daemon._check_extras() == 4
+    assert "uv sync --extra wake --extra ui" in caplog.text
+    assert "openwakeword" in caplog.text
+
+
+def test_check_extras_warns_on_missing_ui_only(daemon, monkeypatch, caplog) -> None:
+    import logging
+
+    _set_package_presence(
+        monkeypatch,
+        present=("openwakeword", "sounddevice", "numpy"),
+        missing=("rumps",),
+    )
+    with caplog.at_level(logging.WARNING, logger="yaadhamma.daemon"):
+        assert daemon._check_extras() is None
+    assert "headless" in caplog.text
+    assert "uv sync --extra wake --extra ui" in caplog.text
+
+
+def test_main_exits_4_when_wake_packages_missing(daemon, monkeypatch) -> None:
+    _set_package_presence(monkeypatch, missing=("openwakeword", "sounddevice"))
+    monkeypatch.setenv("YAADHAMMA_WAKE", "on")
+    assert daemon.main() == 4

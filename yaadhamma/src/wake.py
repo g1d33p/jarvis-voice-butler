@@ -45,8 +45,26 @@ _MIC_HELP = (
     "app). Then restart the daemon: python scripts/daemon_control.py start"
 )
 
+# Seen when the daemon runs as a launchd background agent: macOS never shows
+# it the microphone permission prompt, so PortAudio fails deep in the HAL
+# with PaMacCore err=-50 instead of a permission error.
+_LAUNCHD_MIC_HELP = (
+    "Yaadhamma could not open the microphone from the background daemon "
+    "(PaMacCore err=-50): a launchd agent never gets the macOS microphone "
+    "permission prompt, so there is nothing to grant. Run the daemon once "
+    "in the foreground so the prompt can appear — from the project "
+    "directory: uv run --extra wake --extra ui python "
+    "scripts/yaadhamma_daemon.py — grant microphone access when macOS asks "
+    "(the prompt names the uv binary), say 'Hey Jarvis' to confirm it "
+    "hears you, stop it with Ctrl+C, then restart the background daemon: "
+    "python scripts/daemon_control.py start"
+)
+
 
 def _mic_error(exc: Exception) -> MicrophonePermissionError:
+    detail = str(exc)
+    if "pamaccore" in detail.lower() and "-50" in detail:
+        return MicrophonePermissionError(f"{_LAUNCHD_MIC_HELP} (details: {exc})")
     return MicrophonePermissionError(f"{_MIC_HELP} (details: {exc})")
 
 

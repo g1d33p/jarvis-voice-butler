@@ -240,3 +240,25 @@ def test_openwakeword_load_failure_surfaces_real_error(monkeypatch, tmp_path) ->
     monkeypatch.setattr(pkg, "Model", BrokenModel)
     with pytest.raises(WakeConfigError, match="boom: onnx session failed"):
         OpenWakeWordDetector(phrase="hey jarvis")
+
+
+def test_mic_error_detects_launchd_background_case() -> None:
+    """PaMacCore err=-50 means the launchd background agent never got the
+    macOS mic prompt: the message must say what to do instead of dumping a
+    raw PortAudio error."""
+    from wake import _mic_error
+
+    err = _mic_error(Exception("Error opening InputStream: PaMacCore err=-50"))
+    text = str(err)
+    assert "foreground" in text
+    assert "launchd" in text
+    assert "uv run --extra wake --extra ui" in text
+
+
+def test_mic_error_generic_case_keeps_standard_help() -> None:
+    from wake import _mic_error
+
+    err = _mic_error(Exception("some other portaudio failure"))
+    text = str(err)
+    assert "System Settings" in text
+    assert "foreground" not in text

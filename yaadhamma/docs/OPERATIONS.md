@@ -59,8 +59,10 @@ space, and recent errors from the audit log. Read-only; changes nothing.
 ### If the daemon fails to start
 
 1. Run it once in the foreground to see the real error (the log can
-   interleave and truncate tracebacks):
-   `uv run scripts/yaadhamma_daemon.py` — stop it with Ctrl+C when it fails.
+   interleave and truncate tracebacks), with the extras so the wake/UI
+   packages stay installed:
+   `uv run --extra wake --extra ui python scripts/yaadhamma_daemon.py` —
+   stop it with Ctrl+C when it fails.
 2. Also check the tail: `tail -30 ~/.yaadhamma/daemon.log`.
 3. Usual causes: microphone permission (System Settings > Privacy & Security
    > Microphone, then restart), a missing extra (`uv sync --extra wake`
@@ -74,6 +76,29 @@ Out of the box she listens for **"Hey Jarvis"** using openWakeWord —
 no account, no training. `YAADHAMMA_WAKE=off` in `.env.local` disables the
 whole always-on listener. `Option+Space` also starts a conversation
 (needs `pip install pynput`); 90 seconds of silence closes the session.
+
+### Foreground test mode (microphone permission)
+
+A launchd background agent never gets the macOS microphone permission
+prompt: if the daemon log shows `PaMacCore err=-50`, the background
+daemon can never open the mic on its own. Run it once in the foreground
+from the project directory so the prompt can appear:
+
+```
+uv run --extra wake --extra ui python scripts/yaadhamma_daemon.py
+```
+
+Grant microphone access when macOS asks (the prompt names the `uv`
+binary — permission attaches to the binary that opens the mic, not to
+the script), say "Hey Jarvis" to confirm it hears you, then stop with
+Ctrl+C and restart the background daemon:
+
+```
+python scripts/daemon_control.py start
+```
+
+This is also the fastest way to test any daemon change: the log goes
+straight to the terminal instead of `~/.yaadhamma/daemon.log`.
 
 ### Custom wake phrase ("Hey Yaadhamma")
 

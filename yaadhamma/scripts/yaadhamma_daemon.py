@@ -15,6 +15,7 @@ Mute comes from the menu bar (stage 4), which writes
 
 from __future__ import annotations
 
+import importlib.util
 import logging
 import subprocess
 import sys
@@ -53,14 +54,36 @@ def _read_control() -> dict:
 
 
 class VoiceWorker:
-    """Own the agent subprocess: one conversation = one process."""
+    """Own the agent subprocess: one conversation = one process.
+
+    QUICK_EXIT_S: a healthy worker lives for minutes; if the process is
+    already gone this soon after start, the launch itself failed (e.g. a
+    bad command line) and the daemon says so loudly instead of silently
+    dropping back to idle.
+    """
+
+    QUICK_EXIT_S = 5.0
 
     def __init__(self) -> None:
         self._proc: subprocess.Popen | None = None
+        self._started_at: float | None = None
 
     @property
     def running(self) -> bool:
         return self._proc is not None and self._proc.poll() is None
+
+    def quick_exit_code(self) -> int | None:
+        """Exit code if the worker already exited within QUICK_EXIT_S of
+        starting; None when it is still running, never started, was
+        stopped normally, or lived longer than the threshold."""
+        if self._proc is None or self._started_at is None:
+            return None
+        code = self._proc.poll()
+        if code is None:
+            return None
+        if time.monotonic() - self._started_at < self.QUICK_EXIT_S:
+            return code
+        return None
 
     def start(self) -> None:
         if self.running:
@@ -69,10 +92,12 @@ class VoiceWorker:
         # Keep the extras on the command line (see daemon_control._program):
         # a bare `uv run` re-syncs the environment, which would uninstall the
         # wake/UI packages out from under this already-running daemon.
+        # `console` is the LiveKit CLI subcommand that actually runs the
+        # agent; without it the CLI prints help and exits immediately.
         cmd = (
-            [uv, "run", "--extra", "wake", "--extra", "ui", "src/agent.py"]
+            [uv, "run", "--extra", "wake", "--extra", "ui", "src/agent.py", "console"]
             if uv
-            else [sys.executable, "src/agent.py"]
+            else [sys.executable, "src/agent.py", "console"]
         )
         log.info("wake: starting voice worker: %s", " ".join(cmd))
         self._proc = subprocess.Popen(
@@ -81,6 +106,7 @@ class VoiceWorker:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        self._started_at = time.monotonic()
         # Silence is measured from the moment the session opens.
         note_speech_activity(time.monotonic())
 
@@ -103,6 +129,39 @@ def _which(name: str) -> str | None:
     import shutil
 
     return shutil.which(name)
+
+
+# The daemon is launched with `uv run --extra wake --extra ui`, but a stray
+# `uv sync` without extras silently uninstalls these afterwards. The wake
+# packages are mandatory (no detector/mic without them); the UI degrades to
+# headless, so it only warns.
+_WAKE_PACKAGES = ("openwakeword", "sounddevice", "numpy")
+_UI_PACKAGES = ("rumps",)
+
+
+def _check_extras() -> int | None:
+    """First-run guard: fail fast with the exact reinstall command instead
+    of dying later on an ImportError. Returns an exit code, or None when
+    everything the daemon needs is importable."""
+    missing_wake = [p for p in _WAKE_PACKAGES if importlib.util.find_spec(p) is None]
+    missing_ui = [p for p in _UI_PACKAGES if importlib.util.find_spec(p) is None]
+    if missing_ui:
+        log.warning(
+            "menu-bar UI packages missing (%s): the daemon will run headless. "
+            "To restore the UI, run: cd %s && uv sync --extra wake --extra ui",
+            ", ".join(missing_ui),
+            PROJECT,
+        )
+    if not missing_wake:
+        return None
+    log.error(
+        "cannot start: wake-word packages missing (%s) — a 'uv sync' without "
+        "extras probably uninstalled them. Reinstall with: cd %s && "
+        "uv sync --extra wake --extra ui",
+        ", ".join(missing_wake),
+        PROJECT,
+    )
+    return 4
 
 
 def _install_shortcut(machine: WakeMachine, enabled: bool):
@@ -151,6 +210,9 @@ def main() -> int:
     if not settings["enabled"]:
         log.info("wake word disabled (YAADHAMMA_WAKE=off); daemon exits")
         return 0
+
+    if (code := _check_extras()) is not None:
+        return code
 
     try:
         detector = build_detector()
@@ -260,6 +322,16 @@ def _wake_loop(machine, detector, mic, worker, settings, mic_state) -> None:
                     log.info("90 s without speech: conversation closed")
                 # If the worker died on its own, go back to idle honestly.
                 if not worker.running:
+                    code = worker.quick_exit_code()
+                    if code is not None:
+                        log.error(
+                            "voice worker exited within %.0f s of starting "
+                            "(exit code %s): the launch failed — the launch "
+                            "command is logged above; she heard the wake "
+                            "word but could not start talking",
+                            worker.QUICK_EXIT_S,
+                            code,
+                        )
                     machine.tick(now + settings["idle_timeout_s"])
                 time.sleep(POLL_S)
             else:  # muted or listening stopped
