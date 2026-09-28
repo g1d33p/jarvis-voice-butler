@@ -81,7 +81,8 @@ async def test_digest_summarises_watched_chats_and_sends_to_himself(tmp_path) ->
     result = await run_digest(client, brain, store)
 
     assert result.status == "sent"
-    assert client.read == ["SC1-Executives"]  # Family is not on the watchlist
+    # Read twice: once by the WhatsApp self-check, once for the digest itself.
+    assert set(client.read) == {"SC1-Executives"}  # Family is not on the watchlist
     [(to, text)] = client.sent
     assert to == "+1 (940) 843-8446 (You)"
     assert "Ravi needs the budget review" in text

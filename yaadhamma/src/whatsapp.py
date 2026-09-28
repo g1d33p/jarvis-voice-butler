@@ -349,6 +349,10 @@ class WhatsAppClient:
         await browser.clear_focused_field()
         await asyncio.sleep(0.8)
 
+    async def resolve_chat(self, name: str) -> str:
+        """The exact chat title for `name` (search, then scrolling)."""
+        return await self.find_chat(name)
+
     async def _search_for(self, query: str) -> list[dict]:
         """Type `query` into WhatsApp's own search box; return the rows shown.
 
@@ -389,6 +393,9 @@ class WhatsAppClient:
         # scrolling through the list.
         results = await self._search_for(name)
         if results:
+            # WhatsApp's search matches message text too, so a query can return
+            # rows that are not the chat itself; an empty match just means
+            # "fall through to scrolling", never "no such chat".
             matches = find_chats(name, results)
             if len(matches) == 1:
                 return matches[0]["name"]

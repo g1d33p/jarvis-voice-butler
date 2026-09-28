@@ -7,6 +7,8 @@ so it never collides with the voice agent. Its window opens off-screen.
 Manual run:
     cd ~/jarvis-voice-butler/yaadhamma
     uv run scripts/digest_run.py
+WhatsApp self-check (proves reading and searching still work; sends nothing):
+    uv run scripts/digest_run.py --check
 Delivery test (sends one line to your own "(You)" chat, nothing else):
     uv run scripts/digest_run.py --test
 Plan preview (prints a plan here, sends nothing):
@@ -135,6 +137,7 @@ async def plan(horizon: str) -> int:
 
 KNOWN_FLAGS = {
     "--test",
+    "--check",
     "--morning",
     "--learn",
     "--tidy",
@@ -181,6 +184,19 @@ async def main() -> int:
         )
         client = WhatsAppClient(browser=browser)
         try:
+            if "--check" in sys.argv[1:]:
+                from whatsapp_health import HealthLog, run_health_check
+
+                report = await run_health_check(client)
+                HealthLog().record(report)
+                for check in report.checks:
+                    mark = "ok  " if check.ok else "FAIL"
+                    print(
+                        f"  {mark} {check.name}"
+                        + (f": {check.detail}" if check.detail else "")
+                    )
+                print("\n" + report.summary())
+                return 0 if report.ok else 1
             if "--test" in sys.argv[1:]:
                 chat = await send_test_message(client)
                 print(f"Test message sent to {chat}. Check your phone.")

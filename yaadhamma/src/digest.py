@@ -377,6 +377,28 @@ def _learning_line() -> str:
     return ""
 
 
+def _health_warning() -> str:
+    """A loud line when the last WhatsApp self-check failed."""
+    try:
+        from whatsapp_health import HealthLog
+
+        latest = HealthLog().latest()
+    except Exception:
+        return ""
+    if not latest or latest["ok"]:
+        return ""
+    broken = [c for c in latest["checks"] if not c["ok"]]
+    if not broken:
+        return ""
+    return (
+        "\n\n*WhatsApp check failed* at '"
+        + broken[0]["name"]
+        + "': "
+        + broken[0]["detail"][:160]
+        + "\nChat summaries may be incomplete until this is fixed."
+    )
+
+
 def _tidy_line() -> str:
     """One line about last night's file tidy-up, for the morning brief."""
     try:
@@ -435,7 +457,7 @@ async def run_morning_brief(
         text = morning_brief_text(today, clashes, now)
         if plan:
             text += "\n\n" + plan
-        text += _learning_line() + _tidy_line()
+        text += _learning_line() + _tidy_line() + _health_warning()
         self_chat = await find_self_chat(client)
         await client.send_message(self_chat, text)
         result = DigestResult(status="morning", summary=text)
@@ -477,12 +499,23 @@ async def send_test_message(client) -> str:
     return self_chat
 
 
+async def check_whatsapp_health(client) -> None:
+    """Run the WhatsApp self-check and record it (never raises)."""
+    try:
+        from whatsapp_health import HealthLog, run_health_check
+
+        HealthLog().record(await run_health_check(client))
+    except Exception:
+        pass
+
+
 async def run_digest(
     client, brain, store: DigestStore, gmail_clients=None, calendar=None
 ) -> DigestResult:
     """One scheduled digest run. Never raises; the outcome is recorded."""
     started = datetime.now()
     try:
+        await check_whatsapp_health(client)
         chats = await collect_watchlist(
             client, config.WHATSAPP_WATCHLIST, open_chats=True, max_chats=20
         )
@@ -514,6 +547,7 @@ async def run_digest(
             if not summary:
                 raise WhatsAppError("The summary came back empty.")
             header = f"Yaadhamma digest, {started:%a %I:%M %p}\n\n"
+            summary += _health_warning()
             self_chat = await find_self_chat(client)
             await client.send_message(self_chat, header + summary)
             result = DigestResult(
@@ -543,7 +577,12 @@ class DigestTools:
 
     @property
     def tools(self) -> list:
-        return [self.latest_digest, self.learned_overnight, self.where_did_file_go]
+        return [
+            self.latest_digest,
+            self.learned_overnight,
+            self.where_did_file_go,
+            self.whatsapp_status,
+        ]
 
     @function_tool()
     async def latest_digest(self, context: RunContext) -> dict[str, object]:
@@ -620,3 +659,27 @@ async def run_weekly_plan(
         result = DigestResult(status="failed", error=str(exc)[:500])
     store.record(started, result)
     return result
+
+    @function_tool()
+    async def whatsapp_status(self, context: RunContext) -> dict[str, object]:
+        """Whether WhatsApp automation is working, from the last self-check.
+
+        Use when he asks if WhatsApp is working, or why chat summaries look
+        wrong or empty. The check runs before every digest.
+        """
+        from whatsapp_health import HealthLog
+
+        latest = HealthLog().latest()
+        if not latest:
+            return {
+                "status": "never checked",
+                "note": "Run a digest, or ask to check WhatsApp.",
+            }
+        broken = [c for c in latest["checks"] if not c["ok"]]
+        return {
+            "checked": latest["time"],
+            "working": latest["ok"],
+            "failed_checks": [
+                {"step": c["name"], "problem": c["detail"]} for c in broken
+            ],
+        }
