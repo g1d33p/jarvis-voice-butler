@@ -66,7 +66,14 @@ class VoiceWorker:
         if self.running:
             return
         uv = _which("uv")
-        cmd = [uv, "run", "src/agent.py"] if uv else [sys.executable, "src/agent.py"]
+        # Keep the extras on the command line (see daemon_control._program):
+        # a bare `uv run` re-syncs the environment, which would uninstall the
+        # wake/UI packages out from under this already-running daemon.
+        cmd = (
+            [uv, "run", "--extra", "wake", "--extra", "ui", "src/agent.py"]
+            if uv
+            else [sys.executable, "src/agent.py"]
+        )
         log.info("wake: starting voice worker: %s", " ".join(cmd))
         self._proc = subprocess.Popen(
             cmd,

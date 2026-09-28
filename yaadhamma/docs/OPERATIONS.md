@@ -75,30 +75,18 @@ no account, no training. `YAADHAMMA_WAKE=off` in `.env.local` disables the
 whole always-on listener. `Option+Space` also starts a conversation
 (needs `pip install pynput`); 90 seconds of silence closes the session.
 
-### Custom wake phrase ("Hey Yaadhamma") via Picovoice Porcupine
+### Custom wake phrase ("Hey Yaadhamma")
 
-The custom phrase needs a trained `.ppn` model and a free Picovoice
-AccessKey. Steps, done once on the Mac:
+Stay on **"Hey Jarvis"** for now. The old Porcupine-based custom phrase
+path needed a Picovoice AccessKey, and Picovoice discontinued its free
+tier on 30 June 2026 (enterprise only) — so it is no longer practical
+for personal use. A custom "Hey Yaadhamma" can be trained later with
+openWakeWord's own training process, which needs no account.
 
-1. Create a free account at https://console.picovoice.ai/ and copy the
-   **AccessKey** from the dashboard.
-2. Open the **Porcupine** page in the console, choose **macOS** as the
-   platform, type the wake phrase exactly as `Hey Yaadhamma`, and train.
-   Download the resulting `hey-yaadhamma.ppn` file (keep it somewhere
-   permanent, e.g. `~/.yaadhamma/hey-yaadhamma.ppn` — the daemon reads it
-   on every start).
-3. Install the engine: `pip install pvporcupine sounddevice`.
-4. In `.env.local`, set:
-   ```
-   YAADHAMMA_WAKE_ENGINE=porcupine
-   YAADHAMMA_PICOVOICE_KEY=<the AccessKey from step 1>
-   YAADHAMMA_WAKE_PPN=/Users/jeevan/.yaadhamma/hey-yaadhamma.ppn
-   ```
-5. Restart the daemon: `python scripts/daemon_control.py stop`
-   then `python scripts/daemon_control.py start`.
-
-Switching back is config-only: set `YAADHAMMA_WAKE_ENGINE=openwakeword`
-and restart. No code changes either way.
+(The `porcupine` engine code path is still in `src/wake.py` behind
+`YAADHAMMA_WAKE_ENGINE=porcupine` for an enterprise Picovoice key; in
+that case install `pvporcupine` separately — it is no longer in the
+wake extra.)
 
 Microphone permission: if the daemon logs a microphone error, open
 System Settings > Privacy & Security > Microphone on the Mac, enable

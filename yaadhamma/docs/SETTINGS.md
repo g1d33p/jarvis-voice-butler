@@ -38,11 +38,11 @@ documented here, so this page cannot drift out of date silently.
 | Variable | Default | What it does |
 |---|---|---|
 | `YAADHAMMA_WAKE` | `on` | `off` disables the always-on listener entirely. |
-| `YAADHAMMA_WAKE_ENGINE` | `openwakeword` | `openwakeword` (free, "Hey Jarvis") or `porcupine` (custom phrase). |
+| `YAADHAMMA_WAKE_ENGINE` | `openwakeword` | `openwakeword` (free, "Hey Jarvis") or `porcupine` (custom phrase; needs an enterprise Picovoice key — free tier discontinued June 2026). |
 | `YAADHAMMA_WAKE_PHRASE` | `hey jarvis` | Phrase the openWakeWord engine listens for. |
 | `YAADHAMMA_WAKE_SENSITIVITY` | `0.5` | Detection sensitivity, 0–1. |
 | `YAADHAMMA_WAKE_PPN` | _(empty)_ | Path to the trained `.ppn` file (Porcupine engine). |
-| `YAADHAMMA_PICOVOICE_KEY` | _(empty)_ | Picovoice AccessKey (Porcupine engine). |
+| `YAADHAMMA_PICOVOICE_KEY` | _(empty)_ | Picovoice AccessKey (Porcupine engine; enterprise only since June 2026). |
 | `YAADHAMMA_WAKE_IDLE_TIMEOUT_S` | `90` | Seconds of silence before the session closes. |
 | `YAADHAMMA_WAKE_SHORTCUT` | `on` | `off` disables the Option+Space shortcut. |
 

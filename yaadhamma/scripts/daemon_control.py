@@ -36,7 +36,17 @@ def _program() -> list[str]:
 
     uv = shutil.which("uv")
     if uv:
-        return [uv, "run", "scripts/yaadhamma_daemon.py"]
+        # The extras must ride along: plain `uv run` re-syncs the project
+        # environment and would uninstall the wake/UI packages on every start.
+        return [
+            uv,
+            "run",
+            "--extra",
+            "wake",
+            "--extra",
+            "ui",
+            "scripts/yaadhamma_daemon.py",
+        ]
     return [sys.executable, "scripts/yaadhamma_daemon.py"]
 
 

@@ -2,7 +2,10 @@
 
 Two detector backends, selected by config only:
 - openWakeWord (default): pre-trained "hey jarvis" model, no account needed.
-- Porcupine: custom "Hey Yaadhamma" via a Picovoice AccessKey and .ppn file.
+- Porcupine: custom phrase via a Picovoice AccessKey and .ppn file.
+  Picovoice discontinued its free tier in June 2026 (enterprise only), so
+  this path is for enterprise keys; pvporcupine is no longer in the wake
+  extra and must be installed separately.
 
 The state machine is pure Python: the caller feeds it wake events, speech
 ticks and a monotonic clock. No audio hardware is touched here, so the
@@ -170,7 +173,12 @@ class OpenWakeWordDetector:
 
 
 class PorcupineDetector:
-    """Picovoice Porcupine backend: custom phrase via AccessKey + .ppn."""
+    """Picovoice Porcupine backend: custom phrase via AccessKey + .ppn.
+
+    Picovoice ended its free tier in June 2026; this backend needs an
+    enterprise AccessKey, and pvporcupine is no longer bundled with the
+    wake extra (install it separately).
+    """
 
     def __init__(
         self,
@@ -182,8 +190,9 @@ class PorcupineDetector:
             import pvporcupine
         except ImportError as exc:
             raise WakeConfigError(
-                "pvporcupine is not installed. Install it with: "
-                "pip install pvporcupine sounddevice"
+                "pvporcupine is not installed (it is no longer part of the "
+                "wake extra). Install it with: pip install pvporcupine "
+                "sounddevice"
             ) from exc
         try:
             self._porcupine = pvporcupine.create(
@@ -235,8 +244,9 @@ def build_detector() -> WakeDetector | None:
         if not settings["picovoice_key"]:
             raise WakeConfigError(
                 "YAADHAMMA_WAKE_ENGINE=porcupine needs YAADHAMMA_PICOVOICE_KEY. "
-                "Create a free key at https://console.picovoice.ai/ (see "
-                "docs/OPERATIONS.md), then set the key in .env.local."
+                "Picovoice discontinued its free tier in June 2026 — this "
+                "engine now needs an enterprise AccessKey (see "
+                "docs/OPERATIONS.md)."
             )
         if not settings["keyword_path"]:
             raise WakeConfigError(

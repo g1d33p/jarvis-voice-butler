@@ -32,10 +32,13 @@ dev = [
 [project.optional-dependencies]
 wake = [
     "openwakeword>=0.6.0",  # default "hey jarvis" engine
-    "pvporcupine>=3.0.0",  # optional custom "Hey Yaadhamma" engine
     "sounddevice>=0.4.0",  # microphone capture
     "numpy>=1.24",
     "pynput>=1.7.0",  # Option+Space shortcut
+    # pvporcupine is intentionally NOT here: Picovoice discontinued its free
+    # tier in June 2026 (enterprise only). The porcupine code path in
+    # src/wake.py still works behind YAADHAMMA_WAKE_ENGINE=porcupine for an
+    # enterprise key — install pvporcupine separately in that case.
     # onnxruntime dropped macOS x86_64 (Intel) wheels after 1.23.x; pin the
     # last good one there so `uv sync --extra wake` works on Intel Macs.
     # Apple Silicon and Linux keep resolving the latest.

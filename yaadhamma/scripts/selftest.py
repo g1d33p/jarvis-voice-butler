@@ -251,6 +251,110 @@ def _settings_docs():
     return f"{len(used)} variables read, all documented"
 
 
+@check("wake-word packages importable")
+def _wake_packages():
+    import importlib.util
+
+    missing = [
+        package
+        for package in ("openwakeword", "sounddevice", "numpy")
+        if importlib.util.find_spec(package) is None
+    ]
+    assert not missing, (
+        f"missing wake-word packages: {', '.join(missing)} — "
+        "on the Mac run: uv sync --extra wake"
+    )
+    return "openwakeword, sounddevice, numpy present"
+
+
+@check("menu-bar UI packages importable")
+def _ui_packages():
+    import importlib.util
+    import sys
+
+    if sys.platform != "darwin":
+        return "skipped: rumps is macOS-only"
+    assert importlib.util.find_spec("rumps") is not None, (
+        "rumps is missing — on the Mac run: uv sync --extra ui"
+    )
+    return "rumps present"
+
+
+@check("microphone permission")
+def _mic_permission():
+    import sys
+
+    if sys.platform != "darwin":
+        return "skipped: not macOS"
+    try:
+        from AVFoundation import AVCaptureDevice, AVMediaTypeAudio
+    except ImportError:
+        return (
+            "unknown: pyobjc is not installed (uv sync --extra ui brings it); "
+            "the daemon will ask for microphone access on first start"
+        )
+    status = AVCaptureDevice.authorizationStatusForMediaType_(AVMediaTypeAudio)
+    if status == 3:  # AVAuthorizationStatusAuthorized
+        return "microphone access authorized"
+    if status in (1, 2):  # restricted / denied
+        raise AssertionError(
+            "microphone access is denied — on the Mac: System Settings > "
+            "Privacy & Security > Microphone, enable access, then restart "
+            "the daemon"
+        )
+    return (
+        "not determined yet — the daemon will ask for microphone access on first start"
+    )
+
+
+@check("daemon job loaded")
+def _daemon_job():
+    import re
+    import subprocess
+    import sys
+
+    label = "com.yaadhamma.daemon"
+    if sys.platform != "darwin":
+        return "skipped: not macOS (launchd)"
+    result = subprocess.run(
+        ["launchctl", "list", label], capture_output=True, text=True, timeout=10
+    )
+    combined = (result.stderr or "") + (result.stdout or "")
+    if result.returncode != 0 or "Could not find service" in combined:
+        raise AssertionError(
+            f"daemon job {label} is not loaded — on the Mac run: "
+            "python scripts/daemon_control.py install"
+        )
+    pid = re.search(r'"PID" = (\d+);', result.stdout or "")
+    last = re.search(r'"LastExitStatus" = (\d+);', result.stdout or "")
+    detail = f"PID {pid.group(1)}" if pid else "loaded"
+    if last and int(last.group(1)) != 0:
+        raise AssertionError(
+            f"daemon is loaded ({detail}) but its last exit status was "
+            f"{last.group(1)} — check: tail -30 ~/.yaadhamma/daemon.log"
+        )
+    return f"loaded ({detail}), last exit status 0"
+
+
+@check("wake-word settings are complete")
+def _wake_config():
+    import config
+
+    settings = config.wake_settings()
+    if not settings["enabled"]:
+        return "wake word disabled (YAADHAMMA_WAKE=off)"
+    if settings["engine"] == "porcupine":
+        assert settings["picovoice_key"], (
+            "YAADHAMMA_WAKE_ENGINE=porcupine needs YAADHAMMA_PICOVOICE_KEY "
+            "— Picovoice ended its free tier in June 2026 (enterprise only)"
+        )
+        assert settings["keyword_path"], (
+            "YAADHAMMA_WAKE_ENGINE=porcupine needs YAADHAMMA_WAKE_PPN "
+            "pointing at the trained .ppn file"
+        )
+    return f"engine={settings['engine']}, phrase={settings['phrase']!r}"
+
+
 def main() -> int:
     # HOME is repointed per-check; start from a clean slate.
     os.environ.pop("HOME", None)

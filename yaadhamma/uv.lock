@@ -2345,18 +2345,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pvporcupine"
-version = "4.0.3"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "requests" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/b2/37/db209e19c4e1d931d1752bdf05c763f119271bb79661d482bdf5f564f662/pvporcupine-4.0.3.tar.gz", hash = "sha256:87d0e4d743a13c3a15b1fb34a9ced66e14bb1125ae079f2e2c09423364a68386", size = 3643620, upload-time = "2026-06-25T21:58:11.366Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2a/ef/1c4b8e47d8248fe1b615772028265ca65d9ff3ea98022d84cd973d46db87/pvporcupine-4.0.3-py3-none-any.whl", hash = "sha256:92796dbd3cf80a56db1ce20702cbceb151aee34f19ef730591f815eb16f2ebfb", size = 3659883, upload-time = "2026-06-25T21:58:08.805Z" },
-]
-
-[[package]]
 name = "pyasn1"
 version = "0.6.4"
 source = { registry = "https://pypi.org/simple" }
@@ -3544,7 +3532,6 @@ wake = [
     { name = "numpy", version = "2.5.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "onnxruntime", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "openwakeword" },
-    { name = "pvporcupine" },
     { name = "pynput" },
     { name = "sounddevice" },
 ]
@@ -3566,7 +3553,6 @@ requires-dist = [
     { name = "openai", specifier = ">=2.54.0" },
     { name = "openwakeword", marker = "extra == 'wake'", specifier = ">=0.6.0" },
     { name = "playwright", specifier = ">=1.62.0" },
-    { name = "pvporcupine", marker = "extra == 'wake'", specifier = ">=3.0.0" },
     { name = "pynput", marker = "extra == 'wake'", specifier = ">=1.7.0" },
     { name = "pypdf", specifier = ">=5" },
     { name = "python-dotenv" },
