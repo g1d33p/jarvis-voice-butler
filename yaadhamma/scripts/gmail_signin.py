@@ -13,6 +13,11 @@ search all linked accounts; sending still asks Jeevan first.
 
 Requires YAADHAMMA_GOOGLE_CLIENT_ID and YAADHAMMA_GOOGLE_CLIENT_SECRET
 in .env.local (see src/gmail.py header for the Cloud Console setup).
+
+Scope check (the email tidy needs the gmail.modify scope; old links lack it):
+    uv run scripts/gmail_signin.py --check
+Re-link an account that is missing the scope:
+    uv run scripts/gmail_signin.py <label>
 """
 
 import os
@@ -25,11 +30,41 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env.local"))
 load_dotenv()
 
-from gmail import GmailAuthError, GmailClient  # noqa: E402
+from gmail import (  # noqa: E402
+    GmailAuthError,
+    GmailClient,
+    discover_labels,
+    has_modify_scope,
+)
+
+
+def check_scopes() -> int:
+    """Report which linked accounts have the label-modifying scope."""
+    labels = discover_labels()
+    if not labels:
+        print("No Gmail accounts linked yet.")
+        print("Link one: uv run scripts/gmail_signin.py personal1")
+        return 1
+    lacking = [label for label in labels if not has_modify_scope(label)]
+    for label in labels:
+        mark = "ok  " if label not in lacking else "FAIL"
+        print(
+            f"  {mark} {label}: gmail.modify scope {'present' if label not in lacking else 'MISSING'}"
+        )
+    if lacking:
+        print()
+        print("Re-link each account to grant label changes and archiving:")
+        for label in lacking:
+            print(f"  uv run scripts/gmail_signin.py {label}")
+        return 1
+    print("All linked accounts can change labels.")
+    return 0
 
 
 def main() -> int:
-    if len(sys.argv) > 1:
+    if "--check" in sys.argv:
+        return check_scopes()
+    if len(sys.argv) > 1 and not sys.argv[1].startswith("--"):
         label = sys.argv[1]
     else:
         label = input("Account label (e.g. personal1): ").strip()

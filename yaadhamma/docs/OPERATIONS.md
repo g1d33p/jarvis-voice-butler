@@ -104,6 +104,26 @@ verification and audit.
   parsing, chat allowlist, dedupe, approval round-trip and hours window are
   covered by `tests/test_remote.py`.
 
+## Nightly Gmail labels and archiving
+
+The 3 am tidy job also runs `uv run scripts/digest_run.py --email-tidy`:
+
+- New inbox mail since the last run is classified (cheap rules, then the
+  cheap model) and labelled `Yaadhamma/Jobs`, `Yaadhamma/Saayam`,
+  `Yaadhamma/Finance`, `Yaadhamma/Receipts` or `Yaadhamma/Newsletters`
+  (created on demand).
+- Promotions/newsletters **older than 7 days** are archived (the INBOX label
+  is removed). Never deleted, never marked read, never anything unlabelled
+  or from a person.
+- Every change is logged to `~/.yaadhamma/email-tidy.log` with how to reverse
+  it by hand.
+- The first run is propose-only: the plan goes to `~/Documents/Yaadhamma/`
+  and is summarised in the morning brief. Set `YAADHAMMA_EMAIL_TIDY=apply`
+  in `.env.local` to enable real changes.
+- Label changes need the `gmail.modify` scope: all three accounts must be
+  re-linked. `uv run scripts/gmail_signin.py --check` reports which, and
+  prints the exact re-link command.
+
 ## Sign-in and pairing
 
 | Service | Script | Notes |

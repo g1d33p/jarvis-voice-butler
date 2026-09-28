@@ -149,3 +149,16 @@ def remote_settings() -> dict:
         "enabled": os.environ.get("YAADHAMMA_REMOTE", "on").strip().lower() != "off",
         "self_chats": [c for c in chats if c],
     }
+
+
+def email_tidy_settings() -> dict:
+    """Nightly Gmail labels and archiving. Safe default: propose-only.
+
+    YAADHAMMA_EMAIL_TIDY=apply lets the run change labels and archive;
+    anything else (including unset) only proposes.
+    """
+    return {
+        "mode": "apply"
+        if os.environ.get("YAADHAMMA_EMAIL_TIDY", "propose").strip().lower() == "apply"
+        else "propose",
+    }

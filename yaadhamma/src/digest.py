@@ -458,6 +458,26 @@ def _tidy_line() -> str:
     return "\n\n" + plan_summary(plan)
 
 
+def _email_tidy_line() -> str:
+    """One line about last night's email tidy, for the morning brief."""
+    try:
+        summary_path = Path.home() / ".yaadhamma" / "email-tidy-summary.json"
+        summary = json.loads(summary_path.read_text())
+    except Exception:
+        return ""
+    if summary.get("date") != datetime.now().date().isoformat():
+        return ""
+    labelled = summary.get("labelled", 0)
+    archived = summary.get("archived", 0)
+    if summary.get("mode") == "propose":
+        return (
+            f"\n\nEmail tidy (proposal): {labelled} to label, {archived} to "
+            f"archive — see ~/Documents/Yaadhamma/. "
+            f"Set YAADHAMMA_EMAIL_TIDY=apply to enable."
+        )
+    return f"\n\nEmail tidy: labelled {labelled}, archived {archived}."
+
+
 async def run_morning_brief(
     client, calendar, store: DigestStore, brain=None, gmail_clients=None, memory=None
 ) -> DigestResult:
@@ -496,7 +516,13 @@ async def run_morning_brief(
         text = morning_brief_text(today, clashes, now)
         if plan:
             text += "\n\n" + plan
-        text += _learning_line() + _tidy_line() + _health_warning() + _budget_line()
+        text += (
+            _learning_line()
+            + _tidy_line()
+            + _email_tidy_line()
+            + _health_warning()
+            + _budget_line()
+        )
         self_chat = await find_self_chat(client)
         await client.send_message(self_chat, text)
         result = DigestResult(status="morning", summary=text)

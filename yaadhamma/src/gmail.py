@@ -46,7 +46,10 @@ _SCOPES = (
     "https://www.googleapis.com/auth/gmail.readonly"
     " https://www.googleapis.com/auth/gmail.send"
     " https://www.googleapis.com/auth/gmail.compose"
+    " https://www.googleapis.com/auth/gmail.modify"
 )
+# The scope that permits label changes and archiving (removing INBOX).
+MODIFY_SCOPE = "https://www.googleapis.com/auth/gmail.modify"
 _TOKEN_SKEW = timedelta(seconds=60)
 DEFAULT_TOKEN_DIR = Path.home() / ".yaadhamma"
 _LABEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,31}")
@@ -128,9 +131,14 @@ def _wait_for_auth_code(server, timeout: int = 300) -> tuple[str | None, str | N
     return result.get("code"), result.get("error")
 
 
+def _token_dir(token_dir: Path | None) -> Path:
+    # Resolved at call time: tests repoint $HOME after import.
+    return Path(token_dir) if token_dir else Path.home() / ".yaadhamma"
+
+
 def discover_labels(token_dir: Path | None = None) -> list[str]:
     """Labels of every linked Gmail account (one token file each)."""
-    directory = Path(token_dir) if token_dir else DEFAULT_TOKEN_DIR
+    directory = _token_dir(token_dir)
     labels = []
     if not directory.is_dir():
         return labels
@@ -139,6 +147,21 @@ def discover_labels(token_dir: Path | None = None) -> list[str]:
         if _LABEL_RE.fullmatch(label):
             labels.append(label)
     return labels
+
+
+def token_scopes(label: str, token_dir: Path | None = None) -> str:
+    """The scopes recorded in an account's token file ("" if unknown)."""
+    directory = _token_dir(token_dir)
+    path = directory / f"gmail-token-{label}.json"
+    try:
+        return str(json.loads(path.read_text()).get("scope", "") or "")
+    except (OSError, ValueError):
+        return ""
+
+
+def has_modify_scope(label: str, token_dir: Path | None = None) -> bool:
+    """Was this account linked with the label-modifying scope?"""
+    return MODIFY_SCOPE in token_scopes(label, token_dir).split()
 
 
 class GmailClient:
@@ -266,6 +289,10 @@ class GmailClient:
                 datetime.now(timezone.utc)
                 + timedelta(seconds=int(token.get("expires_in", 3600)))
             ).isoformat(),
+            # The scopes Google actually granted, so the sign-in script and
+            # the email tidy can detect an insufficient scope and say exactly
+            # what to run. Old token files have none: treated as insufficient.
+            "scope": token.get("scope", ""),
         }
         self.token_path.parent.mkdir(parents=True, exist_ok=True)
         self.token_path.write_text(json.dumps(payload))
@@ -502,3 +529,44 @@ class GmailClient:
         """The linked account's address (used after sign-in)."""
         profile = self._get("/users/me/profile")
         return {"email": profile.get("emailAddress", "")}
+
+    # -- labels ------------------------------------------------------------
+    def list_labels(self) -> dict[str, str]:
+        """All Gmail labels as {name: id}."""
+        resp = self._get("/users/me/labels")
+        return {
+            label.get("name", ""): label.get("id", "")
+            for label in resp.get("labels", [])
+        }
+
+    def create_label(self, name: str) -> str:
+        """Create a label, or return the existing id (idempotent)."""
+        existing = self.list_labels()
+        if name in existing:
+            return existing[name]
+        resp = self._post(
+            "/users/me/labels",
+            {
+                "name": name,
+                "labelListVisibility": "labelShow",
+                "messageListVisibility": "show",
+            },
+        )
+        return resp.get("id", "")
+
+    def modify_message(
+        self,
+        message_id: str,
+        add: tuple[str, ...] | list[str] = (),
+        remove: tuple[str, ...] | list[str] = (),
+    ) -> dict:
+        """Add/remove labels on one message.
+
+        Archiving is remove=("INBOX",): the message leaves the inbox but is
+        never deleted and never marked read.
+        """
+        resp = self._post(
+            f"/users/me/messages/{message_id}/modify",
+            {"addLabelIds": list(add), "removeLabelIds": list(remove)},
+        )
+        return {"id": resp.get("id", message_id)}

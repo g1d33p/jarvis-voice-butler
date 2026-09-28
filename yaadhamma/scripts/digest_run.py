@@ -96,6 +96,31 @@ async def tidy(now_flag: bool) -> int:
     return 0
 
 
+async def email_tidy() -> int:
+    """Nightly Gmail labels and archiving (propose-only unless enabled)."""
+    from email_tidy import EmailTidy, cheap_model_classifier
+    from gmail import GmailClient, discover_labels
+
+    labels = discover_labels()
+    if not labels:
+        print("No Gmail accounts linked. Run scripts/gmail_signin.py first.")
+        return 1
+    tidy = EmailTidy(
+        clients=[GmailClient(label=label) for label in labels],
+        classify_fn=cheap_model_classifier(),
+    )
+    try:
+        report = await tidy.run()
+    except Exception as exc:
+        print(f"email tidy failed: {exc}")
+        return 1
+    print(
+        f"email tidy ({report['mode']}): {report['labelled']} labelled, "
+        f"{report['archived']} archived, across {report['accounts']} account(s)."
+    )
+    return 0
+
+
 async def tidy_apply() -> int:
     from tidy import TidyLog, apply_plan
 
@@ -143,6 +168,7 @@ KNOWN_FLAGS = {
     "--tidy",
     "--now",
     "--tidy-apply",
+    "--email-tidy",
     "--email-preview",
     "--plan",
 }
@@ -161,6 +187,8 @@ async def main() -> int:
         return await plan(after[0] if after else "today")
     if "--tidy-apply" in sys.argv:
         return await tidy_apply()
+    if "--email-tidy" in sys.argv:
+        return await email_tidy()
     if "--tidy" in sys.argv:
         return await tidy("--now" in sys.argv)
     if "--email-preview" in sys.argv:
