@@ -188,3 +188,57 @@ async def test_voice_tool_returns_the_plan(stores) -> None:
     )
     result = await tools.make_a_plan(None, "today")
     assert "Confirm Thursday with Priya" in result["plan"]
+
+
+async def test_plan_rules_forbid_padding_and_calendar_echo(stores) -> None:
+    """2026-09-28 preview: the day was padded with invented blocks and the week
+    plan listed the Daily Scrum every day."""
+    memory, digests = stores
+    brain = FakeBrain()
+    await make_plan(brain, "today", None, [], memory, digests)
+    rules = brain.calls[0][1][0]["content"]
+    assert "never fill the day with invented work" in rules
+    assert (
+        "Mention a\nrecurring meeting once" in rules
+        or "recurring meeting once" in rules
+    )
+    assert (
+        "Job alerts and recruiter outreach that ask nothing of him are optional"
+        in rules
+    )
+
+
+def test_plan_rules_forbid_filler_blocks_and_repeated_meetings() -> None:
+    from planner import PLAN_INSTRUCTIONS
+
+    day = PLAN_INSTRUCTIONS.format(horizon="day", limit=1600, focus="")
+    assert "never fill the day with invented work" in day
+    assert "A meeting on the calendar is not a priority by itself" in day
+    assert "Mention a\nrecurring meeting once" in day
+    assert "do not list his calendar back to him" in day
+
+
+def test_interviews_soon_covers_today_and_tomorrow_only() -> None:
+    from planner import interviews_soon
+
+    events = [
+        _event("a", "Interview with Acme", 14, 15),
+        event_summary(
+            {
+                "id": "b",
+                "summary": "Interview with Beta",
+                "start": {"dateTime": (DAY + timedelta(days=1, hours=10)).isoformat()},
+                "end": {"dateTime": (DAY + timedelta(days=1, hours=11)).isoformat()},
+            }
+        ),
+        event_summary(
+            {
+                "id": "c",
+                "summary": "Interview with Gamma",
+                "start": {"dateTime": (DAY + timedelta(days=5)).isoformat()},
+                "end": {"dateTime": (DAY + timedelta(days=5, hours=1)).isoformat()},
+            }
+        ),
+    ]
+    soon = interviews_soon(events, now=DAY + timedelta(hours=8))
+    assert [e["title"] for e in soon] == ["Interview with Acme", "Interview with Beta"]

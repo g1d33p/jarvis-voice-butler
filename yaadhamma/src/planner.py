@@ -39,9 +39,12 @@ Write a plan he can act on, plain text for WhatsApp, under {limit} characters:
 brackets, e.g. (promised in SC1-Executives, 27 Sep) or (email from Priya, Acme).
 
 *Suggested schedule*
-Fit the priorities into his FREE time slots only, as time blocks, e.g.
-"10:00-11:30 Roadmap for SC1". Skip this section for a week plan; give a
-short day-by-day outline instead.
+Today: time blocks for the priorities above only, inside his FREE time
+slots, e.g. "10:00-11:30 Roadmap for SC1". Leave the rest of his time free;
+never fill the day with invented work ("focus block", "follow-ups") that is
+not in the data. Week: say which day to start or finish each priority and
+name real deadlines; do not list his calendar back to him. Mention a
+recurring meeting once ("Daily Scrum, 12:00 every day"), never day by day.
 
 *Connections*
 Only real links between separate pieces of information that he might miss:
@@ -57,8 +60,12 @@ is not in it.
 *Heads-up*
 Clashes, overdue promises, anything slipping. Leave out if nothing.
 
-Rules: never invent facts, people, times or deadlines; everything must come
-from the data. If something is uncertain, say so briefly. Be direct and
+Rules: never invent facts, people, times, tasks or deadlines; everything must
+come from the data. A meeting on the calendar is not a priority by itself;
+it becomes one only if something needs preparing or deciding for it.
+Job alerts and recruiter outreach that ask nothing of him are optional: put
+them last and say so. If the day is genuinely light, say so in one line
+instead of padding. If something is uncertain, say so briefly. Be direct and
 practical, like a sharp chief of staff. {focus}"""
 
 WORK_START, WORK_END = time(9, 0), time(19, 0)
@@ -84,6 +91,19 @@ def free_slots(events: list[dict], day_start: datetime, now: datetime) -> list[s
     if end - cursor >= timedelta(minutes=30):
         slots.append(f"{cursor:%H:%M}-{end:%H:%M}")
     return slots
+
+
+def interviews_soon(events: list[dict], now: datetime) -> list[dict]:
+    """Interview events happening today or tomorrow (prep window)."""
+    horizon = (now + timedelta(days=2)).date()
+    return [
+        e
+        for e in events
+        if "interview" in e["title"].lower()
+        and not e["declined"]
+        and e["start"]
+        and now.date() <= datetime.fromisoformat(e["start"]).date() < horizon
+    ]
 
 
 def find_interviews(events: list[dict], emails: list[dict]) -> list[dict]:
@@ -114,6 +134,8 @@ async def research_interviews(interviews: list[dict]) -> str:
         from google.genai import types
 
         client = genai.Client(api_key=os.environ.get("GOOGLE_API_KEY"))
+        # The search tool runs server-side; turn off the client's own function
+        # calling so google-genai stops warning about it.
         prompt = (
             "For each interview below, identify the company and role if you can, then "
             "summarise in 3-4 short lines each: what the company does, anything notable "
@@ -126,7 +148,12 @@ async def research_interviews(interviews: list[dict]) -> str:
                 model=config.ESCALATION_MODEL,
                 contents=prompt,
                 config=types.GenerateContentConfig(
-                    tools=[types.Tool(google_search=types.GoogleSearch())]
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                    # Search is a built-in tool: no local functions to call,
+                    # and this silences the SDK's AFC warning.
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                        disable=True
+                    ),
                 ),
             ),
             timeout=45,

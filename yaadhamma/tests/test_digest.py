@@ -339,7 +339,9 @@ async def test_email_preview_sends_nothing() -> None:
 
     assert result["found"] == 1
     assert "Priya" in result["summary"]
-    assert '"checked": false' in brain.calls[0][1]["content"]  # says nothing about chats
+    assert (
+        '"checked": false' in brain.calls[0][1]["content"]
+    )  # says nothing about chats
 
 
 def test_opened_emails_are_included_unless_unread_only(monkeypatch) -> None:
@@ -411,3 +413,102 @@ async def test_preview_warns_when_one_account_is_linked_twice() -> None:
     result = await preview_email(clients, FakeBrain(), hours=24)
 
     assert result["duplicate_accounts"] == ["deep.jeevan98@gmail.com"]
+
+
+# ----------------------------------------------------------------- part 2: plans
+
+
+class PlanBrain(FakeBrain):
+    def __init__(self):
+        super().__init__("*Top priorities*\n1. Reply to Priya (email from Priya, Acme)")
+
+
+async def test_morning_brief_leads_with_the_plan(tmp_path, monkeypatch) -> None:
+    from digest import run_morning_brief
+    from memory_store import MemoryStore
+
+    monkeypatch.setattr(config, "SELF_CHAT_NUMBER", "19408438446")
+    monkeypatch.setattr(config, "PLAN_WEB_RESEARCH", False)
+
+    class Calendar:
+        def list_events(self, start, end, limit=50):
+            return []
+
+    client = FakeClient(CHATS)
+    result = await run_morning_brief(
+        client,
+        Calendar(),
+        DigestStore(tmp_path / "db"),
+        brain=PlanBrain(),
+        gmail_clients=[],
+        memory=MemoryStore(tmp_path / "m.db"),
+    )
+
+    assert result.status == "morning"
+    text = client.sent[0][1]
+    assert "Good morning" in text  # calendar part, built from the calendar
+    assert "*Top priorities*" in text  # plan part
+
+
+async def test_morning_brief_still_works_when_planning_fails(
+    tmp_path, monkeypatch
+) -> None:
+    from digest import run_morning_brief
+    from memory_store import MemoryStore
+
+    monkeypatch.setattr(config, "SELF_CHAT_NUMBER", "19408438446")
+
+    class Broken:
+        async def generate(self, *args, **kwargs):
+            raise RuntimeError("model down")
+
+    class Calendar:
+        def list_events(self, start, end, limit=50):
+            return []
+
+    client = FakeClient(CHATS)
+    result = await run_morning_brief(
+        client,
+        Calendar(),
+        DigestStore(tmp_path / "db"),
+        brain=Broken(),
+        gmail_clients=[],
+        memory=MemoryStore(tmp_path / "m.db"),
+    )
+
+    assert result.status == "morning"
+    assert "Good morning" in client.sent[0][1]
+
+
+async def test_weekly_plan_is_sent_to_his_own_chat(tmp_path, monkeypatch) -> None:
+    from digest import run_weekly_plan
+    from memory_store import MemoryStore
+
+    monkeypatch.setattr(config, "SELF_CHAT_NUMBER", "19408438446")
+    client = FakeClient(CHATS)
+
+    result = await run_weekly_plan(
+        client,
+        None,
+        DigestStore(tmp_path / "db"),
+        PlanBrain(),
+        gmail_clients=[],
+        memory=MemoryStore(tmp_path / "m.db"),
+    )
+
+    assert result.status == "weekly"
+    assert "The week ahead" in client.sent[0][1]
+
+
+def test_weekly_plan_runs_only_on_sunday_evening() -> None:
+    jobs = {label: (times, extra) for label, times, extra, _ in digest_schedule.JOBS}
+    assert jobs["com.yaadhamma.weekly"] == ([(20, 0)], ["--weekly"])
+    plist = digest_schedule.build_plist(
+        "/usr/local/bin/uv", "com.yaadhamma.weekly", [(20, 0)], ["--weekly"]
+    )
+    assert plist["StartCalendarInterval"] == [{"Hour": 20, "Minute": 0, "Weekday": 0}]
+    # The daily jobs must stay daily.
+    daily = digest_schedule.build_plist(
+        "/uv", "com.yaadhamma.morning", [(8, 45)], ["--morning"]
+    )
+    assert "Weekday" not in daily["StartCalendarInterval"][0]

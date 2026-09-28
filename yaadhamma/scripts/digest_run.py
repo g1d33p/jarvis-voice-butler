@@ -17,8 +17,10 @@ Apply the latest reviewed tidy plan:
     uv run scripts/digest_run.py --tidy-apply
 Overnight learning (2 am; chats, email and calendar into memory):
     uv run scripts/digest_run.py --learn
-Morning brief (today's calendar and this week's clashes):
+Morning brief (today's plan, calendar and clashes):
     uv run scripts/digest_run.py --morning
+Weekly plan (Sunday evening):
+    uv run scripts/digest_run.py --weekly
 Email preview (last 24 hours; prints the summary here, sends nothing):
     uv run scripts/digest_run.py --email-preview 24
 """

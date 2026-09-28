@@ -29,6 +29,7 @@ JOBS = [
         "File tidy-up at 3am, every other night",
     ),
     ("com.yaadhamma.morning", [(8, 45)], ["--morning"], "Morning brief at 8:45am"),
+    ("com.yaadhamma.weekly", [(20, 0)], ["--weekly"], "Weekly plan, Sunday 8pm"),
     (
         "com.yaadhamma.digest",
         [(9, 0), (13, 0), (17, 0), (21, 0)],
@@ -38,14 +39,22 @@ JOBS = [
 ]
 
 
+# Jobs that run on one weekday only (0 = Sunday in launchd).
+WEEKDAYS = {"com.yaadhamma.weekly": 0}
+
+
 def build_plist(
     uv_path: str, label: str, times, extra, project: Path = PROJECT
 ) -> dict:
+    schedule = [{"Hour": h, "Minute": m} for h, m in times]
+    if label in WEEKDAYS:
+        for entry in schedule:
+            entry["Weekday"] = WEEKDAYS[label]
     return {
         "Label": label,
         "ProgramArguments": [uv_path, "run", "scripts/digest_run.py", *extra],
         "WorkingDirectory": str(project),
-        "StartCalendarInterval": [{"Hour": h, "Minute": m} for h, m in times],
+        "StartCalendarInterval": schedule,
         "StandardOutPath": str(LOG),
         "StandardErrorPath": str(LOG),
         "RunAtLoad": False,

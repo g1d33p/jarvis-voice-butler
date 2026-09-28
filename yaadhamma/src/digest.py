@@ -397,8 +397,15 @@ def _tidy_line() -> str:
     return "\n\n" + plan_summary(plan)
 
 
-async def run_morning_brief(client, calendar, store: DigestStore) -> DigestResult:
-    """Today's schedule and this week's clashes, sent to his own chat at 8:45."""
+async def run_morning_brief(
+    client, calendar, store: DigestStore, brain=None, gmail_clients=None, memory=None
+) -> DigestResult:
+    """Today's plan, schedule and this week's clashes, sent at 8:45.
+
+    The plan comes first (priorities with sources, suggested blocks,
+    connections, interview prep); the calendar part below it is built from
+    the calendar itself and can never be invented.
+    """
     import asyncio
 
     from gcal import day_bounds, find_clashes, local_zone
@@ -415,7 +422,20 @@ async def run_morning_brief(client, calendar, store: DigestStore) -> DigestResul
         store.new_clash_keys(
             [c.key for c in clashes]
         )  # the 9am digest won't repeat them
-        text = morning_brief_text(today, clashes, now) + _learning_line() + _tidy_line()
+        plan = ""
+        if brain is not None:
+            from planner import make_plan
+
+            try:
+                plan = await make_plan(
+                    brain, "today", calendar, gmail_clients or [], memory, store
+                )
+            except Exception:
+                plan = ""
+        text = morning_brief_text(today, clashes, now)
+        if plan:
+            text += "\n\n" + plan
+        text += _learning_line() + _tidy_line()
         self_chat = await find_self_chat(client)
         await client.send_message(self_chat, text)
         result = DigestResult(status="morning", summary=text)
@@ -572,3 +592,31 @@ class DigestTools:
                 "note": "The tidy-up has not moved a file with that name.",
             }
         )
+
+
+async def run_weekly_plan(
+    client, calendar, store: DigestStore, brain, gmail_clients=None, memory=None
+) -> DigestResult:
+    """The week ahead, sent to his own chat on Sunday evening."""
+    from planner import make_plan
+
+    started = datetime.now()
+    try:
+        plan = await make_plan(
+            brain, "week", calendar, gmail_clients or [], memory, store
+        )
+        if not plan:
+            raise WhatsAppError("The weekly plan came back empty.")
+        text = f"The week ahead, from {started:%a %d %b}\n\n{plan}"
+        await client.send_message(await find_self_chat(client), text)
+        result = DigestResult(status="weekly", summary=text)
+    except WhatsAppNotPairedError:
+        result = DigestResult(
+            status="failed",
+            error="The digest's WhatsApp is not paired. Run: "
+            "uv run scripts/whatsapp_signin.py --digest",
+        )
+    except Exception as exc:
+        result = DigestResult(status="failed", error=str(exc)[:500])
+    store.record(started, result)
+    return result
