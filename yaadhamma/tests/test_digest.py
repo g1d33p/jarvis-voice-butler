@@ -10,6 +10,7 @@ from test_whatsapp import _chat
 import config
 from digest import DigestStore, DigestTools, find_self_chat, run_digest
 from meta_client import ModelTurn
+from untrusted import is_wrapped
 from whatsapp import WhatsAppError, WhatsAppNotPairedError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -391,8 +392,13 @@ async def test_opened_emails_are_included_and_marked(tmp_path) -> None:
         [FakeGmail("p1", [opened, fresh])], datetime(2026, 9, 27)
     )
 
-    flags = {e["subject"]: e["unread"] for e in result["emails"]}
-    assert flags == {"Interview slot for Thursday?": False, "New role": True}
+    by_unread = {e["unread"]: e["subject"] for e in result["emails"]}
+    # Subjects are untrusted: enveloped before any model sees them.
+    assert (
+        is_wrapped(by_unread[False])
+        and "Interview slot for Thursday?" in by_unread[False]
+    )
+    assert is_wrapped(by_unread[True]) and "New role" in by_unread[True]
 
 
 async def test_preview_warns_when_one_account_is_linked_twice() -> None:

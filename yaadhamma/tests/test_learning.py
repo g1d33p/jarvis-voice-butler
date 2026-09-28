@@ -10,6 +10,7 @@ import config
 from learning import LearningLog, apply_memories, collect_chats, run_learning
 from memory_store import MemoryStore
 from meta_client import ModelTurn
+from untrusted import is_wrapped
 
 NOW = datetime(2026, 9, 28, 2, 0)
 
@@ -80,9 +81,10 @@ async def test_personal_chats_with_unread_messages_are_never_opened(tmp_path) ->
     names = {c["chat"]: c["kind"] for c in chats}
     assert names == {"SC1-Executives": "Saayam community", "Amma": "personal"}
     amma = next(c for c in chats if c["chat"] == "Amma")
-    assert [m["text"] for m in amma["messages"]] == [
-        "Call me on Sunday"
-    ]  # 100h-old dropped
+    # Message text is untrusted: enveloped, content preserved. (100h-old dropped.)
+    assert len(amma["messages"]) == 1
+    assert is_wrapped(amma["messages"][0]["text"])
+    assert "Call me on Sunday" in amma["messages"][0]["text"]
     sc1 = next(c for c in chats if c["chat"] == "SC1-Executives")
     assert sc1["messages"][1]["from"] == "Jeevan"
 

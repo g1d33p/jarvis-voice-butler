@@ -12,6 +12,7 @@ from audit import AuditLog
 from orchestrator import Orchestrator, TaskTools
 from permissions import ApprovalManager
 from task_manager import TaskStore
+from untrusted import is_wrapped
 from whatsapp import find_chats, matches_watchlist
 from whatsapp_tools import WhatsAppTools
 
@@ -78,7 +79,9 @@ async def test_watchlist_quick_look_opens_nothing(watch_tools) -> None:
 
     assert client.read_calls == []
     previews = {c["chat"]: c["preview"] for c in result["unread"]}
-    assert previews["SC1-Executives"] == "Jeevan, can you review?"
+    # Previews are untrusted message text: enveloped, content preserved.
+    assert is_wrapped(previews["SC1-Executives"])
+    assert "Jeevan, can you review?" in previews["SC1-Executives"]
 
 
 async def test_watchlist_digest_is_available_to_the_background_brain() -> None:

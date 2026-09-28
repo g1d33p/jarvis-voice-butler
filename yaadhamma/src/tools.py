@@ -19,6 +19,7 @@ from permissions import (
     normalize_message,
 )
 from policy import can_send_without_asking
+from untrusted import wrap as _wrap_untrusted
 
 
 def duckduckgo_search_url(query: str) -> str:
@@ -106,9 +107,14 @@ class BrowserTools:
     async def read_page(self, context: RunContext) -> dict[str, str | bool]:
         """Read the visible text from the current browser page."""
         try:
-            return await self.browser.read_page()
+            result = await self.browser.read_page()
         except BrowserError as exc:
             raise ToolError(str(exc)) from exc
+        # Page text is untrusted: mark it as data before the model sees it.
+        if result.get("text"):
+            result = dict(result)
+            result["text"] = _wrap_untrusted(result["text"], "web page")
+        return result
 
     @function_tool()
     @browser_action(lambda self: self.browser)
@@ -121,9 +127,16 @@ class BrowserTools:
         """
         self._approvals.cancel_pending()
         try:
-            return await self.browser.inspect_page()
+            result = await self.browser.inspect_page()
         except BrowserError as exc:
             raise ToolError(str(exc)) from exc
+        # Page text is untrusted: mark it as data before the model sees it.
+        # Element labels stay as they are; they are short UI chrome, and the
+        # click/type tools never treat labels as instructions.
+        if result.get("text"):
+            result = dict(result)
+            result["text"] = _wrap_untrusted(result["text"], "web page")
+        return result
 
     @function_tool()
     @browser_action(lambda self: self.browser)
