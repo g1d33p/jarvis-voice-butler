@@ -36,6 +36,10 @@ wake = [
     "sounddevice>=0.4.0",  # microphone capture
     "numpy>=1.24",
     "pynput>=1.7.0",  # Option+Space shortcut
+    # onnxruntime dropped macOS x86_64 (Intel) wheels after 1.23.x; pin the
+    # last good one there so `uv sync --extra wake` works on Intel Macs.
+    # Apple Silicon and Linux keep resolving the latest.
+    "onnxruntime==1.23.2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
 ]
 ui = [
     "rumps>=0.4.0",  # menu-bar item (pulls in pyobjc on macOS)
