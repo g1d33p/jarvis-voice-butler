@@ -83,6 +83,27 @@ PyObjC).
 - Rendering needs a real Mac and is unverified here; the state mapping and
   menu actions are covered by `tests/test_ui.py`.
 
+## Phone access over WhatsApp
+
+From his phone he sends a message in his own chat starting with `Yaadhamma`
+(for example "Yaadhamma remind me to call mom at 6"). The remote poll runs
+it through the orchestrator like a voice task — same approval gates,
+verification and audit.
+
+- Only his own chats are polled (`YAADHAMMA_SELF_CHATS`, default
+  19408438446 and 919640520634); anything else is ignored entirely.
+- Replies and approval questions come back in the same chat. Answering
+  "yes"/"no" to a pending question resolves it.
+- Approvals only stay open a minute: answer promptly, or she asks again and,
+  after two rounds, tells him the approval expired and to send the command
+  again.
+- Polls every 2 minutes, 08:00–23:00 Mac time, as its own launchd job:
+  `uv run scripts/remote_schedule.py on`. Uses the digest browser profile,
+  never the voice one. `YAADHAMMA_REMOTE=off` disables it.
+- Real WhatsApp reading/sending is unverified in the sandbox; the command
+  parsing, chat allowlist, dedupe, approval round-trip and hours window are
+  covered by `tests/test_remote.py`.
+
 ## Sign-in and pairing
 
 | Service | Script | Notes |

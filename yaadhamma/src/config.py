@@ -135,3 +135,17 @@ def wake_settings() -> dict:
         "shortcut": os.environ.get("YAADHAMMA_WAKE_SHORTCUT", "on").strip().lower()
         != "off",
     }
+
+
+def remote_settings() -> dict:
+    """Phone access over WhatsApp. YAADHAMMA_REMOTE=off disables it entirely.
+
+    self_chats are his own chats only, as digit strings; a chat that does not
+    resolve to one of these numbers is never polled, enforced in code.
+    """
+    raw = os.environ.get("YAADHAMMA_SELF_CHATS", "19408438446,919640520634")
+    chats = ["".join(ch for ch in part if ch.isdigit()) for part in raw.split(",")]
+    return {
+        "enabled": os.environ.get("YAADHAMMA_REMOTE", "on").strip().lower() != "off",
+        "self_chats": [c for c in chats if c],
+    }
