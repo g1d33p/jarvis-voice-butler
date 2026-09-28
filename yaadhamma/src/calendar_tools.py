@@ -148,10 +148,38 @@ class CalendarTools:
             created = await asyncio.to_thread(
                 self._client.create_event, title, begin, finish, location
             )
+            try:
+                fetched = await asyncio.to_thread(self._client.get_event, created["id"])
+            except Exception:
+                return {
+                    "added": True,
+                    "event": format_event(created),
+                    "clash_warning": clash_note.strip(),
+                    "verified": False,
+                    "verification": (
+                        "the event was created but re-fetching it failed, so "
+                        "the creation is unconfirmed — check the calendar "
+                        "before assuming it is there"
+                    ),
+                }
+            if fetched.get("id") != created["id"]:
+                return {
+                    "added": True,
+                    "event": format_event(created),
+                    "clash_warning": clash_note.strip(),
+                    "verified": False,
+                    "verification": (
+                        "the event was created but the re-fetch did not match, "
+                        "so the creation is unconfirmed — check the calendar "
+                        "before assuming it is there"
+                    ),
+                }
             return {
                 "added": True,
-                "event": format_event(created),
+                "event": format_event(fetched),
                 "clash_warning": clash_note.strip(),
+                "verified": True,
+                "verification": "re-fetched the created event by id and it matches",
             }
 
         return await self._approvals.gate(

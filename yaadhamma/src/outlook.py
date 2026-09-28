@@ -288,7 +288,12 @@ class OutlookClient:
                 "saveToSentItems": True,
             },
         )
-        return {"sent": True, "to": to}
+        return {
+            "sent": True,
+            "to": to,
+            "verified": True,
+            "verification": ("the Outlook API accepted the send request without error"),
+        }
 
     def list_calendar(self, days: int = 1) -> list[dict]:
         """Upcoming events, soonest first."""

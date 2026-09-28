@@ -80,6 +80,11 @@ class CalendarClient(GmailClient):
         created = self._post("/calendars/primary/events", body)
         return event_summary(created)
 
+    def get_event(self, event_id: str) -> dict:
+        """Re-fetch a single event by id; used to verify a creation."""
+        event = self._get(f"/calendars/primary/events/{event_id}")
+        return event_summary(event)
+
 
 def _parse_when(value: dict) -> tuple[datetime | None, bool]:
     """Google gives dateTime for timed events and date for all-day ones."""

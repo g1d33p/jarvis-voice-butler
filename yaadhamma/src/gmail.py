@@ -444,7 +444,13 @@ class GmailClient:
             "/users/me/messages/send",
             {"raw": self._raw_message(to, subject, body)},
         )
-        return {"sent": True, "to": to, "id": resp.get("id")}
+        return {
+            "sent": True,
+            "to": to,
+            "id": resp.get("id"),
+            "verified": True,
+            "verification": ("the Gmail API accepted the message and returned an id"),
+        }
 
     def create_draft(self, to: str, subject: str, body: str) -> dict:
         """Save a draft without sending; returns its id."""

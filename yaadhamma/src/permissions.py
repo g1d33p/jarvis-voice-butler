@@ -505,11 +505,15 @@ class ApprovalManager:
                 error=str(exc)[:200],
             )
             raise
+        verified = (
+            result.get("verified") if isinstance(result, dict) else "not-reported"
+        )
         self._audit.record(
             "action_done",
             tool=tool_name,
             description=description,
             basis=basis,
+            verified=verified,
             result=result if isinstance(result, (str, int, float, bool)) else "...",
         )
         return result

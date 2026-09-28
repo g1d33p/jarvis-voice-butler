@@ -640,7 +640,15 @@ class WhatsAppClient:
                 and current.get("outgoing")
                 and _same_message(current.get("text") or "", text)
             ):
-                return {"sent": True, "chat": matched}
+                return {
+                    "sent": True,
+                    "chat": matched,
+                    "verified": True,
+                    "verification": (
+                        "a new outgoing message with the exact text appeared "
+                        "in the chat"
+                    ),
+                }
         raise WhatsAppError(
             "The message may not have been sent: I typed it but could not "
             "confirm it appeared in the chat. Please check WhatsApp before "

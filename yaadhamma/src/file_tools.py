@@ -229,14 +229,19 @@ class FileTools:
         self,
         context: RunContext,
         path: str,
-    ) -> str:
+    ) -> dict[str, object]:
         """Create a folder, including any missing parent folders."""
 
         target = Path(path).expanduser()
 
         if target.exists():
             if target.is_dir():
-                return f"The folder already exists: {target}"
+                return {
+                    "created": True,
+                    "path": str(target),
+                    "verified": True,
+                    "verification": "the folder already exists",
+                }
 
             raise ToolError(f"A file already exists at this path: {target}")
 
@@ -245,7 +250,17 @@ class FileTools:
         except PermissionError as exc:
             raise ToolError(f"Permission denied while creating {target}.") from exc
 
-        return f"Created folder: {target}"
+        if not target.is_dir():
+            raise ToolError(
+                f"Creating {target} reported no error, but the folder is not "
+                "there. Nothing was created."
+            )
+        return {
+            "created": True,
+            "path": str(target),
+            "verified": True,
+            "verification": "the folder exists after creation",
+        }
 
     @function_tool()
     async def create_file(
@@ -253,7 +268,7 @@ class FileTools:
         context: RunContext,
         path: str,
         content: str = "",
-    ) -> str:
+    ) -> dict[str, object]:
         """Create a text file with the supplied content."""
 
         target = Path(path).expanduser()
@@ -267,7 +282,17 @@ class FileTools:
         except PermissionError as exc:
             raise ToolError(f"Permission denied while creating {target}.") from exc
 
-        return f"Created file: {target}"
+        if not target.is_file():
+            raise ToolError(
+                f"Creating {target} reported no error, but the file is not "
+                "there. Nothing was created."
+            )
+        return {
+            "created": True,
+            "path": str(target),
+            "verified": True,
+            "verification": "the file exists after creation",
+        }
 
     @function_tool()
     async def rename_path(
@@ -275,7 +300,7 @@ class FileTools:
         context: RunContext,
         source: str,
         new_name: str,
-    ) -> str:
+    ) -> dict[str, object]:
         """Rename a file or folder within its current directory."""
 
         source_path = Path(source).expanduser()
@@ -297,7 +322,18 @@ class FileTools:
         except PermissionError as exc:
             raise ToolError(f"Permission denied while renaming {source_path}.") from exc
 
-        return f"Renamed {source_path} to {destination}"
+        if not destination.exists() or source_path.exists():
+            raise ToolError(
+                f"Renaming {source_path} reported no error, but the result "
+                "could not be confirmed. Check both names before trying again."
+            )
+        return {
+            "renamed": True,
+            "source": str(source_path),
+            "destination": str(destination),
+            "verified": True,
+            "verification": "the new name exists and the old name is gone",
+        }
 
     @function_tool()
     async def move_path(
@@ -327,7 +363,19 @@ class FileTools:
         except PermissionError as exc:
             raise ToolError(f"Permission denied while moving {source_path}.") from exc
 
-        return f"Moved {source_path} to {final_destination}"
+        if not final_destination.exists() or source_path.exists():
+            raise ToolError(
+                f"Moving {source_path} reported no error, but the result "
+                "could not be confirmed. Check both locations before trying "
+                "again."
+            )
+        return {
+            "moved": True,
+            "source": str(source_path),
+            "destination": str(final_destination),
+            "verified": True,
+            "verification": "the destination exists and the source is gone",
+        }
 
     @function_tool()
     async def copy_path(
@@ -360,7 +408,18 @@ class FileTools:
         except PermissionError as exc:
             raise ToolError(f"Permission denied while copying {source_path}.") from exc
 
-        return f"Copied {source_path} to {final_destination}"
+        if not final_destination.exists():
+            raise ToolError(
+                f"Copying {source_path} reported no error, but the copy is not "
+                "at the destination. Nothing was confirmed copied."
+            )
+        return {
+            "copied": True,
+            "source": str(source_path),
+            "destination": str(final_destination),
+            "verified": True,
+            "verification": "the copy exists at the destination",
+        }
 
     @function_tool()
     async def move_to_trash(
@@ -402,7 +461,13 @@ class FileTools:
             if target.exists():
                 raise ToolError("Finder reported success, but the item is still there.")
 
-            return {"moved": True, "restorable": True, **details}
+            return {
+                "moved": True,
+                "restorable": True,
+                "verified": True,
+                "verification": "the item is no longer at its original path",
+                **details,
+            }
 
         return await self._approvals.gate(
             tool_name="move_to_trash",

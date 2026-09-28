@@ -75,8 +75,19 @@ class MemoryTools:
             )
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
+        stored = self._store.get(memory_id)
+        if stored is None or stored.get("content") != content.strip():
+            raise ToolError(
+                "The memory was saved but reading it back did not match. "
+                "Treat it as not remembered and try again."
+            )
         self._record("memory.remember", id=memory_id, kind=kind.strip().lower())
-        return {"remembered": True, "id": memory_id}
+        return {
+            "remembered": True,
+            "id": memory_id,
+            "verified": True,
+            "verification": "read the memory back and the content matches",
+        }
 
     @function_tool()
     async def recall(
@@ -128,8 +139,19 @@ class MemoryTools:
             updated = self._store.correct(memory_id, new_content)
         except (KeyError, ValueError) as exc:
             raise ToolError(str(exc)) from exc
+        if updated.get("content") != new_content.strip():
+            raise ToolError(
+                "The correction was applied but reading it back did not match. "
+                "Treat it as not corrected and try again."
+            )
         self._record("memory.correct", id=memory_id)
-        return {"corrected": True, "id": updated["id"], "content": updated["content"]}
+        return {
+            "corrected": True,
+            "id": updated["id"],
+            "content": updated["content"],
+            "verified": True,
+            "verification": "read the memory back and the new content matches",
+        }
 
     @function_tool()
     async def forget_memory(
@@ -147,8 +169,18 @@ class MemoryTools:
         """
         if not self._store.forget(memory_id):
             raise ToolError(f"no memory with id {memory_id}")
+        if self._store.get(memory_id) is not None:
+            raise ToolError(
+                f"Deleting memory {memory_id} reported success, but it is still "
+                "there. Treat it as not forgotten."
+            )
         self._record("memory.forget", id=memory_id)
-        return {"forgotten": True, "id": memory_id}
+        return {
+            "forgotten": True,
+            "id": memory_id,
+            "verified": True,
+            "verification": "the memory is gone when looked up",
+        }
 
     @function_tool()
     async def export_memories(
