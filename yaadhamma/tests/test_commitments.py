@@ -48,6 +48,16 @@ def test_month_day_this_year_when_upcoming():
     assert parse_due_date("flight Dec 20", NOW) == datetime(2026, 12, 20, 18, 0)
 
 
+def test_month_day_keeps_valid_31st():
+    # Regression: the old code clamped every day above 28 to 28.
+    assert parse_due_date("party Jan 31", NOW) == datetime(2027, 1, 31, 18, 0)
+
+
+def test_month_day_clamps_only_to_real_last_day():
+    # Feb 30 is not a date; the month's last day is the sensible fallback.
+    assert parse_due_date("review Feb 30", NOW) == datetime(2027, 2, 28, 18, 0)
+
+
 def test_end_of_week_is_friday():
     assert parse_due_date("finish the report end of week", NOW) == datetime(
         2026, 10, 2, 18, 0

@@ -157,4 +157,4 @@ def test_tidy_runs_at_three_am() -> None:
     import digest_schedule
 
     jobs = {label: (times, extra) for label, times, extra, _ in digest_schedule.JOBS}
-    assert jobs["com.yaadhamma.tidy"] == ([(3, 0)], ["--tidy"])
+    assert jobs["com.yaadhamma.tidy"] == ([(3, 0)], ["--tidy", "--email-tidy"])

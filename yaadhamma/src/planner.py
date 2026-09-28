@@ -21,6 +21,7 @@ The plan is advice only: nothing here sends, adds or changes anything.
 from __future__ import annotations
 
 import asyncio
+import calendar
 import json
 import os
 import re
@@ -168,10 +169,16 @@ def parse_due_date(text: str, now: datetime) -> datetime | None:
     month_match = re.search(r"\b(" + "|".join(_MONTHS) + r")\s+(\d{1,2})\b", lowered)
     if month_match:
         month = _MONTHS[month_match.group(1)]
-        day = min(int(month_match.group(2)), 28)  # never an invalid date
-        candidate = datetime(now.year, month, day)
+        requested = int(month_match.group(2))
+        # Clamp only to the month's real last day ("Jan 31" stays Jan 31;
+        # "Feb 30" becomes Feb 28/29 rather than an invalid date).
+        year = now.year
+        day = min(requested, calendar.monthrange(year, month)[1])
+        candidate = datetime(year, month, day)
         if candidate.date() < now.date():
-            candidate = datetime(now.year + 1, month, day)
+            year += 1
+            day = min(requested, calendar.monthrange(year, month)[1])
+            candidate = datetime(year, month, day)
         return datetime.combine(candidate.date(), at)
 
     weekday_match = re.search(r"\b(" + "|".join(_WEEKDAYS) + r")\b", lowered)

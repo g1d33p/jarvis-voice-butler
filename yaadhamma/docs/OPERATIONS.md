@@ -2,7 +2,35 @@
 
 Day-to-day running of the assistant on Jeevan's Mac. Everything here
 assumes the project checked out at `~/jarvis-voice-butler` and Python
-managed with `uv`.
+managed with `uv`. Copy-paste the commands as-is; nothing here asks you
+to edit code.
+
+## First evening: the one-time setup
+
+Do these once, in order. Each takes a couple of minutes.
+
+1. **Check out the code**: `git clone <repo-url> ~/jarvis-voice-butler`
+   (or `git fetch origin && git reset --hard origin/v1` if already cloned).
+2. **Health check**: `cd ~/jarvis-voice-butler/yaadhamma &&
+   uv run scripts/selftest.py` — 9 real checks, no network, takes seconds.
+   Everything should say PASS.
+3. **Secrets**: copy `.env.example` to `.env.local` and fill in
+   `GOOGLE_API_KEY` plus the Google OAuth client ID/secret.
+4. **Pair WhatsApp**: stop the agent if it is running, then
+   `uv run scripts/whatsapp_signin.py` and scan the QR with the phone
+   (WhatsApp > Settings > Linked devices).
+5. **Sign in Gmail and Calendar**: `uv run scripts/gmail_signin.py` and
+   `uv run scripts/calendar_signin.py` (three Gmail accounts; the label
+   and archiving features need the `gmail.modify` scope — re-link any
+   account whose `--check` says is missing it).
+6. **Start everything**:
+   `uv run scripts/digest_schedule.py on` (scheduled jobs),
+   `uv run scripts/remote_schedule.py on` (phone access),
+   `python scripts/daemon_control.py install` (always-on wake word).
+7. **Say "Hey Jarvis"** and ask her something small.
+
+Microphone permission lives in System Settings > Privacy & Security >
+Microphone. Full per-service notes are below under "Sign-in and pairing".
 
 ## Quick health check
 
@@ -168,7 +196,7 @@ seconds. Every approval, refusal and verification outcome is appended to
 
 ## Budget
 
-`YAADHAMMA_MONTHLY_BUDGET_USD` in `.env.local` (default 20). The morning
+`YAADHAMMA_MONTHLY_BUDGET_USD` in `.env.local` (default 35). The morning
 brief prints a warning when the month's estimated spend crosses it. It
 never blocks anything — the provider billing page is the only real
 meter. If Gemini calls start failing with 429s, check the AI Studio
