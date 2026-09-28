@@ -25,8 +25,8 @@ JOBS = [
     (
         "com.yaadhamma.tidy",
         [(3, 0)],
-        ["--tidy"],
-        "File tidy-up at 3am, every other night",
+        ["--tidy", "--email-tidy"],
+        "File + email tidy-up at 3am, every other night",
     ),
     ("com.yaadhamma.morning", [(8, 45)], ["--morning"], "Morning brief at 8:45am"),
     ("com.yaadhamma.weekly", [(20, 0)], ["--weekly"], "Weekly plan, Sunday 8pm"),

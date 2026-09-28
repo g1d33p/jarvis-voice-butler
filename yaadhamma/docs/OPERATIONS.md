@@ -104,9 +104,20 @@ verification and audit.
   parsing, chat allowlist, dedupe, approval round-trip and hours window are
   covered by `tests/test_remote.py`.
 
-## Nightly Gmail labels and archiving
+## Nightly tidy-ups (3 am)
 
-The 3 am tidy job also runs `uv run scripts/digest_run.py --email-tidy`:
+The 3 am job runs both tidy-ups, every other night:
+
+- **File tidy** (`--tidy`): moves stray files into `Documents > Sorted` per a
+  reviewed plan. Defaults to **apply**; `YAADHAMMA_TIDY=propose` in
+  `.env.local` goes back to propose-only. Nothing is ever deleted, nothing
+  is ever overwritten (name collisions get a free name), every move is
+  verified at its destination with the source gone, and each move is logged
+  for manual reversal.
+- **Email tidy** (`--email-tidy`): labels and archives as described below;
+  still propose-only until `YAADHAMMA_EMAIL_TIDY=apply`.
+
+What the email tidy does:
 
 - New inbox mail since the last run is classified (cheap rules, then the
   cheap model) and labelled `Yaadhamma/Jobs`, `Yaadhamma/Saayam`,

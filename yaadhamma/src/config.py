@@ -104,9 +104,15 @@ EMAIL_UNREAD_ONLY = os.environ.get("YAADHAMMA_EMAIL_UNREAD_ONLY", "").strip() in
 # it uses the stronger Flash model (a few cents a night).
 LEARNING_MODEL = os.environ.get("YAADHAMMA_LEARNING_MODEL", ESCALATION_MODEL)
 
-# Nightly file tidy-up: "propose" writes a plan for review and moves nothing;
-# "apply" also moves the files. Start with propose (Jeevan, 2026-09-28).
-TIDY_MODE = os.environ.get("YAADHAMMA_TIDY_MODE", "propose").strip().lower()
+# Nightly file tidy-up: "apply" moves files per the reviewed plan (default);
+# "propose" only writes a plan for review. Nothing is ever deleted either way.
+# YAADHAMMA_TIDY=propose goes back to propose-only.
+_tidy_raw = (
+    os.environ.get("YAADHAMMA_TIDY", os.environ.get("YAADHAMMA_TIDY_MODE", "apply"))
+    .strip()
+    .lower()
+)
+TIDY_MODE = "propose" if _tidy_raw == "propose" else "apply"
 
 # Planning: a short web look (official site, recent news) for interview prep.
 PLAN_WEB_RESEARCH = os.environ.get("YAADHAMMA_PLAN_WEB", "on").strip().lower() != "off"

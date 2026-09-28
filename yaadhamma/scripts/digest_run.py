@@ -13,7 +13,7 @@ Delivery test (sends one line to your own "(You)" chat, nothing else):
     uv run scripts/digest_run.py --test
 Plan preview (prints a plan here, sends nothing):
     uv run scripts/digest_run.py --plan today      (or: --plan week)
-File tidy-up (3 am, every other night; proposes a plan unless YAADHAMMA_TIDY_MODE=apply):
+File tidy-up (3 am, every other night; moves files per the plan unless YAADHAMMA_TIDY=propose):
     uv run scripts/digest_run.py --tidy          (add --now to ignore "every other night")
 Apply the latest reviewed tidy plan:
     uv run scripts/digest_run.py --tidy-apply
@@ -187,6 +187,12 @@ async def main() -> int:
         return await plan(after[0] if after else "today")
     if "--tidy-apply" in sys.argv:
         return await tidy_apply()
+    if "--email-tidy" in sys.argv and "--tidy" in sys.argv:
+        # The 3 am job: email tidy first, then the file tidy.
+        code = await email_tidy()
+        if code:
+            return code
+        return await tidy("--now" in sys.argv)
     if "--email-tidy" in sys.argv:
         return await email_tidy()
     if "--tidy" in sys.argv:
