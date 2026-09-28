@@ -82,25 +82,74 @@ class FakeWakeDetector:
         pass
 
 
+def _ensure_wakeword_model(model_name: str) -> None:
+    """Download the wake-word model files once, when they are missing.
+
+    openWakeWord never fetches models itself and its wheel ships with an
+    empty models directory, so a fresh install fails without this. Fetches
+    the shared audio-feature models plus the requested wake-word model
+    (both .tflite and .onnx variants) from the project's GitHub releases.
+    Logs while downloading so the daemon log never goes silent here.
+    """
+    import logging
+
+    from openwakeword import MODELS
+    from openwakeword.utils import download_models
+
+    log = logging.getLogger("yaadhamma.wake")
+    entry = MODELS.get(model_name)
+    if entry is None:
+        raise WakeConfigError(
+            f"openWakeWord has no pre-trained model for {model_name!r}. "
+            "Use YAADHAMMA_WAKE_ENGINE=porcupine with a trained .ppn "
+            "for a custom phrase."
+        )
+    onnx_path = entry["model_path"].replace(".tflite", ".onnx")
+    if os.path.exists(onnx_path):
+        return
+    log.info("downloading wake-word model %r (one-time)...", model_name)
+    try:
+        # download_models matches on substring: the versioned base name hits
+        # both the .tflite and the .onnx release assets.
+        base = os.path.splitext(os.path.basename(onnx_path))[0]
+        download_models(model_names=[base])
+    except Exception as exc:
+        raise WakeConfigError(
+            f"could not download the wake-word model {model_name!r}: {exc}"
+        ) from exc
+    if not os.path.exists(onnx_path):
+        raise WakeConfigError(
+            f"wake-word model {model_name!r} still missing after download "
+            f"(expected at {onnx_path})"
+        )
+    log.info("wake-word model %r ready", model_name)
+
+
 class OpenWakeWordDetector:
-    """openWakeWord backend (default): pre-trained community models."""
+    """openWakeWord backend (default): pre-trained community models.
+
+    Uses the ONNX inference path: onnxruntime ships in the ``wake`` extra,
+    while tflite-runtime publishes no macOS wheels at all. Model files are
+    downloaded once from the openWakeWord GitHub releases on first use
+    (the wheel ships with an empty models directory).
+    """
 
     def __init__(self, phrase: str = DEFAULT_PHRASE, sensitivity: float = 0.5) -> None:
         try:
             from openwakeword import Model as _Model
         except ImportError as exc:
             raise WakeConfigError(
-                "openWakeWord is not installed. Install it with: "
-                "pip install openwakeword numpy sounddevice"
+                "openWakeWord is not installed. Install it with: uv sync --extra wake"
             ) from exc
-        model_path = phrase.replace(" ", "_")
+        model_name = phrase.replace(" ", "_")
+        _ensure_wakeword_model(model_name)
         try:
-            self._model = _Model(wakeword_models=[model_path])
+            self._model = _Model(
+                wakeword_models=[model_name], inference_framework="onnx"
+            )
         except Exception as exc:
             raise WakeConfigError(
-                f"openWakeWord has no pre-trained model for {phrase!r} "
-                f"(tried {model_path!r}). Use YAADHAMMA_WAKE_ENGINE=porcupine "
-                f"with a trained .ppn for a custom phrase."
+                f"openWakeWord could not load {phrase!r}: {exc}"
             ) from exc
         self._phrase = phrase
         self._sensitivity = sensitivity

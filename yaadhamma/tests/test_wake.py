@@ -9,6 +9,7 @@ import pytest
 from wake import (
     FakeWakeDetector,
     MicrophonePermissionError,
+    OpenWakeWordDetector,
     WakeConfigError,
     WakeMachine,
     WakeState,
@@ -155,3 +156,87 @@ def test_microphone_denial_is_actionable() -> None:
     stream = MicStream(audio_factory=denied)
     with pytest.raises(MicrophonePermissionError, match="Privacy & Security"):
         stream.start()
+
+
+def _fake_openwakeword(monkeypatch, tmp_path):
+    """Inject a fake openwakeword package: known model, fake downloader."""
+    import sys
+    import types
+
+    models_dir = tmp_path / "models"
+    models_dir.mkdir()
+    onnx_path = models_dir / "hey_jarvis_v0.1.onnx"
+
+    pkg = types.ModuleType("openwakeword")
+    pkg.MODELS = {
+        "hey_jarvis": {"model_path": str(onnx_path).replace(".onnx", ".tflite")}
+    }
+
+    downloaded = []
+
+    def fake_download_models(model_names):
+        downloaded.append(list(model_names))
+        onnx_path.write_bytes(b"fake-onnx")
+
+    utils = types.ModuleType("openwakeword.utils")
+    utils.download_models = fake_download_models
+    pkg.utils = utils
+
+    created = {}
+
+    class FakeModel:
+        def __init__(self, wakeword_models, inference_framework="tflite"):
+            created["wakeword_models"] = wakeword_models
+            created["inference_framework"] = inference_framework
+
+        def close(self):
+            pass
+
+    pkg.Model = FakeModel
+    monkeypatch.setitem(sys.modules, "openwakeword", pkg)
+    monkeypatch.setitem(sys.modules, "openwakeword.utils", utils)
+    return downloaded, created, onnx_path
+
+
+def test_openwakeword_uses_onnx_and_downloads_missing_model(
+    monkeypatch, tmp_path
+) -> None:
+    downloaded, created, onnx_path = _fake_openwakeword(monkeypatch, tmp_path)
+    detector = OpenWakeWordDetector(phrase="hey jarvis")
+    detector.close()
+    # The missing model was fetched once...
+    assert downloaded == [["hey_jarvis_v0.1"]]
+    # ...and the detector explicitly asked for the ONNX engine, because
+    # tflite-runtime ships no macOS wheels.
+    assert created["inference_framework"] == "onnx"
+    assert created["wakeword_models"] == ["hey_jarvis"]
+    assert onnx_path.exists()
+
+
+def test_openwakeword_skips_download_when_model_present(monkeypatch, tmp_path) -> None:
+    downloaded, _created, onnx_path = _fake_openwakeword(monkeypatch, tmp_path)
+    onnx_path.write_bytes(b"already-there")
+    detector = OpenWakeWordDetector(phrase="hey jarvis")
+    detector.close()
+    assert downloaded == []
+
+
+def test_openwakeword_unknown_phrase_is_a_config_error(monkeypatch, tmp_path) -> None:
+    _fake_openwakeword(monkeypatch, tmp_path)
+    with pytest.raises(WakeConfigError, match="no pre-trained model"):
+        OpenWakeWordDetector(phrase="hey nobody")
+
+
+def test_openwakeword_load_failure_surfaces_real_error(monkeypatch, tmp_path) -> None:
+    import sys
+
+    _fake_openwakeword(monkeypatch, tmp_path)
+    pkg = sys.modules["openwakeword"]
+
+    class BrokenModel:
+        def __init__(self, *args, **kwargs):
+            raise RuntimeError("boom: onnx session failed")
+
+    monkeypatch.setattr(pkg, "Model", BrokenModel)
+    with pytest.raises(WakeConfigError, match="boom: onnx session failed"):
+        OpenWakeWordDetector(phrase="hey jarvis")
