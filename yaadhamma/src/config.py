@@ -135,3 +135,7 @@ TIDY_MODE = os.environ.get("YAADHAMMA_TIDY_MODE", "propose").strip().lower()
 
 # Planning: a short web look (official site, recent news) for interview prep.
 PLAN_WEB_RESEARCH = os.environ.get("YAADHAMMA_PLAN_WEB", "on").strip().lower() != "off"
+
+# Monthly model-spend budget, USD. When the month-to-date estimate passes
+# this, the morning brief says so loudly — but calls are never blocked.
+MONTHLY_BUDGET_USD = float(os.environ.get("YAADHAMMA_MONTHLY_BUDGET_USD", "20"))

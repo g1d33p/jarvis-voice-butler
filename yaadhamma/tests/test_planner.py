@@ -107,7 +107,9 @@ class FakeBrain:
     def __init__(self):
         self.calls = []
 
-    async def generate(self, model, messages, tools, reasoning_effort=None):
+    async def generate(
+        self, model, messages, tools, reasoning_effort=None, feature="test"
+    ):
         self.calls.append((model, messages))
         return ModelTurn(
             calls=[],
@@ -153,7 +155,8 @@ async def test_plan_context_brings_everything_together(stores) -> None:
         {"kind": "person", "content": "Priya is a recruiter at Acme."}
     ]
     assert "Ravi asked about Cognito" in context["recent_digests"][0]["summary"]
-    assert context["email"][0]["subject"] == "Interview slot Thursday?"
+    assert "Interview slot Thursday?" in context["email"][0]["subject"]
+    assert "<<UNTRUSTED_CONTENT" in context["email"][0]["subject"]
     assert context["free_time_today"] == ["09:00-14:00", "15:00-19:00"]
     assert context["interviews"][0]["event"] == "Interview with Acme"
 

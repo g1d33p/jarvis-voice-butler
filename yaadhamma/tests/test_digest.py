@@ -56,7 +56,9 @@ class FakeBrain:
         self.text = text
         self.calls = []
 
-    async def generate(self, model, messages, tools, reasoning_effort=None):
+    async def generate(
+        self, model, messages, tools, reasoning_effort=None, feature="test"
+    ):
         self.calls.append(messages)
         return ModelTurn(calls=[], text=self.text, tokens_in=900, tokens_out=80)
 

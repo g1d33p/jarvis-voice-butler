@@ -33,7 +33,9 @@ class FakeBrain:
         self.decisions = decisions
         self.calls = []
 
-    async def generate(self, model, messages, tools, reasoning_effort=None):
+    async def generate(
+        self, model, messages, tools, reasoning_effort=None, feature="test"
+    ):
         self.calls.append(json.loads(messages[1]["content"]))
         return ModelTurn(calls=[], text=json.dumps({"files": self.decisions}))
 

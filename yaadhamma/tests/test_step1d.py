@@ -112,7 +112,9 @@ async def test_a_hung_tool_is_stopped_and_reported() -> None:
 
 
 class _SlowModel(FakeModel):
-    async def generate(self, model, messages, tools, reasoning_effort=None):
+    async def generate(
+        self, model, messages, tools, reasoning_effort=None, feature="test"
+    ):
         await asyncio.sleep(0.3)
         return await super().generate(model, messages, tools, reasoning_effort)
 

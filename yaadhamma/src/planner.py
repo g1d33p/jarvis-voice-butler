@@ -165,6 +165,18 @@ async def research_interviews(interviews: list[dict]) -> str:
             ),
             timeout=45,
         )
+        try:
+            from costs import CostStore
+
+            usage = response.usage_metadata
+            CostStore().record(
+                "planner",
+                config.ESCALATION_MODEL,
+                usage.prompt_token_count if usage else 0,
+                usage.candidates_token_count if usage else 0,
+            )
+        except Exception:
+            pass  # cost tracking must never break planning
         return (response.text or "").strip()[:2500]
     except Exception:
         return ""
@@ -258,6 +270,7 @@ async def make_plan(
             },
         ],
         [],
+        feature="planner",
     )
     return (turn.text or "").strip()
 

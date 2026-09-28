@@ -129,7 +129,8 @@ async def test_list_chats_not_paired_gives_signin_hint(tmp_path) -> None:
 async def test_read_chat_resolves_name_and_reads(tools) -> None:
     result = await tools.whatsapp_read_chat(_Context(), chat_name="ravi")
     assert result["chat"] == "Ravi"
-    assert result["messages"][0]["text"] == "hello from Ravi"
+    assert "hello from Ravi" in result["messages"][0]["text"]
+    assert "<<UNTRUSTED_CONTENT" in result["messages"][0]["text"]
 
 
 async def test_read_chat_needs_a_name(tools) -> None:
@@ -156,7 +157,8 @@ async def test_where_needed_covers_only_unread_chats(tools) -> None:
     assert result["total_chats"] == 3
     first = result["chats_needing_attention"][0]
     assert first["unread"] == 2
-    assert first["messages"][0]["text"] == "hello from Ravi"
+    assert "hello from Ravi" in first["messages"][0]["text"]
+    assert "<<UNTRUSTED_CONTENT" in first["messages"][0]["text"]
 
 
 async def test_where_needed_caps_chat_count(tools) -> None:

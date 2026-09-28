@@ -306,6 +306,7 @@ async def preview_email(gmail_clients, brain, hours: float) -> dict:
                 },
             ],
             [],
+            feature="digest",
         )
         summary = (turn.text or "").strip()[:MAX_DIGEST_CHARS]
     duplicates = sorted({a for a in accounts if accounts.count(a) > 1})
@@ -395,6 +396,26 @@ def _learning_line() -> str:
     return ""
 
 
+def _budget_line() -> str:
+    """A loud line when the month's model spend passed the budget.
+
+    A warning only: calls are never blocked.
+    """
+    try:
+        from costs import CostStore
+
+        exceeded, spent, budget = CostStore().over_budget()
+    except Exception:
+        return ""
+    if not exceeded:
+        return ""
+    return (
+        f"\n\n*Model spend this month is ${spent:.2f}, over the "
+        f"${budget:.2f} budget.* These are estimates; the provider billing "
+        "page is the truth. Nothing is blocked, but it may be worth a look."
+    )
+
+
 def _health_warning() -> str:
     """A loud line when the last WhatsApp self-check failed."""
     try:
@@ -475,7 +496,7 @@ async def run_morning_brief(
         text = morning_brief_text(today, clashes, now)
         if plan:
             text += "\n\n" + plan
-        text += _learning_line() + _tidy_line() + _health_warning()
+        text += _learning_line() + _tidy_line() + _health_warning() + _budget_line()
         self_chat = await find_self_chat(client)
         await client.send_message(self_chat, text)
         result = DigestResult(status="morning", summary=text)
@@ -560,6 +581,7 @@ async def run_digest(
                     },
                 ],
                 [],
+                feature="digest",
             )
             summary = (turn.text or "").strip()[:MAX_DIGEST_CHARS]
             if not summary:

@@ -349,6 +349,7 @@ async def run_learning(
                     },
                 ],
                 [],
+                feature="learning",
             )
             added, updated = apply_memories(
                 _parse_reply(turn.text), store, f"{started:%d %b %Y}"

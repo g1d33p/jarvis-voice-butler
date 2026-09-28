@@ -157,6 +157,7 @@ class MetaBrainClient:
         messages: list[dict],
         tools: list[dict],
         reasoning_effort: str | None = None,
+        feature: str = "other",
     ) -> ModelTurn:
         client = self._get_client()
         kwargs: dict = {"model": model, "messages": messages}
@@ -179,13 +180,20 @@ class MetaBrainClient:
                 args = {}
             calls.append((tool_call.function.name, args))
         usage = response.usage
-        return ModelTurn(
+        turn = ModelTurn(
             calls=calls,
             text=message.content or "",
             tokens_in=usage.prompt_tokens if usage else 0,
             tokens_out=usage.completion_tokens if usage else 0,
             raw_tool_calls=raw_tool_calls or None,
         )
+        try:
+            from costs import CostStore
+
+            CostStore().record(feature, model, turn.tokens_in, turn.tokens_out)
+        except Exception:
+            pass  # cost tracking must never break a model call
+        return turn
 
 
 # Google's OpenAI-compatible endpoint for the Gemini API.

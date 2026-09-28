@@ -195,7 +195,9 @@ class FakeBrain:
     def __init__(self):
         self.calls = []
 
-    async def generate(self, model, messages, tools, reasoning_effort=None):
+    async def generate(
+        self, model, messages, tools, reasoning_effort=None, feature="test"
+    ):
         from meta_client import ModelTurn
 
         self.calls.append(messages)

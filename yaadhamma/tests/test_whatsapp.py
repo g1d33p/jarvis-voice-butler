@@ -491,7 +491,10 @@ async def test_send_message_verifies_new_outgoing_message() -> None:
     browser = _send_browser()
     client = WhatsAppClient(browser=browser)
     result = await client.send_message("Ravi", "running late")
-    assert result == {"sent": True, "chat": "Ravi"}
+    assert result["sent"] is True
+    assert result["chat"] == "Ravi"
+    assert result["verified"] is True
+    assert "appeared in the chat" in result["verification"]
     assert browser.last_message_calls >= 2
 
 
