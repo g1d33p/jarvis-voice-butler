@@ -9,6 +9,7 @@ description = "Yaadhamma — voice-driven personal assistant for macOS, built on
 requires-python = ">=3.10, <3.15"
 
 dependencies = [
+    "pypdf>=5",
     "livekit-agents[google,images]>=1.8.3,<1.9",
     "livekit-plugins-ai-coustics~=0.2",
     "livekit-plugins-openai>=1.8.3,<1.9",

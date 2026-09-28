@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Turn the scheduled digest and morning brief on or off (macOS launchd).
 
-    uv run scripts/digest_schedule.py install     # learn 2am; brief 8:45; digests 9, 1, 5, 9
+    uv run scripts/digest_schedule.py install     # learn 2am; tidy 3am; brief 8:45; digests
     uv run scripts/digest_schedule.py uninstall
     uv run scripts/digest_schedule.py status
 
@@ -22,6 +22,12 @@ AGENTS = Path.home() / "Library" / "LaunchAgents"
 # (launchd label, [(hour, minute), ...], extra arguments, description)
 JOBS = [
     ("com.yaadhamma.learn", [(2, 0)], ["--learn"], "Overnight learning at 2am"),
+    (
+        "com.yaadhamma.tidy",
+        [(3, 0)],
+        ["--tidy"],
+        "File tidy-up at 3am, every other night",
+    ),
     ("com.yaadhamma.morning", [(8, 45)], ["--morning"], "Morning brief at 8:45am"),
     (
         "com.yaadhamma.digest",
@@ -80,7 +86,7 @@ def uninstall() -> int:
         path = _plist_path(label)
         subprocess.run(["launchctl", "unload", str(path)], capture_output=True)
         path.unlink(missing_ok=True)
-    print("Learning, morning brief and digest schedules removed.")
+    print("All Yaadhamma schedules removed.")
     return 0
 
 

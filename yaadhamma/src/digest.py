@@ -162,6 +162,17 @@ class DigestStore:
             ).fetchone()
         return datetime.fromisoformat(row[0]) if row else None
 
+    def recent_summaries(self, hours: int = 24) -> list[dict]:
+        """Digest texts sent in the last `hours`, newest first (for planning)."""
+        since = (datetime.now() - timedelta(hours=hours)).isoformat(timespec="seconds")
+        with sqlite3.connect(self.path) as db:
+            rows = db.execute(
+                "SELECT started, summary FROM digests WHERE status = 'sent' AND started >= ? "
+                "ORDER BY started DESC LIMIT 6",
+                (since,),
+            ).fetchall()
+        return [{"time": t, "summary": s} for t, s in rows]
+
     def latest(self) -> dict | None:
         with sqlite3.connect(self.path) as db:
             row = db.execute(
@@ -366,6 +377,26 @@ def _learning_line() -> str:
     return ""
 
 
+def _tidy_line() -> str:
+    """One line about last night's file tidy-up, for the morning brief."""
+    try:
+        from tidy import TidyLog, plan_summary
+
+        latest = TidyLog().latest_plan()
+    except Exception:
+        return ""
+    if not latest:
+        return ""
+    status, plan = latest
+    if datetime.now() - datetime.fromisoformat(plan.created) > timedelta(hours=12):
+        return ""
+    if not plan.moves:
+        return "\n\nTidy-up: nothing to sort."
+    if status == "applied":
+        return f"\n\nTidy-up: moved {len(plan.moves)} files into Documents > Sorted."
+    return "\n\n" + plan_summary(plan)
+
+
 async def run_morning_brief(client, calendar, store: DigestStore) -> DigestResult:
     """Today's schedule and this week's clashes, sent to his own chat at 8:45."""
     import asyncio
@@ -384,7 +415,7 @@ async def run_morning_brief(client, calendar, store: DigestStore) -> DigestResul
         store.new_clash_keys(
             [c.key for c in clashes]
         )  # the 9am digest won't repeat them
-        text = morning_brief_text(today, clashes, now) + _learning_line()
+        text = morning_brief_text(today, clashes, now) + _learning_line() + _tidy_line()
         self_chat = await find_self_chat(client)
         await client.send_message(self_chat, text)
         result = DigestResult(status="morning", summary=text)
@@ -492,7 +523,7 @@ class DigestTools:
 
     @property
     def tools(self) -> list:
-        return [self.latest_digest, self.learned_overnight]
+        return [self.latest_digest, self.learned_overnight, self.where_did_file_go]
 
     @function_tool()
     async def latest_digest(self, context: RunContext) -> dict[str, object]:
@@ -517,3 +548,27 @@ class DigestTools:
             "status": "none",
             "note": "Nothing learned yet.",
         }
+
+    @function_tool()
+    async def where_did_file_go(
+        self, context: RunContext, name: str
+    ) -> dict[str, object]:
+        """Find a file the nightly tidy-up moved: where it was and where it is now.
+
+        Use when he asks "where's my resume?" or can't find a file that used
+        to be in Downloads, Desktop or Documents.
+
+        Args:
+            name: Part of the file's old or new name, e.g. "resume".
+        """
+        from tidy import TidyLog
+
+        found = TidyLog().find_moved(name)
+        return (
+            {"moves": found}
+            if found
+            else {
+                "moves": [],
+                "note": "The tidy-up has not moved a file with that name.",
+            }
+        )

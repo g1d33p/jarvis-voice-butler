@@ -9,6 +9,12 @@ Manual run:
     uv run scripts/digest_run.py
 Delivery test (sends one line to your own "(You)" chat, nothing else):
     uv run scripts/digest_run.py --test
+Plan preview (prints a plan here, sends nothing):
+    uv run scripts/digest_run.py --plan today      (or: --plan week)
+File tidy-up (3 am, every other night; proposes a plan unless YAADHAMMA_TIDY_MODE=apply):
+    uv run scripts/digest_run.py --tidy          (add --now to ignore "every other night")
+Apply the latest reviewed tidy plan:
+    uv run scripts/digest_run.py --tidy-apply
 Overnight learning (2 am; chats, email and calendar into memory):
     uv run scripts/digest_run.py --learn
 Morning brief (today's calendar and this week's clashes):
@@ -63,7 +69,95 @@ async def email_preview(hours: float) -> int:
     return 0
 
 
+async def tidy(now_flag: bool) -> int:
+    from datetime import datetime, timedelta
+
+    import config
+    from tidy import TidyLog, apply_plan, build_plan, plan_summary, write_plan_file
+
+    log = TidyLog()
+    last = log.last_run()
+    if last and not now_flag and datetime.now() - last < timedelta(hours=44):
+        print("Tidy-up ran last night; it runs every other night. Skipping.")
+        return 0
+    plan = await build_plan(brain_client_from_config())
+    log.save_plan(plan)
+    path = write_plan_file(plan)
+    if config.TIDY_MODE == "apply" and plan.moves:
+        done = apply_plan(plan, log)
+        print(f"Tidy-up applied: {done['moved']} files moved. Plan: {path}")
+    else:
+        print(plan_summary(plan))
+        print(f"Plan: {path}")
+    return 0
+
+
+async def tidy_apply() -> int:
+    from tidy import TidyLog, apply_plan
+
+    log = TidyLog()
+    latest = log.latest_plan()
+    if not latest:
+        print("There is no tidy plan yet.")
+        return 1
+    status, plan = latest
+    if status == "applied":
+        print("The latest tidy plan has already been applied.")
+        return 0
+    done = apply_plan(plan, log)
+    print(f"Moved {done['moved']} files into Documents/Sorted.")
+    for item in done["skipped"]:
+        print("  skipped:", item)
+    return 0
+
+
+async def plan(horizon: str) -> int:
+    from digest import DigestStore
+    from memory_store import MemoryStore
+    from planner import make_plan
+
+    calendar = CalendarClient() if CalendarClient().token_path.exists() else None
+    gmail = [GmailClient(label=label) for label in discover_labels()]
+    print(f"Planning your {'week' if horizon == 'week' else 'day'}...")
+    text = await make_plan(
+        brain_client_from_config(),
+        horizon,
+        calendar,
+        gmail,
+        MemoryStore(),
+        DigestStore(),
+    )
+    print("\n" + (text or "(no plan came back)"))
+    return 0
+
+
+KNOWN_FLAGS = {
+    "--test",
+    "--morning",
+    "--learn",
+    "--tidy",
+    "--now",
+    "--tidy-apply",
+    "--email-preview",
+    "--plan",
+}
+
+
 async def main() -> int:
+    # An unknown option must never fall through to a real digest run
+    # (2026-09-28: "--plan" before the planning patch sent two digests).
+    unknown = [a for a in sys.argv[1:] if a.startswith("--") and a not in KNOWN_FLAGS]
+    if unknown:
+        print(f"Unknown option {unknown[0]}. Nothing was run.")
+        print(__doc__)
+        return 2
+    if "--plan" in sys.argv:
+        after = sys.argv[sys.argv.index("--plan") + 1 :]
+        return await plan(after[0] if after else "today")
+    if "--tidy-apply" in sys.argv:
+        return await tidy_apply()
+    if "--tidy" in sys.argv:
+        return await tidy("--now" in sys.argv)
     if "--email-preview" in sys.argv:
         after = sys.argv[sys.argv.index("--email-preview") + 1 :]
         return await email_preview(float(after[0]) if after else 24)

@@ -67,6 +67,21 @@ def parse_message_meta(meta: str) -> tuple[str | None, str | None]:
     return match.group("time"), match.group("sender")
 
 
+def _same_message(shown: str, sent: str) -> bool:
+    """Did the chat show the message we sent?
+
+    WhatsApp turns *bold*, _italic_, ~strike~ and ```code``` markers into
+    formatting and may re-wrap lines, so compare without those characters and
+    without whitespace (2026-09-28: a digest was delivered but reported as
+    unconfirmed because its *headings* came back without asterisks).
+    """
+
+    def flat(value: str) -> str:
+        return re.sub(r"[\s*_~`]", "", value).casefold()
+
+    return flat(shown) == flat(sent)
+
+
 def _digits(text: str) -> str:
     return "".join(ch for ch in str(text) if ch.isdigit())
 
@@ -587,7 +602,15 @@ class WhatsAppClient:
                     "did not add to it. Nothing was sent."
                 )
             await self._mouse_click(box["x"], box["y"])
-            await browser.insert_text(text)
+            # Multi-line messages (the digest): Enter would send each line on
+            # its own, so lines are separated with Shift+Enter, WhatsApp's
+            # "new line" key, and only the final Enter sends.
+            lines = text.split("\n")
+            for index, line in enumerate(lines):
+                if line:
+                    await browser.insert_text(line)
+                if index < len(lines) - 1:
+                    await browser.new_line()
             await browser.press_key("Enter")
         else:
             typed = await self._evaluate("waTypeAndSend", text)
@@ -608,7 +631,7 @@ class WhatsAppClient:
                 current
                 and _message_signature(current) != before
                 and current.get("outgoing")
-                and (current.get("text") or "") == text
+                and _same_message(current.get("text") or "", text)
             ):
                 return {"sent": True, "chat": matched}
         raise WhatsAppError(

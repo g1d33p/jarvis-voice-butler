@@ -645,6 +645,12 @@ class BrowserManager:
             except Exception as exc:
                 raise BrowserError(f"I could not clear that field: {exc}") from exc
 
+    async def new_line(self) -> None:
+        """Shift+Enter: a line break inside a chat message box (internal use)."""
+        page = await self._get_page()
+        async with self._lock:
+            await page.keyboard.press("Shift+Enter")
+
     async def insert_text(self, text: str) -> None:
         """Type text into the focused field with the real keyboard."""
         page = await self._get_page()

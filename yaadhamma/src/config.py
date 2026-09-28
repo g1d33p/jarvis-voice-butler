@@ -128,3 +128,10 @@ EMAIL_UNREAD_ONLY = os.environ.get("YAADHAMMA_EMAIL_UNREAD_ONLY", "").strip() in
 # Overnight learning reads a day of messages and must judge what matters, so
 # it uses the stronger Flash model (a few cents a night).
 LEARNING_MODEL = os.environ.get("YAADHAMMA_LEARNING_MODEL", ESCALATION_MODEL)
+
+# Nightly file tidy-up: "propose" writes a plan for review and moves nothing;
+# "apply" also moves the files. Start with propose (Jeevan, 2026-09-28).
+TIDY_MODE = os.environ.get("YAADHAMMA_TIDY_MODE", "propose").strip().lower()
+
+# Planning: a short web look (official site, recent news) for interview prep.
+PLAN_WEB_RESEARCH = os.environ.get("YAADHAMMA_PLAN_WEB", "on").strip().lower() != "off"

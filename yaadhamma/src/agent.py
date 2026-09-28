@@ -40,6 +40,7 @@ from observation import ObservationTools
 from orchestrator import Orchestrator, TaskTools, voice_tools
 from outlook_tools import OutlookTools
 from permissions import ApprovalManager, ApprovalTools
+from planner import PlanTools
 from prompts import AGENT_INSTRUCTIONS, VOICE_INSTRUCTIONS
 from pronunciation import PronunciationTTS
 from task_manager import TaskStore
@@ -203,6 +204,7 @@ class Assistant(Agent):
                 *voice_tools(*toolsets),
                 *TaskTools(self.orchestrator).tools,
                 *DigestTools().tools,
+                *PlanTools().tools,
             ]
 
         super().__init__(
