@@ -124,6 +124,19 @@ The 3 am tidy job also runs `uv run scripts/digest_run.py --email-tidy`:
   re-linked. `uv run scripts/gmail_signin.py --check` reports which, and
   prints the exact re-link command.
 
+## Commitments
+
+Promises Jeevan makes ("I'll call Ravi back by 5pm") are stored in
+`~/.yaadhamma/commitments.db` with a parsed due date ("by 5pm" → today
+17:00, "tomorrow"/"Monday 9am", "Jan 5", "end of week" → Friday 18:00;
+vague timing like "soon" stores no due date rather than guessing).
+
+- Every wake session reviews overdue + due-today commitments.
+- The morning brief and each scheduled digest list "Commitments due today".
+- Completion is explicit only: the `mark_done` voice tool completes the
+  one commitment he named, and refuses when the name is ambiguous or
+  unknown. Nothing ever infers that something is finished.
+
 ## Sign-in and pairing
 
 | Service | Script | Notes |

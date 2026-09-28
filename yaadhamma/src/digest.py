@@ -458,6 +458,27 @@ def _tidy_line() -> str:
     return "\n\n" + plan_summary(plan)
 
 
+def _commitments_line(now: datetime | None = None) -> str:
+    """Open commitments for the morning brief: overdue first, then due today."""
+    moment = now or datetime.now()
+    try:
+        from task_store import CommitmentStore
+
+        store = CommitmentStore()
+        late = store.overdue(moment)
+        today = store.due_today(moment)
+    except Exception:
+        return ""
+    if not late and not today:
+        return ""
+    lines = ["\n\nCommitments due today:"]
+    for row in late:
+        lines.append(f"- OVERDUE: {row['text']} (was due {row['due_at']})")
+    for row in today:
+        lines.append(f"- {row['text']} (by {row['due_at'][11:16]})")
+    return "\n".join(lines)
+
+
 def _email_tidy_line() -> str:
     """One line about last night's email tidy, for the morning brief."""
     try:
@@ -520,6 +541,7 @@ async def run_morning_brief(
             _learning_line()
             + _tidy_line()
             + _email_tidy_line()
+            + _commitments_line()
             + _health_warning()
             + _budget_line()
         )
@@ -613,7 +635,7 @@ async def run_digest(
             if not summary:
                 raise WhatsAppError("The summary came back empty.")
             header = f"Yaadhamma digest, {started:%a %I:%M %p}\n\n"
-            summary += _health_warning()
+            summary += _health_warning() + _commitments_line(now=started)
             self_chat = await find_self_chat(client)
             await client.send_message(self_chat, header + summary)
             result = DigestResult(

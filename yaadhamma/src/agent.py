@@ -20,6 +20,7 @@ from actions import ActionRegistry
 from audit import AuditLog
 from browser import BrowserManager
 from calendar_tools import CalendarTools
+from commitment_tools import CommitmentTools
 from digest import DigestTools
 from file_tools import FileTools
 from gmail_tools import GmailTools
@@ -48,6 +49,22 @@ def _current_time_note() -> str:
         f"When this conversation started it was {now:%A, %d %B %Y, %I:%M %p} "
         f"({now.tzname()}) on the user's Mac."
     )
+
+
+def _commitments_note() -> str:
+    """Overdue and due-today commitments, reviewed on every wake.
+
+    Never fatal: if the store cannot be read, the session starts without it.
+    """
+    try:
+        from task_store import wake_review_text
+
+        review = wake_review_text()
+    except Exception:
+        return ""
+    if not review:
+        return ""
+    return "\n\n# Commitments\n\n" + review
 
 
 def voice_components():
@@ -116,6 +133,7 @@ class Assistant(Agent):
         self.approval_tools = ApprovalTools(approvals=self.approvals)
         self.observation_tools = ObservationTools(self.browser)
         self.memory_tools = MemoryTools(audit=self.audit_log)
+        self.commitment_tools = CommitmentTools()
         self.whatsapp_tools = WhatsAppTools(
             browser=self.browser, approvals=self.approvals
         )
@@ -128,6 +146,7 @@ class Assistant(Agent):
             self.approval_tools,
             self.observation_tools,
             self.memory_tools,
+            self.commitment_tools,
             self.whatsapp_tools,
             self.calendar_tools,
         )
@@ -162,7 +181,7 @@ class Assistant(Agent):
             # A Large Language Model (LLM) is your agent's brain, processing user input and generating a response
             # See all available models at https://docs.livekit.io/agents/models/llm/
             llm=self._voice_llm,
-            instructions=instructions + _current_time_note(),
+            instructions=instructions + _current_time_note() + _commitments_note(),
             tools=[*tools, *self._end_call_tool.tools],
         )
 
