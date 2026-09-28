@@ -139,11 +139,11 @@ def run_macos_ui(controller, state_provider) -> None:
             for title, action in self.controller.menu_items():
                 if title == "cost":
                     item = rumps.MenuItem(lines["cost"])
-                    item.setcallback(lambda _: self.refresh_(None))
+                    item.set_callback(lambda _: self.refresh_(None))
                     self.menu.add(item)
                 elif title == "whatsapp":
                     item = rumps.MenuItem(lines["whatsapp"])
-                    item.setcallback(lambda _: self.refresh_(None))
+                    item.set_callback(lambda _: self.refresh_(None))
                     self.menu.add(item)
                 elif title == "Quit":
                     self.menu.add(
