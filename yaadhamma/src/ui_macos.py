@@ -41,7 +41,8 @@ def _save_orb_position(x: float, y: float) -> None:
 
 def run_macos_ui(controller, state_provider) -> None:
     """Run the menu bar (and orb) on the calling thread. Blocking."""
-    import QuartzCore
+    # Note: pyobjc exposes CoreAnimation as Quartz.QuartzCore; there is no
+    # top-level QuartzCore module, so a bare `import QuartzCore` fails.
     import rumps
     from AppKit import (
         NSBackingStoreBuffered,
@@ -53,6 +54,7 @@ def run_macos_ui(controller, state_provider) -> None:
         NSWindowStyleMaskBorderless,
     )
     from Foundation import NSTimer
+    from Quartz import QuartzCore
 
     from ui_state import BASE, VISUALS, UIState
 
