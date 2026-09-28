@@ -56,6 +56,18 @@ space, and recent errors from the audit log. Read-only; changes nothing.
   removed with `... off`. They run headless via launchd; logs land in
   `~/.yaadhamma/logs/`.
 
+### If the daemon fails to start
+
+1. Run it once in the foreground to see the real error (the log can
+   interleave and truncate tracebacks):
+   `uv run scripts/yaadhamma_daemon.py` — stop it with Ctrl+C when it fails.
+2. Also check the tail: `tail -30 ~/.yaadhamma/daemon.log`.
+3. Usual causes: microphone permission (System Settings > Privacy & Security
+   > Microphone, then restart), a missing extra (`uv sync --extra wake`
+   and/or `--extra ui`), or a bad value in `.env.local`.
+4. Reinstall after fixing: `python scripts/daemon_control.py uninstall`
+   then `python scripts/daemon_control.py install`.
+
 ## Wake word
 
 Out of the box she listens for **"Hey Jarvis"** using openWakeWord —

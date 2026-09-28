@@ -12,6 +12,10 @@ go back to the same chat. A "yes"/"no" reply to a pending question resolves
 it via the orchestrator.
 
 Each message is handled once (hashes in ~/.yaadhamma/remote-handled.json).
+The first poll for a chat only marks the backlog handled — it never runs it.
+Messages she sends herself (digests, replies) are recorded as outbound so the
+next poll skips them instead of re-ingesting her own "Yaadhamma …" text as a
+command.
 Polls run every 2 minutes, 08:00-23:00 local, as their own launchd job
 (scripts/remote_schedule.py), using the digest browser profile and the
 digest browser lock — never the voice profile.
@@ -24,6 +28,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import re
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -82,6 +87,40 @@ def message_hash(chat: str, message: dict) -> str:
         )
     )
     return hashlib.sha256(key.encode("utf-8")).hexdigest()[:32]
+
+
+def _outbound_key(chat: str, text: str) -> str:
+    """Key for a message she sent herself.
+
+    The sender/time WhatsApp stamps on the message cannot be predicted at
+    send time, so the key covers chat + text only. WhatsApp may strip
+    *bold* / _italic_ markers when it displays the message, so the text is
+    flattened the same way send-verification compares messages.
+    """
+    flat = re.sub(r"[\s*_~`]", "", text).casefold()
+    return hashlib.sha256(f"outbound|{chat}|{flat}".encode()).hexdigest()[:32]
+
+
+def record_outbound(chat: str, text: str) -> None:
+    """Remember a message she just sent to one of his chats.
+
+    The next poll skips it instead of re-ingesting her own digest or reply
+    as a command — digests begin "Yaadhamma digest, …", which is_command
+    would otherwise treat as a command. Best-effort: never raises. Each key
+    is consumed by the first poll that sees the matching message.
+    """
+    store = JsonStore(handled_path(), _handled_default())
+    data = store.read()
+    keys = data.setdefault("outbound", [])
+    key = _outbound_key(chat, text)
+    if key not in keys:
+        keys.append(key)
+        data["outbound"] = keys[-200:]
+        store.write(data)
+
+
+def _handled_default() -> dict:
+    return {"hashes": [], "outbound": [], "primed": []}
 
 
 def in_window(now: datetime) -> bool:
@@ -150,7 +189,7 @@ class RemotePoller:
     )
 
     def __post_init__(self) -> None:
-        self._handled = JsonStore(handled_path(), {"hashes": []})
+        self._handled = JsonStore(handled_path(), _handled_default())
         self._pending = JsonStore(pending_path(), {"chats": {}})
 
     # ------------------------------------------------------------ polling
@@ -191,15 +230,43 @@ class RemotePoller:
         messages = result.get("messages", [])
         handled = self._handled.read()
         seen = set(handled.get("hashes", []))
+        if chat not in set(handled.get("primed", [])):
+            # First poll for this chat: the backlog is history, not commands.
+            # Mark everything handled without executing, so old messages —
+            # including her own earlier digests — can never run.
+            for message in messages:
+                seen.add(message_hash(chat, message))
+            handled["hashes"] = sorted(seen)[-2000:]
+            handled["primed"] = sorted(set(handled.get("primed", [])) | {chat})
+            self._handled.write(handled)
+            return [
+                f"{chat}: first poll: marked {len(messages)} existing "
+                "message(s) as handled"
+            ]
+        outbound = set(handled.get("outbound", []))
         for message in messages:
             digest = message_hash(chat, message)
             if digest in seen:
+                continue
+            key = _outbound_key(chat, str(message.get("text", "")))
+            if key in outbound:
+                # She sent this (digest, reply, approval question): it is
+                # never a command. Consume the key and mark it handled.
+                outbound.discard(key)
+                seen.add(digest)
                 continue
             seen.add(digest)
             outcome = await self._handle_message(client, orchestrator, chat, message)
             if outcome:
                 outcomes.append(f"{chat}: {outcome}")
+        # Re-read before writing: _reply records outbound keys mid-poll, and
+        # this write must merge them, never clobber them.
+        fresh = self._handled.read()
+        seen |= set(fresh.get("hashes", []))
+        outbound |= set(fresh.get("outbound", []))
         handled["hashes"] = sorted(seen)[-2000:]
+        handled["outbound"] = sorted(outbound)[-200:]
+        handled["primed"] = fresh.get("primed", handled.get("primed", []))
         self._handled.write(handled)
         return outcomes
 
@@ -293,6 +360,9 @@ class RemotePoller:
         # itself needs no approval (like the digest delivery). What the
         # command DOES went through the orchestrator's gates.
         await client.send_message(chat, text[:1500])
+        # Record her own message (only after a successful send) so the next
+        # poll skips it instead of re-ingesting it as a command.
+        record_outbound(chat, text[:1500])
 
     # ------------------------------------------------------------ pending
 

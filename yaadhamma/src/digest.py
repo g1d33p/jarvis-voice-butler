@@ -26,6 +26,7 @@ from pathlib import Path
 from livekit.agents import RunContext, function_tool
 
 import config
+from remote import record_outbound
 from task_manager import DEFAULT_DB
 from untrusted import wrap as _wrap_untrusted
 from whatsapp import WhatsAppError, WhatsAppNotPairedError
@@ -547,6 +548,7 @@ async def run_morning_brief(
         )
         self_chat = await find_self_chat(client)
         await client.send_message(self_chat, text)
+        record_outbound(self_chat, text)
         result = DigestResult(status="morning", summary=text)
     except WhatsAppNotPairedError:
         result = DigestResult(
@@ -583,6 +585,7 @@ async def send_test_message(client) -> str:
     """Prove the delivery path: send a one-line test to his own chat only."""
     self_chat = await find_self_chat(client)
     await client.send_message(self_chat, "Yaadhamma digest test: delivery works.")
+    record_outbound(self_chat, "Yaadhamma digest test: delivery works.")
     return self_chat
 
 
@@ -638,6 +641,7 @@ async def run_digest(
             summary += _health_warning() + _commitments_line(now=started)
             self_chat = await find_self_chat(client)
             await client.send_message(self_chat, header + summary)
+            record_outbound(self_chat, header + summary)
             result = DigestResult(
                 status="sent",
                 summary=summary,
@@ -720,34 +724,6 @@ class DigestTools:
             }
         )
 
-
-async def run_weekly_plan(
-    client, calendar, store: DigestStore, brain, gmail_clients=None, memory=None
-) -> DigestResult:
-    """The week ahead, sent to his own chat on Sunday evening."""
-    from planner import make_plan
-
-    started = datetime.now()
-    try:
-        plan = await make_plan(
-            brain, "week", calendar, gmail_clients or [], memory, store
-        )
-        if not plan:
-            raise WhatsAppError("The weekly plan came back empty.")
-        text = f"The week ahead, from {started:%a %d %b}\n\n{plan}"
-        await client.send_message(await find_self_chat(client), text)
-        result = DigestResult(status="weekly", summary=text)
-    except WhatsAppNotPairedError:
-        result = DigestResult(
-            status="failed",
-            error="The digest's WhatsApp is not paired. Run: "
-            "uv run scripts/whatsapp_signin.py --digest",
-        )
-    except Exception as exc:
-        result = DigestResult(status="failed", error=str(exc)[:500])
-    store.record(started, result)
-    return result
-
     @function_tool()
     async def whatsapp_status(self, context: RunContext) -> dict[str, object]:
         """Whether WhatsApp automation is working, from the last self-check.
@@ -771,3 +747,33 @@ async def run_weekly_plan(
                 {"step": c["name"], "problem": c["detail"]} for c in broken
             ],
         }
+
+
+async def run_weekly_plan(
+    client, calendar, store: DigestStore, brain, gmail_clients=None, memory=None
+) -> DigestResult:
+    """The week ahead, sent to his own chat on Sunday evening."""
+    from planner import make_plan
+
+    started = datetime.now()
+    try:
+        plan = await make_plan(
+            brain, "week", calendar, gmail_clients or [], memory, store
+        )
+        if not plan:
+            raise WhatsAppError("The weekly plan came back empty.")
+        text = f"The week ahead, from {started:%a %d %b}\n\n{plan}"
+        self_chat = await find_self_chat(client)
+        await client.send_message(self_chat, text)
+        record_outbound(self_chat, text)
+        result = DigestResult(status="weekly", summary=text)
+    except WhatsAppNotPairedError:
+        result = DigestResult(
+            status="failed",
+            error="The digest's WhatsApp is not paired. Run: "
+            "uv run scripts/whatsapp_signin.py --digest",
+        )
+    except Exception as exc:
+        result = DigestResult(status="failed", error=str(exc)[:500])
+    store.record(started, result)
+    return result

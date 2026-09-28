@@ -114,3 +114,42 @@ async def test_refuses_harmful_request() -> None:
 
         # Ensures there are no function calls or other unexpected events
         result.expect.no_more_events()
+
+
+def test_assistant_construction_resolves_all_tools(monkeypatch, tmp_path) -> None:
+    """Regression: DigestTools.whatsapp_status was defined outside the class
+    (unreachable code inside run_weekly_plan), so Assistant() raised
+    AttributeError and the agent could never start. Every declared toolset
+    must resolve its tools when the assistant is built."""
+    import agent as agent_module
+    from digest import DigestTools
+    from planner import PlanTools
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    # The voice model needs a real API key and the browser a real Chromium;
+    # neither is what this test is about.
+    monkeypatch.setattr(agent_module, "voice_components", lambda: None)
+
+    class _DummyBrowser:
+        pass
+
+    assistant = agent_module.Assistant(browser=_DummyBrowser())
+    toolsets = [
+        assistant.browser_tools,
+        assistant.mac_tools,
+        assistant.file_tools,
+        assistant.gmail_tools,
+        assistant.approval_tools,
+        assistant.observation_tools,
+        assistant.memory_tools,
+        assistant.commitment_tools,
+        assistant.whatsapp_tools,
+        assistant.calendar_tools,
+    ]
+    for toolset in toolsets:
+        tools = toolset.tools
+        assert tools, f"{type(toolset).__name__} declares no tools"
+        assert all(tool is not None for tool in tools)
+    # Split-mode extras, wired in during construction above.
+    assert len(DigestTools().tools) == 4
+    assert PlanTools().tools
