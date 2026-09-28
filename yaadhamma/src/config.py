@@ -114,3 +114,24 @@ PLAN_WEB_RESEARCH = os.environ.get("YAADHAMMA_PLAN_WEB", "on").strip().lower() !
 # Monthly model-spend budget, USD. When the month-to-date estimate passes
 # this, the morning brief says so loudly — but calls are never blocked.
 MONTHLY_BUDGET_USD = float(os.environ.get("YAADHAMMA_MONTHLY_BUDGET_USD", "35"))
+
+
+# Wake word (v1 Stage 3): always-on local listening. Read fresh from the
+# environment on each call (not a module constant) so tests can reconfigure
+# it and the daemon can pick up .env.local changes on restart.
+def wake_settings() -> dict:
+    """Wake-word settings. Every key has a safe default; the whole thing is
+    optional and YAADHAMMA_WAKE=off disables it entirely."""
+    return {
+        "enabled": os.environ.get("YAADHAMMA_WAKE", "on").strip().lower() != "off",
+        "engine": os.environ.get("YAADHAMMA_WAKE_ENGINE", "openwakeword")
+        .strip()
+        .lower(),
+        "phrase": os.environ.get("YAADHAMMA_WAKE_PHRASE", "hey jarvis").strip().lower(),
+        "sensitivity": float(os.environ.get("YAADHAMMA_WAKE_SENSITIVITY", "0.5")),
+        "picovoice_key": os.environ.get("YAADHAMMA_PICOVOICE_KEY", "").strip(),
+        "keyword_path": os.environ.get("YAADHAMMA_WAKE_PPN", "").strip(),
+        "idle_timeout_s": float(os.environ.get("YAADHAMMA_WAKE_IDLE_TIMEOUT_S", "90")),
+        "shortcut": os.environ.get("YAADHAMMA_WAKE_SHORTCUT", "on").strip().lower()
+        != "off",
+    }

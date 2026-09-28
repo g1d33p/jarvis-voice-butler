@@ -19,9 +19,51 @@ space, and recent errors from the audit log. Read-only; changes nothing.
 
 - Voice agent: run `uv run src/agent.py` in a terminal (foreground, so
   approval prompts reach Jeevan).
+- Always-on daemon (wake word): `python scripts/daemon_control.py install`
+  starts her at login and now; `status` / `start` / `stop` / `uninstall`
+  control it. Logs land in `~/.yaadhamma/daemon.log`. The daemon only runs
+  the wake loop — scheduled jobs stay in their own launchd jobs, so a daemon
+  crash cannot stop the digests.
 - Scheduled jobs: installed with `uv run scripts/digest_schedule.py on`,
   removed with `... off`. They run headless via launchd; logs land in
   `~/.yaadhamma/logs/`.
+
+## Wake word
+
+Out of the box she listens for **"Hey Jarvis"** using openWakeWord —
+no account, no training. `YAADHAMMA_WAKE=off` in `.env.local` disables the
+whole always-on listener. `Option+Space` also starts a conversation
+(needs `pip install pynput`); 90 seconds of silence closes the session.
+
+### Custom wake phrase ("Hey Yaadhamma") via Picovoice Porcupine
+
+The custom phrase needs a trained `.ppn` model and a free Picovoice
+AccessKey. Steps, done once on the Mac:
+
+1. Create a free account at https://console.picovoice.ai/ and copy the
+   **AccessKey** from the dashboard.
+2. Open the **Porcupine** page in the console, choose **macOS** as the
+   platform, type the wake phrase exactly as `Hey Yaadhamma`, and train.
+   Download the resulting `hey-yaadhamma.ppn` file (keep it somewhere
+   permanent, e.g. `~/.yaadhamma/hey-yaadhamma.ppn` — the daemon reads it
+   on every start).
+3. Install the engine: `pip install pvporcupine sounddevice`.
+4. In `.env.local`, set:
+   ```
+   YAADHAMMA_WAKE_ENGINE=porcupine
+   YAADHAMMA_PICOVOICE_KEY=<the AccessKey from step 1>
+   YAADHAMMA_WAKE_PPN=/Users/jeevan/.yaadhamma/hey-yaadhamma.ppn
+   ```
+5. Restart the daemon: `python scripts/daemon_control.py stop`
+   then `python scripts/daemon_control.py start`.
+
+Switching back is config-only: set `YAADHAMMA_WAKE_ENGINE=openwakeword`
+and restart. No code changes either way.
+
+Microphone permission: if the daemon logs a microphone error, open
+System Settings > Privacy & Security > Microphone on the Mac, enable
+access for the app running the daemon, and restart it. Real microphone
+behaviour is unverified in the sandbox (see `docs/BUILD_REPORT.md`).
 
 ## Sign-in and pairing
 

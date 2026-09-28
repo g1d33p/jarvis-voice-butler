@@ -29,6 +29,35 @@ logger = logging.getLogger("yaadhamma.latency")
 
 DEFAULT_CSV = Path.home() / ".yaadhamma" / "voice_metrics.csv"
 
+# Where the voice session leaves a "he just spoke" heartbeat for the
+# always-on daemon (v1 Stage 3): the daemon closes the Gemini Live session
+# after 90 s without speech, and it cannot hear the mic while the agent
+# worker owns it. Monotonic seconds, same boot clock as the daemon.
+ACTIVITY_PATH = Path.home() / ".yaadhamma" / "voice-activity.json"
+
+
+def note_speech_activity(when: float | None = None) -> None:
+    """Record that the user just spoke. Never raises."""
+    import json
+    import time
+
+    try:
+        ACTIVITY_PATH.parent.mkdir(parents=True, exist_ok=True)
+        ACTIVITY_PATH.write_text(json.dumps({"monotonic": when or time.monotonic()}))
+    except Exception:
+        pass
+
+
+def last_speech_activity() -> float:
+    """Monotonic time of the last recorded speech, 0 when unknown."""
+    import json
+
+    try:
+        return float(json.loads(ACTIVITY_PATH.read_text()).get("monotonic", 0))
+    except Exception:
+        return 0.0
+
+
 # Gemini Live price per 1M tokens, derived from the published per-1K rates in
 # costs.LIVE_PRICE_PER_1K (checked 2026-09-28). One table, two views: costs.py
 # is the source of truth so the voice meter and the cost dashboard agree.
@@ -62,6 +91,9 @@ class VoiceMetrics:
 
     def on_user_state(self, event) -> None:
         """He stopped talking: start the clock."""
+        if event.new_state == "speaking":
+            # Heartbeat for the always-on daemon's 90 s silence timeout.
+            note_speech_activity()
         if event.old_state == "speaking" and event.new_state != "speaking":
             self._user_stopped_at = event.created_at - self.speech_end_offset_s
 
