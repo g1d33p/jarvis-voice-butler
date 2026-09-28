@@ -174,6 +174,12 @@ class CostStore:
         rows = self._rows_since(now.replace(day=1, hour=0, minute=0, second=0))
         return sum((cost or 0.0) for _, _, _, _, cost in rows)
 
+    def today_usd(self, now: datetime | None = None) -> float:
+        """Estimated spend since midnight. Powers the menu-bar item."""
+        now = now or datetime.now()
+        rows = self._rows_since(now.replace(hour=0, minute=0, second=0))
+        return sum((cost or 0.0) for _, _, _, _, cost in rows)
+
     def over_budget(self) -> tuple[bool, float, float]:
         """(exceeded, month_to_date_usd, budget_usd). Never raises."""
         try:

@@ -19,6 +19,7 @@ from __future__ import annotations
 import csv
 import logging
 import statistics
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -38,12 +39,27 @@ ACTIVITY_PATH = Path.home() / ".yaadhamma" / "voice-activity.json"
 
 def note_speech_activity(when: float | None = None) -> None:
     """Record that the user just spoke. Never raises."""
+    _merge_activity({"monotonic": when or time.monotonic()})
+
+
+def note_agent_speaking(speaking: bool) -> None:
+    """Record whether she is speaking (for the menu-bar icon). Never raises."""
+    _merge_activity({"agent_speaking": speaking})
+
+
+def _merge_activity(update: dict) -> None:
     import json
     import time
 
     try:
         ACTIVITY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        ACTIVITY_PATH.write_text(json.dumps({"monotonic": when or time.monotonic()}))
+        try:
+            data = json.loads(ACTIVITY_PATH.read_text())
+        except Exception:
+            data = {}
+        data.update(update)
+        data.setdefault("monotonic", time.monotonic())
+        ACTIVITY_PATH.write_text(json.dumps(data))
     except Exception:
         pass
 
@@ -56,6 +72,16 @@ def last_speech_activity() -> float:
         return float(json.loads(ACTIVITY_PATH.read_text()).get("monotonic", 0))
     except Exception:
         return 0.0
+
+
+def agent_is_speaking() -> bool:
+    """Whether the voice session last reported her speaking."""
+    import json
+
+    try:
+        return bool(json.loads(ACTIVITY_PATH.read_text()).get("agent_speaking"))
+    except Exception:
+        return False
 
 
 # Gemini Live price per 1M tokens, derived from the published per-1K rates in
@@ -99,6 +125,11 @@ class VoiceMetrics:
 
     def on_agent_state(self, event) -> None:
         """She started speaking: stop the clock."""
+        # Heartbeat for the menu-bar icon (speaking vs thinking).
+        if event.new_state == "speaking":
+            note_agent_speaking(True)
+        elif event.old_state == "speaking":
+            note_agent_speaking(False)
         if event.new_state != "speaking" or self._user_stopped_at is None:
             return
         if not self.timing_reliable:

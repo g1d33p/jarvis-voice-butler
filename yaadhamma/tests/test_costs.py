@@ -199,3 +199,22 @@ def test_budget_line_warns_only_when_over(monkeypatch) -> None:
     line = _budget_line()
     assert "over the" in line and "budget" in line
     assert "Nothing is blocked" in line
+
+
+def test_today_usd_counts_only_today(tmp_path) -> None:
+    from datetime import datetime, timedelta
+
+    store = CostStore(path=tmp_path / "c.db")
+    now = datetime.now()
+    # A row from yesterday: insert directly with an old timestamp.
+    import sqlite3
+
+    store.record("brain", "gemini-3.5-flash-lite", 1000, 1000)
+    with sqlite3.connect(store.path) as conn:
+        conn.execute(
+            "UPDATE model_calls SET ts = ?",
+            ((now - timedelta(days=1)).isoformat(),),
+        )
+    assert store.today_usd(now=now) == pytest.approx(0.0)
+    store.record("brain", "gemini-3.5-flash-lite", 1000, 1000)
+    assert store.today_usd(now=now) == pytest.approx(0.00280)

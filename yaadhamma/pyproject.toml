@@ -37,6 +37,9 @@ wake = [
     "numpy>=1.24",
     "pynput>=1.7.0",  # Option+Space shortcut
 ]
+ui = [
+    "rumps>=0.4.0",  # menu-bar item (pulls in pyobjc on macOS)
+]
 
 [tool.uv]
 # yarl 1.24.1 was published with only a cp310 wheel and no sdist, so it can't

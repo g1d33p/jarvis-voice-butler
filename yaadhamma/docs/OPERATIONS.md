@@ -65,6 +65,24 @@ System Settings > Privacy & Security > Microphone on the Mac, enable
 access for the app running the daemon, and restart it. Real microphone
 behaviour is unverified in the sandbox (see `docs/BUILD_REPORT.md`).
 
+## Menu-bar UI
+
+The daemon can show a menu-bar icon plus a small floating orb (dark
+near-black/violet-blue, draggable, remembers its position). Install the UI
+extra once: `pip install "yaadhamma[ui]"` (needs macOS; it pulls in rumps /
+PyObjC).
+
+- The icon mirrors her state: listening, thinking, speaking, muted, error.
+- Menu: Start/Stop listening · Mute · Pause background jobs · Today's cost ·
+  WhatsApp status · Open plans folder · Settings · Quit.
+- `YAADHAMMA_UI=off` in `.env.local` runs the daemon headless. If the UI
+  ever fails to start, the daemon logs a warning and keeps listening —
+  a UI failure can never take the voice loop down.
+- `YAADHAMMA_UI_CAPTIONS=on` shows the last utterance and reply as fading
+  text beneath the orb (off by default).
+- Rendering needs a real Mac and is unverified here; the state mapping and
+  menu actions are covered by `tests/test_ui.py`.
+
 ## Sign-in and pairing
 
 | Service | Script | Notes |

@@ -6,7 +6,6 @@ exercised here: real microphone behaviour is unverified
 """
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 
@@ -35,18 +34,24 @@ def test_wake_off_exits_quietly(daemon, monkeypatch, caplog) -> None:
     assert daemon.main() == 0
 
 
-def test_mute_file_missing_means_unmuted(daemon, monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(daemon, "control_path", lambda: str(tmp_path / "nope.json"))
-    assert daemon._read_muted() is False
+def test_control_file_missing_means_defaults(daemon, monkeypatch, tmp_path) -> None:
+    from ui_state import read_control
+
+    monkeypatch.setattr("ui_state.control_path", lambda: tmp_path / "nope.json")
+    assert daemon._read_control() == {"muted": False, "listening": True}
+    assert read_control() == {"muted": False, "listening": True}
 
 
-def test_mute_file_round_trip(daemon, monkeypatch, tmp_path) -> None:
+def test_control_file_round_trip(daemon, monkeypatch, tmp_path) -> None:
+    from ui_state import read_control, write_control
+
     path = tmp_path / "wake-control.json"
-    monkeypatch.setattr(daemon, "control_path", lambda: str(path))
-    path.write_text(json.dumps({"muted": True}))
-    assert daemon._read_muted() is True
-    path.write_text(json.dumps({"muted": False}))
-    assert daemon._read_muted() is False
+    monkeypatch.setattr("ui_state.control_path", lambda: path)
+    write_control(muted=True, listening=False)
+    assert daemon._read_control() == {"muted": True, "listening": False}
+    assert read_control()["muted"] is True
+    write_control(muted=False, listening=True)
+    assert daemon._read_control() == {"muted": False, "listening": True}
 
 
 def test_voice_worker_start_stop(daemon, monkeypatch) -> None:

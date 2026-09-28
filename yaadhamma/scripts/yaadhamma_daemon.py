@@ -15,7 +15,6 @@ Mute comes from the menu bar (stage 4), which writes
 
 from __future__ import annotations
 
-import json
 import logging
 import subprocess
 import sys
@@ -26,7 +25,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "src"))
 
 import config  # noqa: E402
-from latency import last_speech_activity, note_speech_activity  # noqa: E402
+from latency import note_speech_activity  # noqa: E402
 from wake import (  # noqa: E402
     MicrophonePermissionError,
     MicStream,
@@ -34,7 +33,6 @@ from wake import (  # noqa: E402
     WakeMachine,
     WakeState,
     build_detector,
-    control_path,
 )
 
 logging.basicConfig(
@@ -47,11 +45,11 @@ POLL_S = 0.2  # mic frame cadence
 CONTROL_POLL_S = 1.0  # mute-file cadence
 
 
-def _read_muted() -> bool:
-    try:
-        return bool(json.loads(Path(control_path()).read_text()).get("muted"))
-    except Exception:
-        return False
+def _read_control() -> dict:
+    """Mute/listen flags from the menu bar. Never raises."""
+    from ui_state import read_control
+
+    return read_control()
 
 
 class VoiceWorker:
@@ -169,43 +167,69 @@ def main() -> int:
 
     _install_shortcut(machine, settings["shortcut"])
 
-    # Stage 4 UI runs in this process when it exists; headless until then.
-    try:
-        import ui_daemon  # noqa: F401
+    from ui import run_with_optional_ui
+    from ui_state import UIController, map_wake_to_ui
 
-        log.info("menu-bar UI module present")
-    except ImportError:
-        log.info("no menu-bar UI module yet (stage 4); running headless")
+    controller = UIController()
+    mic_state = {"open": True}
 
+    def state_provider():
+        from latency import agent_is_speaking
+
+        return map_wake_to_ui(
+            machine.state.value,
+            mic_open=mic_state["open"],
+            agent_speaking=agent_is_speaking(),
+            user_speaking=False,
+        )
+
+    run_with_optional_ui(
+        lambda: _wake_loop(machine, detector, mic, worker, settings, mic_state),
+        controller,
+        state_provider,
+    )
+    return 0
+
+
+def _wake_loop(machine, detector, mic, worker, settings, mic_state) -> None:
+    """The always-on loop. Runs on the main thread headless, or on a
+    background thread when the menu-bar UI takes the main thread."""
+    from latency import last_speech_activity
+
+    mic_open = True
+    mic_state["open"] = True
     last_control_poll = 0.0
-    muted = False
+    control = _read_control()
     try:
         while True:
             now = time.monotonic()
             if now - last_control_poll >= CONTROL_POLL_S:
                 last_control_poll = now
-                want_muted = _read_muted()
-                if want_muted != muted:
-                    muted = want_muted
-                    if muted:
-                        log.info("muted from the menu bar: stopping detection")
-                        mic.stop()
-                        machine.on_mute()
-                    else:
-                        log.info("unmuted: resuming detection")
-                        machine.on_unmute()
-                        try:
-                            mic.start()
-                        except MicrophonePermissionError as exc:
-                            log.error("%s", exc)
-                            return 3
+                control = _read_control()
+                want_active = control["listening"] and not control["muted"]
+                if want_active and not mic_open:
+                    log.info("detection resumed")
+                    machine.on_unmute()
+                    try:
+                        mic.start()
+                    except MicrophonePermissionError as exc:
+                        log.error("%s", exc)
+                        return
+                    mic_open = True
+                    mic_state["open"] = True
+                elif not want_active and mic_open:
+                    log.info("detection stopped from the menu bar")
+                    mic.stop()
+                    machine.on_mute()
+                    mic_open = False
+                    mic_state["open"] = False
 
-            if machine.state is WakeState.IDLE:
+            if machine.state is WakeState.IDLE and mic_open:
                 try:
                     frame = mic.read()
                 except MicrophonePermissionError as exc:
                     log.error("%s", exc)
-                    return 3
+                    return
                 except Exception as exc:
                     log.warning("mic read failed: %s", exc)
                     time.sleep(1.0)
@@ -225,7 +249,7 @@ def main() -> int:
                 if not worker.running:
                     machine.tick(now + settings["idle_timeout_s"])
                 time.sleep(POLL_S)
-            else:  # MUTED
+            else:  # muted or listening stopped
                 time.sleep(CONTROL_POLL_S)
     except KeyboardInterrupt:
         log.info("daemon stopping")
@@ -233,7 +257,6 @@ def main() -> int:
         worker.stop()
         mic.stop()
         detector.close()
-    return 0
 
 
 if __name__ == "__main__":
