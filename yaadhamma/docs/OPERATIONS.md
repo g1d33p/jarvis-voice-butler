@@ -97,7 +97,7 @@ behaviour is unverified in the sandbox (see `docs/BUILD_REPORT.md`).
 
 The daemon can show a menu-bar icon plus a small floating orb (dark
 near-black/violet-blue, draggable, remembers its position). Install the UI
-extra once: `pip install "yaadhamma[ui]"` (needs macOS; it pulls in rumps /
+extra once: `uv sync --extra ui` from the project directory (needs macOS; it pulls in rumps /
 PyObjC).
 
 - The icon mirrors her state: listening, thinking, speaking, muted, error.
