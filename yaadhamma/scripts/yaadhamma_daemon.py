@@ -126,7 +126,13 @@ def _install_shortcut(machine: WakeMachine, enabled: bool):
         except Exception:
             pass
 
-    listener = keyboard.Listener(on_press=on_press, on_release=pressed.discard)
+    def on_release(key) -> None:
+        # A plain function on purpose: pynput inspects its callbacks with
+        # inspect.getfullargspec(), which rejects built-in methods such as
+        # set.discard with "TypeError: unsupported callable".
+        pressed.discard(key)
+
+    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.daemon = True
     listener.start()
     log.info("Option+Space shortcut armed")

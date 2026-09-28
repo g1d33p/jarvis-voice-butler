@@ -100,3 +100,59 @@ def test_daemon_control_rejects_non_macos(monkeypatch, capsys) -> None:
     assert module.main(["daemon_control.py", "install"]) == 1
     out = capsys.readouterr().out
     assert "macOS" in out
+
+
+def test_install_shortcut_callbacks_survive_pynput_inspection(
+    daemon, monkeypatch
+) -> None:
+    """pynput inspects listener callbacks with inspect.getfullargspec(),
+    which raises 'TypeError: unsupported callable' for built-in methods
+    (e.g. set.discard). The daemon must only pass plain Python functions."""
+    import inspect
+    import sys
+    import types
+
+    from wake import WakeMachine
+
+    created = {}
+
+    class FakeListener:
+        def __init__(self, on_press=None, on_release=None):
+            # Mirror the real pynput behaviour that crashed the daemon:
+            # _wrap() calls inspect.getfullargspec() on each callback.
+            for callback in (on_press, on_release):
+                if callback is not None:
+                    inspect.getfullargspec(callback)
+            created["on_press"] = on_press
+            created["on_release"] = on_release
+            self.daemon = False
+
+        def start(self):
+            created["started"] = True
+
+    keyboard = types.ModuleType("pynput.keyboard")
+    keyboard.Listener = FakeListener
+    keyboard.Key = types.SimpleNamespace(
+        alt="alt", alt_l="alt_l", alt_r="alt_r", space="space"
+    )
+    pynput = types.ModuleType("pynput")
+    pynput.keyboard = keyboard
+    monkeypatch.setitem(sys.modules, "pynput", pynput)
+    monkeypatch.setitem(sys.modules, "pynput.keyboard", keyboard)
+
+    machine = WakeMachine(
+        idle_timeout_s=90.0,
+        on_conversation_start=lambda: None,
+        on_conversation_end=lambda: None,
+    )
+    listener = daemon._install_shortcut(machine, True)
+    assert listener is not None
+    assert created["started"] is True
+
+    # The release callback actually releases the tracked key.
+    created["on_press"]("a")
+    created["on_release"]("a")
+
+
+def test_install_shortcut_disabled_returns_none(daemon) -> None:
+    assert daemon._install_shortcut(None, False) is None
