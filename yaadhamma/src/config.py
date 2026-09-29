@@ -139,14 +139,31 @@ PLAN_WEB_RESEARCH = os.environ.get("YAADHAMMA_PLAN_WEB", "on").strip().lower() !
 MONTHLY_BUDGET_USD = float(os.environ.get("YAADHAMMA_MONTHLY_BUDGET_USD", "35"))
 
 
+# Push-to-talk (v2 Stage 1): hold a key to talk instead of the wake word.
+# Read fresh from the environment on each call so tests can reconfigure it.
+def ptt_settings() -> dict:
+    """Push-to-talk settings. Every key has a safe default; the whole thing
+    is optional and YAADHAMMA_PTT=off disables it entirely."""
+    return {
+        "enabled": os.environ.get("YAADHAMMA_PTT", "on").strip().lower() != "off",
+        "key": os.environ.get("YAADHAMMA_PTT_KEY", "cmd_r").strip().lower(),
+        "hold_ms": int(os.environ.get("YAADHAMMA_PTT_HOLD_MS", "200")),
+        "idle_timeout_s": float(os.environ.get("YAADHAMMA_IDLE_TIMEOUT_S", "20")),
+    }
+
+
 # Wake word (v1 Stage 3): always-on local listening. Read fresh from the
 # environment on each call (not a module constant) so tests can reconfigure
 # it and the daemon can pick up .env.local changes on restart.
 def wake_settings() -> dict:
     """Wake-word settings. Every key has a safe default; the whole thing is
-    optional and YAADHAMMA_WAKE=off disables it entirely."""
+    optional and YAADHAMMA_WAKE=off disables it entirely.
+
+    v2: the wake word is OFF by default (push-to-talk is the primary input),
+    and the idle timeout is the shared YAADHAMMA_IDLE_TIMEOUT_S (20 s, was
+    the wake-specific YAADHAMMA_WAKE_IDLE_TIMEOUT_S at 90 s)."""
     return {
-        "enabled": os.environ.get("YAADHAMMA_WAKE", "on").strip().lower() != "off",
+        "enabled": os.environ.get("YAADHAMMA_WAKE", "off").strip().lower() != "off",
         "engine": os.environ.get("YAADHAMMA_WAKE_ENGINE", "openwakeword")
         .strip()
         .lower(),
@@ -154,7 +171,7 @@ def wake_settings() -> dict:
         "sensitivity": float(os.environ.get("YAADHAMMA_WAKE_SENSITIVITY", "0.5")),
         "picovoice_key": os.environ.get("YAADHAMMA_PICOVOICE_KEY", "").strip(),
         "keyword_path": os.environ.get("YAADHAMMA_WAKE_PPN", "").strip(),
-        "idle_timeout_s": float(os.environ.get("YAADHAMMA_WAKE_IDLE_TIMEOUT_S", "90")),
+        "idle_timeout_s": float(os.environ.get("YAADHAMMA_IDLE_TIMEOUT_S", "20")),
         "shortcut": os.environ.get("YAADHAMMA_WAKE_SHORTCUT", "on").strip().lower()
         != "off",
     }

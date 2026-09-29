@@ -387,6 +387,12 @@ class WakeMachine:
             self._close_conversation()
         self.state = WakeState.MUTED
 
+    def on_session_closed(self) -> None:
+        """The session was closed by something else (the push-to-talk idle
+        timeout): back to idle so the next wake word is heard. Only acts
+        when a conversation is actually open."""
+        self._close_conversation()
+
     def on_unmute(self) -> None:
         if self.state is WakeState.MUTED:
             self.state = WakeState.IDLE

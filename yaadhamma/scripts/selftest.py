@@ -39,7 +39,13 @@ def _config():
     assert config.TIDY_MODE in ("apply", "propose"), config.TIDY_MODE
     assert config.email_tidy_settings()["mode"] in ("apply", "propose")
     assert config.MONTHLY_BUDGET_USD > 0
-    assert config.wake_settings()["idle_timeout_s"] == 90
+    assert config.wake_settings()["idle_timeout_s"] == 20
+    assert config.ptt_settings() == {
+        "enabled": True,
+        "key": "cmd_r",
+        "hold_ms": 200,
+        "idle_timeout_s": 20.0,
+    }
     assert config.remote_settings()["self_chats"] == [
         "19408438446",
         "919640520634",
@@ -478,6 +484,57 @@ def _wake_config():
             "pointing at the trained .ppn file"
         )
     return f"engine={settings['engine']}, phrase={settings['phrase']!r}"
+
+
+@check("push-to-talk key resolves and hold detection works")
+def _ptt_config():
+    # Stage 1: right Command by default, a tap does nothing, the fn key is
+    # honestly refused. Runs against a stand-in key enum and a fake timer so
+    # the check needs neither pynput nor macOS.
+    from types import SimpleNamespace
+
+    import config
+    from hotkey import HotkeyConfigError, HotkeyState, resolve_key
+
+    settings = config.ptt_settings()
+    assert settings["enabled"], "push-to-talk is disabled (YAADHAMMA_PTT=off)"
+
+    class FakeKeys:
+        cmd_r = "cmd_r"
+        alt_r = "alt_r"
+        ctrl_r = "ctrl_r"
+
+    resolve_key(settings["key"], key_enum=FakeKeys)
+    try:
+        resolve_key("fn", key_enum=FakeKeys)
+    except HotkeyConfigError:
+        pass
+    else:
+        raise AssertionError("the fn key must not resolve — it is unsupported")
+
+    fired: list[str] = []
+    timers: list = []
+
+    def fake_timer(delay, callback):
+        return SimpleNamespace(
+            start=lambda: timers.append(callback), cancel=lambda: None
+        )
+
+    state = HotkeyState(
+        hold_ms=settings["hold_ms"],
+        on_press_start=lambda: fired.append("press"),
+        on_release=lambda: fired.append("release"),
+        timer_factory=fake_timer,
+    )
+    state.key_down()
+    state.key_up()  # a tap: nothing may fire
+    assert fired == [], f"a tap must do nothing, got {fired}"
+    state.key_down()
+    for callback in timers:  # the hold threshold elapses while held
+        callback()
+    state.key_up()
+    assert fired == ["press", "release"], f"hold/release mismatch: {fired}"
+    return f"key={settings['key']}, hold={settings['hold_ms']} ms, tap-safe"
 
 
 @check("voice tools build Gemini schemas")

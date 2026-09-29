@@ -152,3 +152,42 @@ async def test_voice_cost_recording_never_breaks_shutdown(
     await m.write_summary()  # must not raise
 
     assert (tmp_path / "m.csv").exists()
+
+
+# ------------------------------------- task activity (v2 Stage 1, PTT idle)
+
+
+def test_task_activity_defaults_to_not_running(monkeypatch, tmp_path) -> None:
+    import latency
+
+    monkeypatch.setattr(latency, "ACTIVITY_PATH", tmp_path / "voice-activity.json")
+    assert latency.task_is_running() is False
+
+
+def test_task_activity_round_trip(monkeypatch, tmp_path) -> None:
+    import latency
+
+    monkeypatch.setattr(latency, "ACTIVITY_PATH", tmp_path / "voice-activity.json")
+    latency.note_task_running(True)
+    assert latency.task_is_running() is True
+    latency.note_task_running(False)
+    assert latency.task_is_running() is False
+
+
+def test_stale_task_activity_does_not_pin_the_session(monkeypatch, tmp_path) -> None:
+    import json
+    import time
+
+    import latency
+
+    path = tmp_path / "voice-activity.json"
+    monkeypatch.setattr(latency, "ACTIVITY_PATH", path)
+    monkeypatch.setattr(
+        latency, "TASK_RUNNING_FRESH_S", 0.05
+    )  # shrink the freshness window
+    latency.note_task_running(True)
+    assert latency.task_is_running() is True
+    time.sleep(0.08)
+    assert latency.task_is_running() is False
+    # The file still says running: only its age decides.
+    assert json.loads(path.read_text())["task_running"] is True

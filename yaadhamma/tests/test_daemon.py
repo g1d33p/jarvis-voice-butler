@@ -29,12 +29,48 @@ def daemon():
     return _load_daemon()
 
 
-def test_wake_off_exits_quietly(daemon, monkeypatch, caplog, tmp_path) -> None:
+def test_both_modes_off_exits_quietly(daemon, monkeypatch, caplog, tmp_path) -> None:
     monkeypatch.setenv("YAADHAMMA_WAKE", "off")
+    monkeypatch.setenv("YAADHAMMA_PTT", "off")
     # main() records its version at startup; keep that out of the real home.
     monkeypatch.setattr(daemon, "DAEMON_INFO_PATH", tmp_path / "daemon-info.json")
     assert daemon.main() == 0
     assert (tmp_path / "daemon-info.json").exists()
+
+
+def test_ptt_mode_starts_when_wake_is_off(daemon, monkeypatch, tmp_path) -> None:
+    """v2 default: YAADHAMMA_WAKE is off, push-to-talk owns the session."""
+    import ui
+
+    monkeypatch.setenv("YAADHAMMA_WAKE", "off")
+    monkeypatch.delenv("YAADHAMMA_PTT", raising=False)  # default: on
+    monkeypatch.setattr(daemon, "DAEMON_INFO_PATH", tmp_path / "daemon-info.json")
+    monkeypatch.setattr(daemon, "_check_extras", lambda **kwargs: None)
+
+    calls = {}
+
+    class FakePTTListener:
+        def stop(self):
+            calls["listener_stopped"] = True
+
+    fake_listener = FakePTTListener()
+    monkeypatch.setattr(
+        daemon, "_start_ptt_listener", lambda controller, ptt: fake_listener
+    )
+    monkeypatch.setattr(daemon, "_install_ptt_shortcut", lambda controller: None)
+    monkeypatch.setattr(
+        daemon,
+        "_ptt_loop",
+        lambda controller, worker, listener: calls.update(
+            {"loop_ran": True, "listener": listener, "worker": worker}
+        ),
+    )
+    monkeypatch.setattr(ui, "run_with_optional_ui", lambda loop, *a: loop())
+
+    assert daemon.main() == 0
+    assert calls["loop_ran"] is True
+    assert calls["listener"] is fake_listener
+    assert isinstance(calls["worker"], daemon.VoiceWorker)
 
 
 def test_control_file_missing_means_defaults(daemon, monkeypatch, tmp_path) -> None:
@@ -517,3 +553,168 @@ def test_daemon_writes_info_at_start(daemon, monkeypatch, tmp_path) -> None:
     on_disk = json.loads((tmp_path / "daemon-info.json").read_text())
     assert on_disk["commit"] == info["commit"]
     assert on_disk["argv"] == info["argv"]
+
+
+# --------------------------------------------- push-to-talk session control
+
+
+class FakeSessionWorker:
+    """Stand-in for VoiceWorker: records session actions, no subprocesses."""
+
+    def __init__(self) -> None:
+        self.started = 0
+        self.stopped = 0
+        self.paused = 0
+        self.resumed = 0
+        self._running = False
+        self._busy = False
+
+    @property
+    def running(self) -> bool:
+        return self._running
+
+    @property
+    def busy(self) -> bool:
+        return self._busy
+
+    def start(self) -> bool:
+        self.started += 1
+        self._running = True
+        return True
+
+    def stop(self) -> None:
+        self.stopped += 1
+        self._running = False
+
+    def pause_listening(self) -> None:
+        self.paused += 1
+
+    def resume_listening(self) -> None:
+        self.resumed += 1
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture()
+def ptt(daemon):
+    clock = FakeClock()
+    worker = FakeSessionWorker()
+    controller = daemon.PTTController(worker=worker, idle_timeout_s=20.0, clock=clock)
+    return controller, worker, clock
+
+
+def test_ptt_press_starts_one_session(ptt) -> None:
+    controller, worker, _clock = ptt
+    controller.on_press_start()
+    controller.on_press_start()  # held through a repeat: still one worker
+    assert worker.started == 1
+    assert worker.running
+
+
+def test_ptt_release_pauses_mic_but_keeps_the_session(ptt) -> None:
+    controller, worker, _clock = ptt
+    controller.on_press_start()
+    controller.on_release()
+    assert worker.paused == 1
+    assert worker.stopped == 0
+    assert worker.running
+
+
+def test_ptt_second_hold_reopens_listening_in_the_same_session(ptt) -> None:
+    controller, worker, _clock = ptt
+    controller.on_press_start()
+    controller.on_release()
+    controller.on_press_start()  # no second worker
+    assert worker.started == 1
+    assert worker.resumed == 1
+    assert worker.running
+
+
+def test_ptt_idle_timeout_closes_the_session(ptt) -> None:
+    controller, worker, clock = ptt
+    controller.on_press_start()
+    clock.advance(19.9)
+    assert controller.tick(clock()) is False
+    clock.advance(0.2)
+    assert controller.tick(clock()) is True
+    assert worker.stopped == 1
+    assert not worker.running
+
+
+def test_ptt_busy_worker_delays_the_idle_close(ptt) -> None:
+    controller, worker, clock = ptt
+    controller.on_press_start()
+    worker._busy = True  # she is speaking or a task is running
+    clock.advance(60.0)
+    assert controller.tick(clock()) is False
+    assert worker.running
+    worker._busy = False  # finished: the next tick closes her down
+    assert controller.tick(clock()) is True
+    assert worker.stopped == 1
+
+
+def test_ptt_speech_resets_the_idle_timer(ptt) -> None:
+    controller, worker, clock = ptt
+    controller.on_press_start()
+    clock.advance(19.0)
+    controller.on_speech(clock())  # she hears or says something
+    clock.advance(19.0)
+    assert controller.tick(clock()) is False
+    assert worker.running
+
+
+def test_ptt_shortcut_toggles(ptt) -> None:
+    controller, worker, _clock = ptt
+    controller.on_shortcut()  # press: start
+    assert worker.started == 1
+    controller.on_shortcut()  # press again: stop
+    assert worker.stopped == 1
+
+
+def test_ptt_tick_with_no_session_is_quiet(ptt) -> None:
+    controller, _worker, clock = ptt
+    assert controller.tick(clock()) is False
+
+
+def test_voice_worker_mic_gate_writes_the_file(daemon, monkeypatch, tmp_path) -> None:
+    from hotkey import read_ptt_mic_enabled
+
+    class FakeProc:
+        def poll(self):
+            return None  # still running
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    worker = daemon.VoiceWorker(log_path=tmp_path / "voice-worker.log")
+    worker._proc = FakeProc()  # pretend a session is open; no subprocess started
+    worker.pause_listening()
+    assert read_ptt_mic_enabled() is False
+    worker.resume_listening()
+    assert read_ptt_mic_enabled() is True
+
+
+def test_voice_worker_busy_reads_speech_and_task_state(
+    daemon, monkeypatch, tmp_path
+) -> None:
+    import latency
+
+    monkeypatch.setattr(latency, "ACTIVITY_PATH", tmp_path / "voice-activity.json")
+    worker = daemon.VoiceWorker(log_path=tmp_path / "voice-worker.log")
+    assert worker.busy is False
+    latency.note_speech_activity()
+    assert worker.busy is False  # a heartbeat alone is not "busy"
+    latency.note_agent_speaking(True)
+    assert worker.busy is True
+    latency.note_agent_speaking(False)
+    latency.note_task_running(True)
+    assert worker.busy is True
+    latency.note_task_running(False)
+    assert worker.busy is False

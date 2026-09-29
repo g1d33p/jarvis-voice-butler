@@ -24,7 +24,7 @@ from commitment_tools import CommitmentTools
 from digest import DigestTools
 from file_tools import FileTools
 from gmail_tools import GmailTools
-from latency import VoiceMetrics
+from latency import VoiceMetrics, note_task_running
 from mac_tools import MacTools
 from memory_tools import MemoryTools
 from observation import ObservationTools
@@ -171,9 +171,12 @@ class Assistant(Agent):
                 registry=ActionRegistry(*toolsets), store=TaskStore()
             )
             instructions = VOICE_INSTRUCTIONS
+            # note_task_running lets the daemon see background work, so the
+            # push-to-talk idle timeout never closes a session mid-task.
+            task_tools = TaskTools(self.orchestrator, activity_hook=note_task_running)
             tools = [
                 *voice_tools(*toolsets),
-                *TaskTools(self.orchestrator).tools,
+                *task_tools.tools,
                 *DigestTools().tools,
                 *PlanTools().tools,
             ]
@@ -188,6 +191,48 @@ class Assistant(Agent):
 
 
 server = AgentServer()
+
+
+def _start_ptt_mic_watcher(ctx: JobContext) -> None:
+    """Push-to-talk mic gate, worker side (v2 Stage 1).
+
+    The daemon writes ~/.yaadhamma/ptt-mic.json on key release (mic off) and
+    key press (mic on); this thread applies it to the console's microphone
+    input. Release stops the mic, never the session: a task in flight runs
+    to completion and she speaks the answer. Polling (not signals) because
+    the daemon's subprocess handle is the `uv run` parent, not this Python
+    process. Never raises; a missing file means "mic on".
+    """
+    import threading
+
+    from hotkey import read_ptt_mic_enabled
+
+    stop = threading.Event()
+
+    def _watch() -> None:
+        last: bool | None = None
+        while not stop.wait(0.15):
+            try:
+                enabled = read_ptt_mic_enabled()
+            except Exception:
+                continue
+            if enabled == last:
+                continue
+            last = enabled
+            try:
+                from livekit.agents.cli.cli import AgentsConsole
+
+                AgentsConsole.get_instance().set_microphone_enabled(enabled)
+                logger.info(
+                    "push-to-talk: microphone input %s",
+                    "resumed" if enabled else "paused",
+                )
+            except Exception:
+                logger.warning("push-to-talk mic gate failed", exc_info=True)
+
+    thread = threading.Thread(target=_watch, name="ptt-mic-watcher", daemon=True)
+    thread.start()
+    ctx.add_shutdown_callback(stop.set)
 
 
 @server.rtc_session(agent_name="yaadhamma")
@@ -227,6 +272,11 @@ async def my_agent(ctx: JobContext):
     session.on("agent_state_changed", metrics.on_agent_state)
     session.on("metrics_collected", metrics.on_metrics)
     ctx.add_shutdown_callback(metrics.write_summary)
+
+    # Push-to-talk (v2 Stage 1): the daemon gates the mic through
+    # ~/.yaadhamma/ptt-mic.json. Started for every session; harmless when the
+    # daemon never writes the file (wake-word mode: always mic-on).
+    _start_ptt_mic_watcher(ctx)
 
     # Start the session, which initializes the voice pipeline and warms up the models
     await session.start(

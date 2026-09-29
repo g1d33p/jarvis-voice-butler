@@ -262,3 +262,28 @@ def test_mic_error_generic_case_keeps_standard_help() -> None:
     text = str(err)
     assert "System Settings" in text
     assert "foreground" not in text
+
+
+# ------------------------------------- push-to-talk session close (v2 Stage 1)
+
+
+def test_session_closed_returns_to_idle(machine, events) -> None:
+    machine.on_wake_word(100.0)
+    assert machine.state is WakeState.CONVERSATION
+    machine.on_session_closed()
+    assert machine.state is WakeState.IDLE
+    assert events == ["start", "end"]
+
+
+def test_session_closed_while_idle_is_a_noop(machine, events) -> None:
+    machine.on_session_closed()
+    assert machine.state is WakeState.IDLE
+    assert events == []
+
+
+def test_wake_word_opens_again_after_session_closed(machine, events) -> None:
+    machine.on_wake_word(100.0)
+    machine.on_session_closed()
+    machine.on_wake_word(200.0)
+    assert machine.state is WakeState.CONVERSATION
+    assert events == ["start", "end", "start"]

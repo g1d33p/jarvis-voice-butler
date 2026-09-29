@@ -15,6 +15,7 @@ chat messages and function tools (see meta_client.py).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -248,10 +249,25 @@ def _shrink_old_results(messages: list[dict]) -> None:
 
 
 class TaskTools:
-    """Voice tools for handing multi-step work to the orchestrator."""
+    """Voice tools for handing multi-step work to the orchestrator.
 
-    def __init__(self, orchestrator: Orchestrator) -> None:
+    activity_hook, when given, is called with True when a task starts and
+    False when it ends (or fails): the voice worker passes
+    latency.note_task_running so the daemon's idle timeout never closes a
+    session mid-task. Phone commands leave it unset.
+    """
+
+    def __init__(
+        self,
+        orchestrator: Orchestrator,
+        activity_hook: Callable[[bool], None] | None = None,
+    ) -> None:
         self.orchestrator = orchestrator
+        self._activity_hook = activity_hook
+        # Generation counter: with "newest wins" cancellation the cancelled
+        # task's finally can run after the replacement's started() call, so
+        # only the newest task may clear the flag.
+        self._activity_gen = 0
 
     @property
     def tools(self) -> list:
@@ -263,6 +279,18 @@ class TaskTools:
         if not hasattr(self, "_job_set"):
             self._job_set: set = set()
         return self._job_set
+
+    def _task_started(self) -> int:
+        self._activity_gen += 1
+        if self._activity_hook is not None:
+            with contextlib.suppress(Exception):
+                self._activity_hook(True)
+        return self._activity_gen
+
+    def _task_finished(self, gen: int) -> None:
+        if self._activity_hook is not None and gen == self._activity_gen:
+            with contextlib.suppress(Exception):
+                self._activity_hook(False)
 
     @function_tool()
     async def run_task(self, context: RunContext, goal: str) -> dict[str, object]:
@@ -282,6 +310,7 @@ class TaskTools:
         for job in list(self._jobs):
             if not job.done():
                 job.cancel()
+        gen = self._task_started()
         job = asyncio.ensure_future(self.orchestrator.start(goal, context))
         self._jobs.add(job)
         job.add_done_callback(self._jobs.discard)
@@ -301,6 +330,8 @@ class TaskTools:
                 }
             job.cancel()
             raise
+        finally:
+            self._task_finished(gen)
         return task.summary()
 
     @function_tool()
@@ -313,6 +344,7 @@ class TaskTools:
             task_id: The task_id from run_task.
             user_reply: The user's exact reply to the question.
         """
+        gen = self._task_started()
         try:
             task = await asyncio.wait_for(
                 self.orchestrator.resume(task_id, user_reply, context),
@@ -322,6 +354,8 @@ class TaskTools:
             raise ToolError(str(exc)) from exc
         except TimeoutError as exc:
             raise ToolError("The task took too long and was stopped.") from exc
+        finally:
+            self._task_finished(gen)
         return task.summary()
 
     @function_tool()

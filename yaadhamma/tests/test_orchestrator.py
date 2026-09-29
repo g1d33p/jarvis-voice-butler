@@ -440,3 +440,75 @@ async def test_end_to_end_composed_message_asks_then_sends(chat_page, tmp_path) 
 
     assert task.state == "completed"
     assert task.steps[-1].action == "approve_pending_action" and task.steps[-1].ok
+
+
+# --------------------------------- task activity hook (v2 Stage 1, PTT idle)
+
+
+async def test_task_tools_report_task_activity(tmp_path) -> None:
+    orchestrator, _ = make(FakeModel(turn(text="All done.")), tmp_path)
+
+    seen: list[bool] = []
+    tools = TaskTools(orchestrator, activity_hook=seen.append)
+    await tools.run_task(None, "do a thing")
+
+    assert seen == [True, False]
+
+
+async def test_task_tools_report_activity_when_the_task_fails(tmp_path) -> None:
+    async def boom(*_args, **_kwargs):
+        raise RuntimeError("kaboom")
+
+    orchestrator, _ = make(FakeModel(turn(text="All done.")), tmp_path)
+    orchestrator.start = boom  # type: ignore[method-assign]
+
+    seen: list[bool] = []
+    tools = TaskTools(orchestrator, activity_hook=seen.append)
+    with pytest.raises(RuntimeError, match="kaboom"):
+        await tools.run_task(None, "do a thing")
+
+    assert seen == [True, False]
+
+
+async def test_task_tools_without_hook_still_work(tmp_path) -> None:
+    orchestrator, _ = make(FakeModel(turn(text="All done.")), tmp_path)
+
+    summary = await TaskTools(orchestrator).run_task(None, "do a thing")
+
+    assert summary["status"] == "completed"
+
+
+async def test_task_tools_cancelled_task_does_not_clear_newer_activity(
+    tmp_path,
+) -> None:
+    """Newest-wins: when a second run_task cancels the first, the cancelled
+    task's finally must not clear the activity flag the replacement set."""
+    import asyncio
+
+    orchestrator, _ = make(FakeModel(turn(text="All done.")), tmp_path)
+
+    seen: list[bool] = []
+    tools = TaskTools(orchestrator, activity_hook=seen.append)
+
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def slow_start(*_args, **_kwargs):
+        started.set()
+        await release.wait()
+        return SimpleNamespace(state="completed", summary=lambda: {"ok": True})
+
+    orchestrator.start = slow_start  # type: ignore[method-assign]
+    first = asyncio.ensure_future(tools.run_task(None, "first"))
+    await started.wait()
+    release.set()
+
+    async def quick_start(*_args, **_kwargs):
+        return SimpleNamespace(state="completed", summary=lambda: {"ok": True})
+
+    orchestrator.start = quick_start  # type: ignore[method-assign]
+    await tools.run_task(None, "second")
+    await first
+
+    # True (first), True (second), False (only the newest clears).
+    assert seen == [True, True, False]

@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
-"""Yaadhamma always-on daemon: the wake-word loop.
+"""Yaadhamma always-on daemon: push-to-talk and the wake-word loop.
 
-Started by launchd at login (see scripts/daemon_control.py). She listens
-locally for the wake word; nothing leaves the Mac while idle. A wake (or
-Option+Space) starts the voice worker as a subprocess; 90 s without speech
-stops it and returns to idle.
+Started by launchd at login (see scripts/daemon_control.py). Two input
+modes (v2 Stage 1), chosen by settings:
+
+- push-to-talk (the default, YAADHAMMA_PTT=on): hold the key (right Command
+  by default; a tap under 200 ms does nothing) to talk, release and she
+  answers. Release only pauses the worker's microphone; the session and any
+  task in flight keep running. A second hold rejoins the same session. The
+  session closes after YAADHAMMA_IDLE_TIMEOUT_S (20 s) without input, unless
+  she is speaking or a task is running.
+- wake word (YAADHAMMA_WAKE=on, off by default): she listens locally;
+  nothing leaves the Mac while idle. A wake starts the voice worker as a
+  subprocess; the same idle timeout closes the session.
+
+Option+Space always toggles her (press to start, press to stop).
 
 The daemon NEVER runs scheduled jobs (digests, learning, briefs): those stay
 in their own launchd jobs, so a daemon crash cannot stop them.
@@ -268,6 +278,45 @@ class VoiceWorker:
             log.warning("voice worker would not stop; killing it")
             proc.kill()
 
+    def pause_listening(self) -> None:
+        """Push-to-talk release: ask the worker to stop mic input, without
+        touching the session. The worker polls ~/.yaadhamma/ptt-mic.json (a
+        file, not a signal: this handle is the `uv run` parent, not the
+        Python worker). Never raises."""
+        if not self.running:
+            return
+        try:
+            from hotkey import set_ptt_mic_enabled
+
+            set_ptt_mic_enabled(False)
+            log.info("push-to-talk: released — mic input paused, session continues")
+        except Exception as exc:
+            log.warning("push-to-talk: could not pause mic input: %s", exc)
+
+    def resume_listening(self) -> None:
+        """Push-to-talk press while a session is open: mic input back on in
+        the same session. Never raises."""
+        if not self.running:
+            return
+        try:
+            from hotkey import set_ptt_mic_enabled
+
+            set_ptt_mic_enabled(True)
+            log.info("push-to-talk: pressed — mic input resumed in open session")
+        except Exception as exc:
+            log.warning("push-to-talk: could not resume mic input: %s", exc)
+
+    @property
+    def busy(self) -> bool:
+        """True while she is speaking or a background task is running: the
+        idle timeout must not close the session then. Never raises."""
+        try:
+            from latency import agent_is_speaking, task_is_running
+
+            return agent_is_speaking() or task_is_running()
+        except Exception:
+            return False
+
 
 def _which(name: str) -> str | None:
     import shutil
@@ -275,19 +324,94 @@ def _which(name: str) -> str | None:
     return shutil.which(name)
 
 
+class PTTController:
+    """Own the voice session for push-to-talk (v2 Stage 1).
+
+    Pure logic: the worker is injected and time comes from the injected
+    clock, so tests drive it without subprocesses or real time. The daemon
+    wires the hotkey's on_press_start/on_release here and calls tick() from
+    its loop.
+
+    Press (hold confirmed) opens a session, or rejoins an open one. Release
+    only pauses mic input — the worker keeps running, finishes any task in
+    flight, and speaks the answer. The idle timeout closes the session, but
+    a busy worker (she is speaking or a task runs) delays the close; it is
+    checked again on the next tick.
+    """
+
+    def __init__(self, *, worker, idle_timeout_s: float, clock=time.monotonic) -> None:
+        self._worker = worker
+        self._idle_timeout_s = idle_timeout_s
+        self._clock = clock
+        self._last_input_at = 0.0
+
+    @property
+    def idle_timeout_s(self) -> float:
+        return self._idle_timeout_s
+
+    def on_press_start(self) -> None:
+        """The hold threshold was met: open a session, or rejoin an open one."""
+        now = self._clock()
+        if self._worker.running:
+            self._worker.resume_listening()
+        else:
+            self._worker.start()
+        self._last_input_at = now
+
+    def on_release(self) -> None:
+        """Key released: pause mic input, keep the session (and its task) alive."""
+        now = self._clock()
+        if self._worker.running:
+            self._worker.pause_listening()
+        self._last_input_at = now
+
+    def on_shortcut(self) -> None:
+        """Option+Space toggle: press to start, press again to stop."""
+        if self._worker.running:
+            self._worker.stop()
+        else:
+            self._worker.start()
+        self._last_input_at = self._clock()
+
+    def on_speech(self, at: float) -> None:
+        """Speech activity observed (or a wake word opened a session): keep
+        the session alive."""
+        if at > self._last_input_at:
+            self._last_input_at = at
+
+    def tick(self, now: float) -> bool:
+        """Periodic check. True when an idle session just closed."""
+        if not self._worker.running:
+            return False
+        if now - self._last_input_at < self._idle_timeout_s:
+            return False
+        if self._worker.busy:
+            # She is speaking or a task is still running: wait, and try the
+            # close again on the next tick.
+            return False
+        self._worker.stop()
+        return True
+
+
 # The daemon is launched with `uv run --extra wake --extra ui`, but a stray
 # `uv sync` without extras silently uninstalls these afterwards. The wake
 # packages are mandatory (no detector/mic without them); the UI degrades to
 # headless, so it only warns.
 _WAKE_PACKAGES = ("openwakeword", "sounddevice", "numpy")
+_PTT_PACKAGES = ("pynput",)
 _UI_PACKAGES = ("rumps",)
 
 
-def _check_extras() -> int | None:
+def _check_extras(*, need_wake: bool = True, need_ptt: bool = False) -> int | None:
     """First-run guard: fail fast with the exact reinstall command instead
-    of dying later on an ImportError. Returns an exit code, or None when
-    everything the daemon needs is importable."""
-    missing_wake = [p for p in _WAKE_PACKAGES if importlib.util.find_spec(p) is None]
+    of dying later on an ImportError. Only the enabled modes are checked.
+    Returns an exit code, or None when everything needed is importable."""
+    missing_wake = [
+        p for p in _WAKE_PACKAGES if need_wake and importlib.util.find_spec(p) is None
+    ]
+    missing_ptt = [
+        p for p in _PTT_PACKAGES if need_ptt and importlib.util.find_spec(p) is None
+    ]
     missing_ui = [p for p in _UI_PACKAGES if importlib.util.find_spec(p) is None]
     if missing_ui:
         log.warning(
@@ -296,13 +420,14 @@ def _check_extras() -> int | None:
             ", ".join(missing_ui),
             PROJECT,
         )
-    if not missing_wake:
+    missing = missing_wake + missing_ptt
+    if not missing:
         return None
     log.error(
-        "cannot start: wake-word packages missing (%s) — a 'uv sync' without "
-        "extras probably uninstalled them. Reinstall with: cd %s && "
+        "cannot start: packages missing (%s) — a 'uv sync' without extras "
+        "probably uninstalled them. Reinstall with: cd %s && "
         "uv sync --extra wake --extra ui",
-        ", ".join(missing_wake),
+        ", ".join(missing),
         PROJECT,
     )
     return 4
@@ -349,6 +474,70 @@ def _install_shortcut(machine: WakeMachine, enabled: bool):
     return listener
 
 
+def _install_ptt_shortcut(controller: PTTController):
+    """Option+Space -> controller.on_shortcut (toggle). Warns and continues
+    without it, like the wake-word shortcut."""
+    try:
+        from pynput import keyboard
+    except ImportError:
+        log.warning(
+            "pynput is not installed, so Option+Space will not toggle her. "
+            "Install it with: pip install pynput."
+        )
+        return None
+
+    pressed: set = set()
+
+    def on_press(key) -> None:
+        pressed.add(key)
+        try:
+            alt_held = (
+                keyboard.Key.alt in pressed
+                or keyboard.Key.alt_l in pressed
+                or keyboard.Key.alt_r in pressed
+            )
+            if key == keyboard.Key.space and alt_held:
+                controller.on_shortcut()
+        except Exception:
+            pass
+
+    def on_release(key) -> None:
+        # A plain function on purpose: pynput inspects its callbacks with
+        # inspect.getfullargspec(), which rejects built-in methods such as
+        # set.discard with "TypeError: unsupported callable".
+        pressed.discard(key)
+
+    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+    listener.daemon = True
+    listener.start()
+    log.info("Option+Space toggle armed (push-to-talk mode)")
+    return listener
+
+
+def _start_ptt_listener(controller: PTTController, ptt: dict):
+    """Arm the push-to-talk key. Returns the listener, or None when the key
+    cannot be used (already logged)."""
+    from hotkey import HotkeyConfigError, HotkeyListener
+
+    try:
+        listener = HotkeyListener(
+            key_name=ptt["key"],
+            hold_ms=ptt["hold_ms"],
+            on_press_start=controller.on_press_start,
+            on_release=controller.on_release,
+        )
+        listener.start()
+    except HotkeyConfigError as exc:
+        log.error("push-to-talk disabled: %s", exc)
+        return None
+    log.info(
+        "push-to-talk armed: hold %s (tap under %d ms does nothing)",
+        ptt["key"],
+        ptt["hold_ms"],
+    )
+    return listener
+
+
 def main() -> int:
     info = _write_daemon_info()
     log.info(
@@ -356,14 +545,31 @@ def main() -> int:
         info["commit"],
         " ".join(info["argv"]),
     )
-    settings = config.wake_settings()
-    if not settings["enabled"]:
-        log.info("wake word disabled (YAADHAMMA_WAKE=off); daemon exits")
+    ptt = config.ptt_settings()
+    wake = config.wake_settings()
+    if not ptt["enabled"] and not wake["enabled"]:
+        log.info("push-to-talk and wake word both disabled; daemon exits")
         return 0
 
-    if (code := _check_extras()) is not None:
+    if (
+        code := _check_extras(need_wake=wake["enabled"], need_ptt=ptt["enabled"])
+    ) is not None:
         return code
 
+    worker = VoiceWorker()
+    ptt_controller = (
+        PTTController(worker=worker, idle_timeout_s=ptt["idle_timeout_s"])
+        if ptt["enabled"]
+        else None
+    )
+    if wake["enabled"]:
+        return _run_wake_mode(worker, ptt_controller, wake, ptt)
+    assert ptt_controller is not None  # enabled above
+    return _run_ptt_mode(worker, ptt_controller, ptt)
+
+
+def _run_wake_mode(worker: VoiceWorker, ptt_controller, wake: dict, ptt: dict) -> int:
+    """Wake-word mode, with the push-to-talk key optionally armed alongside."""
     try:
         detector = build_detector()
     except WakeConfigError as exc:
@@ -371,16 +577,15 @@ def main() -> int:
         return 2
     assert detector is not None  # enabled above
 
-    worker = VoiceWorker()
     machine = WakeMachine(
-        idle_timeout_s=settings["idle_timeout_s"],
+        idle_timeout_s=wake["idle_timeout_s"],
         on_conversation_start=worker.start,
         on_conversation_end=worker.stop,
     )
     log.info(
         "listening for %r (engine=%s). Nothing leaves the Mac while idle.",
         detector.phrase,
-        settings["engine"],
+        wake["engine"],
     )
 
     mic = MicStream()
@@ -390,7 +595,11 @@ def main() -> int:
         log.error("%s", exc)
         return 3
 
-    _install_shortcut(machine, settings["shortcut"])
+    if ptt_controller is not None:
+        _start_ptt_listener(ptt_controller, ptt)
+        _install_ptt_shortcut(ptt_controller)
+    else:
+        _install_shortcut(machine, wake["shortcut"])
 
     from ui import run_with_optional_ui
     from ui_state import UIController, map_wake_to_ui
@@ -409,14 +618,83 @@ def main() -> int:
         )
 
     run_with_optional_ui(
-        lambda: _wake_loop(machine, detector, mic, worker, settings, mic_state),
+        lambda: _wake_loop(
+            machine, detector, mic, worker, wake, mic_state, ptt_controller
+        ),
         controller,
         state_provider,
     )
     return 0
 
 
-def _wake_loop(machine, detector, mic, worker, settings, mic_state) -> None:
+def _run_ptt_mode(worker: VoiceWorker, ptt_controller: PTTController, ptt: dict) -> int:
+    """Push-to-talk mode: no wake-word detector, no always-on mic. The key
+    (and Option+Space) owns the session."""
+    listener = _start_ptt_listener(ptt_controller, ptt)
+    if listener is None:
+        return 4  # already logged
+    _install_ptt_shortcut(ptt_controller)
+
+    from ui import run_with_optional_ui
+    from ui_state import UIController, map_wake_to_ui
+
+    controller = UIController()
+
+    def state_provider():
+        from latency import agent_is_speaking
+
+        running = worker.running
+        return map_wake_to_ui(
+            "conversation" if running else "idle",
+            mic_open=running,
+            agent_speaking=agent_is_speaking(),
+            user_speaking=False,
+        )
+
+    run_with_optional_ui(
+        lambda: _ptt_loop(ptt_controller, worker, listener),
+        controller,
+        state_provider,
+    )
+    return 0
+
+
+def _ptt_loop(
+    controller: PTTController, worker: VoiceWorker, listener, poll_s: float = POLL_S
+) -> None:
+    """The push-to-talk loop: key events arrive on the listener thread; here
+    we feed speech heartbeats to the idle timer, close idle sessions, and
+    notice a worker that died on its own."""
+    from latency import last_speech_activity
+
+    try:
+        while True:
+            now = time.monotonic()
+            heard_at = last_speech_activity()
+            if heard_at:
+                controller.on_speech(heard_at)
+            if controller.tick(now):
+                log.info(
+                    "idle timeout (%ds without input): session closed",
+                    int(controller.idle_timeout_s),
+                )
+            # If the worker died on its own, say so loudly (a launch failure
+            # is logged with the worker's own output; repeated failures are
+            # suppressed, so a broken launch cannot spin on every keypress).
+            if not worker.running:
+                worker.note_exit()
+            time.sleep(poll_s)
+    except KeyboardInterrupt:
+        log.info("daemon stopping")
+    finally:
+        listener.stop()
+        worker.stop()
+        log.info("push-to-talk loop stopped")
+
+
+def _wake_loop(
+    machine, detector, mic, worker, settings, mic_state, ptt_controller=None
+) -> None:
     """The always-on loop. Runs on the main thread headless, or on a
     background thread when the menu-bar UI takes the main thread."""
     from latency import last_speech_activity
@@ -461,15 +739,32 @@ def _wake_loop(machine, detector, mic, worker, settings, mic_state) -> None:
                     continue
                 if detector.check(frame):
                     log.info("wake word heard")
-                    machine.on_wake_word(now)
+                    if machine.on_wake_word(now) and ptt_controller is not None:
+                        # A push-to-talk key holds the session open; a wake
+                        # word only starts it. Arm the PTT idle timer so the
+                        # session still closes without a hold.
+                        ptt_controller.on_speech(now)
             elif machine.state is WakeState.CONVERSATION:
                 # The agent worker owns the mic now; its speech heartbeats
                 # feed the silence timer.
                 heard_at = last_speech_activity()
                 if heard_at > machine.last_speech_at:
                     machine.on_speech(heard_at)
-                if machine.tick(now):
-                    log.info("90 s without speech: conversation closed")
+                    if ptt_controller is not None:
+                        ptt_controller.on_speech(heard_at)
+                if ptt_controller is not None:
+                    # Push-to-talk owns the idle timeout: it delays the
+                    # close while she is speaking or a task runs, and only
+                    # the PTT hold should reopen listening afterwards.
+                    if ptt_controller.tick(now):
+                        log.info(
+                            "idle timeout (%ds without input): session closed",
+                            int(ptt_controller.idle_timeout_s),
+                        )
+                        machine.on_session_closed()
+                else:
+                    if machine.tick(now) and not worker.busy:
+                        log.info("idle timeout: session closed")
                 # If the worker died on its own, go back to idle honestly.
                 # note_exit() logs a launch failure loudly (with the
                 # worker's own output) and suppresses further starts after

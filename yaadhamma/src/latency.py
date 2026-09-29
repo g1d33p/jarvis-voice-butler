@@ -84,6 +84,40 @@ def agent_is_speaking() -> bool:
         return False
 
 
+# How long a task_running=True flag counts as fresh. The flag is cleared in
+# a finally when the task ends; a stale True (worker crashed mid-task) must
+# not pin a future session open forever. Well above TASK_TIMEOUT_SECONDS.
+TASK_RUNNING_FRESH_S = 300.0
+
+
+def note_task_running(running: bool) -> None:
+    """Record whether the voice worker has a background task in flight, so
+    the daemon's idle timeout never closes a session mid-task. Never raises."""
+    import time
+
+    _merge_activity(
+        {"task_running": bool(running), "task_running_at": time.monotonic()}
+    )
+
+
+def task_is_running() -> bool:
+    """Whether the voice worker recently reported a task in flight."""
+    import json
+    import time
+
+    try:
+        data = json.loads(ACTIVITY_PATH.read_text())
+    except Exception:
+        return False
+    if not data.get("task_running"):
+        return False
+    try:
+        at = float(data.get("task_running_at", 0))
+    except (TypeError, ValueError):
+        return False
+    return time.monotonic() - at < TASK_RUNNING_FRESH_S
+
+
 # Gemini Live price per 1M tokens, derived from the published per-1K rates in
 # costs.LIVE_PRICE_PER_1K (checked 2026-09-28). One table, two views: costs.py
 # is the source of truth so the voice meter and the cost dashboard agree.
