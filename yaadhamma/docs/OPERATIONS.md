@@ -32,6 +32,18 @@ Do these once, in order. Each takes a couple of minutes.
 Microphone permission lives in System Settings > Privacy & Security >
 Microphone. Full per-service notes are below under "Sign-in and pairing".
 
+### Editing settings (.env.local)
+
+Always edit `.env.local` in a text editor (TextEdit, VS Code, `nano`) —
+never append with `echo ... >> .env.local`. If the file does not end with
+a newline, the appended text glues onto the last line and silently
+corrupts it: on 2026-09-29 two phone numbers fused into one 23-digit
+value, which only surfaced later as a confusing "no chat found" error.
+Keep one `KEY=value` per line and leave the trailing newline in place.
+`scripts/selftest.py` has a ".env.local parses sanely" check that catches
+glued lines, duplicate keys, and implausible values before a live run —
+run it after any settings change.
+
 ## Quick health check
 
 ```bash

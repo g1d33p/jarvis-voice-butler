@@ -47,6 +47,82 @@ def _config():
     return f"TIDY_MODE={config.TIDY_MODE}, budget=${config.MONTHLY_BUDGET_USD:g}"
 
 
+def env_file_problems(text: str) -> list[str]:
+    """Structural problems in a .env.local file's text.
+
+    Split out from the check below so tests can feed it synthetic files.
+    Catches the corruption that bit on 2026-09-29: a setting appended
+    (e.g. with echo) without a preceding newline glues two lines into one,
+    and dotenv silently keeps only the first KEY= — two phone numbers
+    became one 23-digit value that surfaced as "no chat found".
+    """
+    problems: list[str] = []
+    if text and not text.endswith("\n"):
+        problems.append(
+            "the file does not end with a newline — the next setting "
+            "appended to it will glue onto the last line and corrupt it"
+        )
+    key_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+    pair_re = re.compile(r"[A-Z_][A-Z0-9_]*=")
+    seen: dict[str, int] = {}
+    for lineno, raw_line in enumerate(text.splitlines(), 1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].lstrip()
+        m = key_re.match(line)
+        if not m:
+            problems.append(f"line {lineno} is not a KEY=value setting: {line[:60]!r}")
+            continue
+        key = m.group(0)[:-1]
+        value = line[m.end() :]
+        if key in seen:
+            problems.append(
+                f"line {lineno}: {key} is already set on line {seen[key]} — "
+                "the later value silently wins, so one of them is dead"
+            )
+        else:
+            seen[key] = lineno
+        # A second KEY= pair on the same line: the appended-setting glue.
+        # Only all-caps keys count, so lowercase tokens and base64 padding
+        # inside values are not flagged.
+        glued = pair_re.findall(value)
+        if glued:
+            problems.append(
+                f"line {lineno}: looks like two settings glued together "
+                f"({key}=... then {glued[0]}=...) — fix it in a text editor, "
+                "one setting per line"
+            )
+        if key.startswith("YAADHAMMA_"):
+            v = value.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+                v = v[1:-1]
+            # Comma-separated lists (e.g. YAADHAMMA_SELF_CHATS) are checked
+            # part by part; a >15-digit run in one part is the concatenation
+            # signature (E.164 numbers are at most 15 digits).
+            for part in v.split(","):
+                digits = "".join(ch for ch in part if ch.isdigit())
+                if len(digits) > 15:
+                    problems.append(
+                        f"line {lineno}: {key} has {len(digits)} digits in "
+                        "one value — implausible, probably two values "
+                        "concatenated by a missing newline"
+                    )
+                    break
+    return problems
+
+
+@check(".env.local parses sanely")
+def _env_local():
+    path = PROJECT / ".env.local"
+    if not path.exists():
+        return "no .env.local — defaults in use"
+    problems = env_file_problems(path.read_text())
+    assert not problems, "; ".join(problems)
+    return "no glued lines, no duplicate keys, no implausible values"
+
+
 @check("due-date parser")
 def _due_dates():
     from planner import parse_due_date

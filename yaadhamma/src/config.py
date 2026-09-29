@@ -75,11 +75,28 @@ WHATSAPP_WATCHLIST = [
     if part.strip()
 ]
 
+
 # His own "(You)" WhatsApp chat, found by its phone digits (the digest is
 # delivered there). Set YAADHAMMA_SELF_CHAT_NUMBER in .env.local.
-SELF_CHAT_NUMBER = "".join(
-    ch for ch in os.environ.get("YAADHAMMA_SELF_CHAT_NUMBER", "") if ch.isdigit()
-)
+def _self_chat_number() -> str:
+    """Phone digits for his own chat. Rejects implausible values loudly: the
+    classic .env.local corruption (a setting appended without a preceding
+    newline) glues two values into one over-long digit string, which used to
+    surface later as a confusing "no chat found" error."""
+    raw = os.environ.get("YAADHAMMA_SELF_CHAT_NUMBER", "")
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) > 15:  # E.164 phone numbers are at most 15 digits
+        raise ValueError(
+            f"YAADHAMMA_SELF_CHAT_NUMBER in .env.local has {len(digits)} "
+            f"digits ({digits}): a phone number is at most 15 digits. The "
+            "file was probably corrupted by appending a setting without a "
+            "preceding newline — edit .env.local in a text editor and fix "
+            "the value."
+        )
+    return digits
+
+
+SELF_CHAT_NUMBER = _self_chat_number()
 
 # Words that pull an email out of Gmail's Promotions/Social tabs into the
 # digest (job mail often lands there).
