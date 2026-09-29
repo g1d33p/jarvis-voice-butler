@@ -88,6 +88,11 @@ space, and recent errors from the audit log. Read-only; changes nothing.
    and/or `--extra ui`), or a bad value in `.env.local`.
 4. Reinstall after fixing: `python scripts/daemon_control.py uninstall`
    then `python scripts/daemon_control.py install`.
+5. `python scripts/daemon_control.py status` also reports whether the
+   running daemon matches the checked-out code: the daemon records its
+   git commit and launch arguments in `~/.yaadhamma/daemon-info.json` at
+   every start, and status says STALE when the checkout has moved on.
+   Restart the daemon after every `git pull`.
 
 ## Wake word
 
@@ -175,6 +180,10 @@ verification and audit.
 - Real WhatsApp reading/sending is unverified in the sandbox; the command
   parsing, chat allowlist, dedupe, approval round-trip and hours window are
   covered by `tests/test_remote.py`.
+- If the poll itself keeps failing the same way (3 times in a row), the
+  morning brief says so loudly and `uv run scripts/selftest.py` fails —
+  the tracebacks are in `~/.yaadhamma/remote.log`. A passing self-test
+  also proves the remote orchestrator actually constructs.
 
 ## Nightly tidy-ups (3 am)
 

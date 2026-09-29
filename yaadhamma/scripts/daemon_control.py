@@ -93,7 +93,69 @@ def status() -> int:
         print("Daemon is not loaded.")
         return 1
     print(result.stdout.strip())
+    print()
+    print(code_match_report(_daemon_info(), _checked_out_commit()))
     return 0
+
+
+def _daemon_info() -> dict | None:
+    """What the running daemon recorded about itself at startup."""
+    path = Path.home() / ".yaadhamma" / "daemon-info.json"
+    try:
+        import json
+
+        data = json.loads(path.read_text())
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _checked_out_commit() -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(PROJECT), "rev-parse", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip() or None
+
+
+def code_match_report(info: dict | None, head: str | None) -> str:
+    """Whether the running daemon matches the checked-out code.
+
+    Pure function (no launchd, no git) so tests can cover it. In 2026-09 a
+    daemon ran a day on pre-fix code with no visible clue; this is the
+    check that would have caught it.
+    """
+    if not info:
+        return (
+            "Code version: unknown — the running daemon never recorded its "
+            "version (it predates this check). Restart it to run the current "
+            "code: python scripts/daemon_control.py stop, then start."
+        )
+    running = info.get("commit") or "unknown"
+    lines = [
+        f"Running daemon: commit {running[:12]} (started {info.get('started', '?')})."
+    ]
+    if info.get("argv"):
+        lines.append(f"Launch args: {' '.join(info['argv'])}")
+    if not head:
+        lines.append("Could not determine the checked-out commit.")
+    elif running == "unknown":
+        lines.append(
+            "The running daemon could not determine its own commit; restart "
+            "it after pulling to be sure it runs the latest code."
+        )
+    elif running == head:
+        lines.append(f"Matches the checked-out code ({head[:12]}).")
+    else:
+        lines.append(
+            f"STALE: the running daemon is on {running[:12]} but the checkout "
+            f"is at {head[:12]}. Restart it to run the latest code: "
+            "python scripts/daemon_control.py stop, then start."
+        )
+    return "\n".join(lines)
 
 
 def start() -> int:

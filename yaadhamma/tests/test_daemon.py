@@ -29,9 +29,12 @@ def daemon():
     return _load_daemon()
 
 
-def test_wake_off_exits_quietly(daemon, monkeypatch, caplog) -> None:
+def test_wake_off_exits_quietly(daemon, monkeypatch, caplog, tmp_path) -> None:
     monkeypatch.setenv("YAADHAMMA_WAKE", "off")
+    # main() records its version at startup; keep that out of the real home.
+    monkeypatch.setattr(daemon, "DAEMON_INFO_PATH", tmp_path / "daemon-info.json")
     assert daemon.main() == 0
+    assert (tmp_path / "daemon-info.json").exists()
 
 
 def test_control_file_missing_means_defaults(daemon, monkeypatch, tmp_path) -> None:
@@ -448,7 +451,69 @@ def test_check_extras_warns_on_missing_ui_only(daemon, monkeypatch, caplog) -> N
     assert "uv sync --extra wake --extra ui" in caplog.text
 
 
-def test_main_exits_4_when_wake_packages_missing(daemon, monkeypatch) -> None:
+def test_main_exits_4_when_wake_packages_missing(daemon, monkeypatch, tmp_path) -> None:
     _set_package_presence(monkeypatch, missing=("openwakeword", "sounddevice"))
     monkeypatch.setenv("YAADHAMMA_WAKE", "on")
+    # main() records its version at startup; keep that out of the real home.
+    monkeypatch.setattr(daemon, "DAEMON_INFO_PATH", tmp_path / "daemon-info.json")
     assert daemon.main() == 4
+    assert (tmp_path / "daemon-info.json").exists()
+
+
+def _load_control():
+    spec = importlib.util.spec_from_file_location(
+        "daemon_control", SCRIPTS / "daemon_control.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["daemon_control"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture()
+def control():
+    return _load_control()
+
+
+def test_code_match_report_match(control) -> None:
+    info = {
+        "commit": "abc123def456",
+        "argv": ["uv", "run", "scripts/yaadhamma_daemon.py"],
+        "started": "2026-09-29T01:00:00+00:00",
+    }
+    report = control.code_match_report(info, "abc123def456")
+    assert "Matches the checked-out code" in report
+    assert "STALE" not in report
+
+
+def test_code_match_report_stale(control) -> None:
+    info = {"commit": "aaa111", "started": "2026-09-28T01:00:00+00:00"}
+    report = control.code_match_report(info, "bbb222")
+    assert "STALE" in report
+    assert "aaa111" in report and "bbb222" in report
+    assert "stop" in report
+
+
+def test_code_match_report_no_info(control) -> None:
+    report = control.code_match_report(None, "bbb222")
+    assert "unknown" in report.lower()
+    assert "Restart" in report
+
+
+def test_code_match_report_unknown_running_commit(control) -> None:
+    info = {"commit": "unknown", "started": "2026-09-29T01:00:00+00:00"}
+    report = control.code_match_report(info, "bbb222")
+    assert "restart" in report.lower()
+
+
+def test_daemon_writes_info_at_start(daemon, monkeypatch, tmp_path) -> None:
+    import json
+
+    monkeypatch.setattr(daemon, "DAEMON_INFO_PATH", tmp_path / "daemon-info.json")
+    info = daemon._write_daemon_info()
+    assert info["commit"]
+    assert info["argv"]
+    assert info["pid"] > 0
+    on_disk = json.loads((tmp_path / "daemon-info.json").read_text())
+    assert on_disk["commit"] == info["commit"]
+    assert on_disk["argv"] == info["argv"]

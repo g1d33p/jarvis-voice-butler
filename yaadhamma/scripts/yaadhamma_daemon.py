@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import json
 import logging
+import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
@@ -45,6 +48,42 @@ log = logging.getLogger("yaadhamma.daemon")
 
 POLL_S = 0.2  # mic frame cadence
 CONTROL_POLL_S = 1.0  # mute-file cadence
+
+DAEMON_INFO_PATH = Path.home() / ".yaadhamma" / "daemon-info.json"
+
+
+def _git_commit() -> str:
+    """The checked-out commit, best-effort (a stale daemon is otherwise
+    invisible: in 2026-09 one ran a day on pre-fix code with no clue in
+    the log)."""
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(PROJECT), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return "unknown"
+
+
+def _write_daemon_info() -> dict:
+    """Record which code this daemon is running, for daemon_control status."""
+    info = {
+        "commit": _git_commit(),
+        "argv": sys.argv,
+        "started": datetime.now(timezone.utc).isoformat(),
+        "pid": os.getpid(),
+    }
+    try:
+        DAEMON_INFO_PATH.parent.mkdir(parents=True, exist_ok=True)
+        DAEMON_INFO_PATH.write_text(json.dumps(info))
+    except Exception:
+        pass
+    return info
 
 
 def _read_control() -> dict:
@@ -311,6 +350,12 @@ def _install_shortcut(machine: WakeMachine, enabled: bool):
 
 
 def main() -> int:
+    info = _write_daemon_info()
+    log.info(
+        "daemon starting: commit=%s argv=%s",
+        info["commit"],
+        " ".join(info["argv"]),
+    )
     settings = config.wake_settings()
     if not settings["enabled"]:
         log.info("wake word disabled (YAADHAMMA_WAKE=off); daemon exits")

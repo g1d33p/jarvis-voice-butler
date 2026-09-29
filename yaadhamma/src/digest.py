@@ -439,6 +439,29 @@ def _health_warning() -> str:
     )
 
 
+def _remote_health_line() -> str:
+    """A loud line when the remote poll keeps failing the same way.
+
+    Phone commands died silently for weeks in 2026-09: every 2-minute poll
+    crashed identically and the tracebacks only piled up in remote.log,
+    which nobody reads. The streak file (remote_health) turns that into a
+    morning-brief warning instead.
+    """
+    try:
+        from remote_health import needs_attention
+
+        bad = needs_attention()
+    except Exception:
+        return ""
+    if not bad:
+        return ""
+    return (
+        f"\n\n*Phone commands have failed {bad['count']} times in a row:* "
+        f"{bad['signature']}. The voice path is unaffected. "
+        "Details are in ~/.yaadhamma/remote.log — say the word and I'll dig in."
+    )
+
+
 def _tidy_line() -> str:
     """One line about last night's file tidy-up, for the morning brief."""
     try:
@@ -544,6 +567,7 @@ async def run_morning_brief(
             + _email_tidy_line()
             + _commitments_line()
             + _health_warning()
+            + _remote_health_line()
             + _budget_line()
         )
         self_chat = await find_self_chat(client)

@@ -123,6 +123,55 @@ def _env_local():
     return "no glued lines, no duplicate keys, no implausible values"
 
 
+@check("remote poll failures are not repeating")
+def _remote_poll_health():
+    """The 2026-09 outage: every 2-minute poll crashed identically and the
+    tracebacks only piled up in remote.log, which nobody reads. The streak
+    file (written by scripts/remote_poll.py) makes the same failure loud
+    here and in the morning brief."""
+    from remote_health import needs_attention
+
+    bad = needs_attention()
+    assert bad is None, (
+        f"remote poll failed {bad['count']} times in a row with: "
+        f"{bad['signature']} (last {bad['last']}). "
+        "See ~/.yaadhamma/remote.log for the tracebacks."
+    )
+    return "no repeated failures"
+
+
+@check("remote orchestrator constructs")
+def _remote_orchestrator():
+    """Phone commands died silently because real_orchestrator_factory()
+    called Orchestrator() with no arguments, so every poll crashed with
+    TypeError. Build it exactly the way the poll does, with every store
+    pointed at scratch so the check never touches real data."""
+    import os
+    import tempfile
+    from pathlib import Path
+
+    import task_manager
+    from orchestrator import Orchestrator
+    from remote import real_orchestrator_factory
+
+    with tempfile.TemporaryDirectory(prefix="yaadhamma-selftest-") as tmp:
+        scratch = Path(tmp)
+        real_db = task_manager.DEFAULT_DB
+        task_manager.DEFAULT_DB = scratch / "tasks.db"
+        os.environ["YAADHAMMA_MEMORY_PATH"] = str(scratch / "memory.db")
+        os.environ["YAADHAMMA_AUDIT_PATH"] = str(scratch / "audit.jsonl")
+        try:
+            orch = real_orchestrator_factory()
+        finally:
+            task_manager.DEFAULT_DB = real_db
+            os.environ.pop("YAADHAMMA_MEMORY_PATH", None)
+            os.environ.pop("YAADHAMMA_AUDIT_PATH", None)
+    assert isinstance(orch, Orchestrator), f"expected Orchestrator, got {type(orch)}"
+    tools = orch._tools()
+    assert tools, "remote orchestrator built, but has no tools wired"
+    return f"{len(tools)} tools wired"
+
+
 @check("due-date parser")
 def _due_dates():
     from planner import parse_due_date
