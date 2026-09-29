@@ -118,3 +118,72 @@ Push target: `v2` only. Nothing here touches `main`, `gemini-live`,
    speaking honestly.
 3. The menu's session line should show elapsed time and a plausible cost,
    and today's total should keep working.
+
+---
+
+## Stage 3 — WhatsApp voice notes from his own chat (2026-09-29)
+
+### What was built
+- Voice-note detection in `src/whatsapp_extractors.js`: `waReadMessages`
+  now flags a message with `voice: {duration_s}` when its bubble contains
+  an `<audio>` element or a recognisable play control (`audio-play` /
+  `ptt` testids or icons). The duration is read from the player subtree
+  only — never the whole bubble, because the message timestamp also looks
+  like mm:ss. Detection is conservative: no audio, no flag. `null`
+  duration means "unknown", not "short".
+- `waVoiceNoteAudio(doc, meta)`: downloads the note by fetching the
+  audio blob URL in page context and returning base64. Refuses audio over
+  8 MB. Message-not-found / no-audio / fetch failures are reported as
+  structured `{ok: false, reason}` instead of throwing.
+- `WhatsAppClient.download_voice_note(chat, message)` in `src/whatsapp.py`:
+  re-opens the chat through the existing browser session, decodes the
+  base64, refuses > 8 MB after decode.
+- `src/voice_transcribe.py` (new): one-shot Gemini transcription with
+  `config.BRAIN_MODEL`, live-only (needs `GOOGLE_API_KEY`). Empty results
+  are failures, not empty commands. `log_voice_note_cost()` records an
+  estimate under feature `voice_note` (~32 audio tokens/second, noted as
+  approximate).
+- `src/config.py`: `voice_note_settings()` —
+  `YAADHAMMA_VOICE_NOTE_MAX_S`, default 60, sanitised.
+- `src/remote.py`: `RemotePoller` takes an injected `transcriber`
+  (default: the live Gemini one). `_handle_message` routes his outgoing
+  voice notes to `_handle_voice_note`:
+  - Only his own already-resolved chats (the poller never opens others);
+    first-poll backlog swallowing and handle-once hashes apply unchanged.
+  - No "Yaadhamma" prefix required.
+  - Over the limit: skipped, one honest reply naming the lengths.
+  - Download/transcription failure: honest reply, nothing executed.
+  - The transcript is wrapped with `untrusted.wrap` and run through the
+    same orchestrator, tools, approval gates and audit route as a typed
+    command; the reply is "Heard: '…'. Done: …".
+  - A voice note replaces a waiting approval question (newest wins).
+
+### Tests
+- `tests/test_remote.py`: 9 new tests (26 total, all pass) — no-prefix
+  execution, untrusted wrapping of a hostile transcript, 60 s skip without
+  downloading, incoming notes ignored, handle-once, backlog swallowing,
+  honest transcription/download failures, voice note replacing a pending
+  question. The fake client and fake transcriber mean no WhatsApp sends,
+  downloads or model calls.
+- `tests/js/wa_extractors.test.cjs`: 3 new fixture-DOM tests — voice
+  flagged with duration 37 s, plain text never flagged, download of a
+  missing message reported honestly. 31 pass.
+- `ruff check` and `ruff format`: clean.
+
+### What could not be verified here
+- The real WhatsApp Web player DOM: the audio/play/duration selectors are
+  best-effort from the documented structure. If WhatsApp changes the
+  player markup, detection silently stops flagging notes (safe: nothing
+  executes) and must be re-probed on the Mac.
+- The download round-trip through a real browser session (blob URL fetch,
+  Opus-in-Ogg bytes), the Gemini transcription quality, and the real cost
+  figure — all need the Mac with his paired WhatsApp and keys.
+- The ~32 tokens/second audio estimate is approximate; the provider's
+  billing page is the truth.
+
+### Needs Jeevan (Mac acceptance)
+1. Send yourself a short voice note (< 60 s) from your own chat — she
+   should reply "Heard: '…'." and do what you said.
+2. Send a note longer than 60 s — she should skip it with one reply, not
+   transcribe it.
+3. Check the morning cost line includes the voice-note estimate.

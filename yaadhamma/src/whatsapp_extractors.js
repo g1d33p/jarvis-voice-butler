@@ -310,12 +310,86 @@ function waReadMessages(doc, limit) {
     var cls = String((host.className || "") + " " + (el.className || ""));
     var msg = { meta: meta, text: parts.text, outgoing: waIsOutgoing(doc, el, cls) };
     if (parts.quoted) msg.quoted = parts.quoted;
+    var voice = waVoiceNote(el, host);
+    if (voice) msg.voice = voice;
     out.push(msg);
   }
   // A genuinely empty chat shows a "No messages here yet" placeholder; the
   // Python side treats that as loaded (not flaky) so it does not retry.
   var empty = out.length === 0 && /no messages here yet/i.test(main.innerText || "");
   return { messages: out, empty: empty };
+}
+
+// Voice-note detection (v2 Stage 3).
+//
+// A voice note renders as an audio player inside the message bubble. We are
+// deliberately conservative: only flag a message when we find an <audio>
+// element or a recognisable play control inside the bubble. The duration is
+// read from the player subtree only (never the whole bubble), because the
+// message timestamp elsewhere in the bubble also looks like mm:ss. If no
+// duration label is found, duration_s is null and the Python side downloads
+// with a size cap instead of enforcing the length limit.
+//
+// These DOM hooks are the fragile part of this feature: if WhatsApp changes
+// the player markup, detection stops working and must be re-probed on the
+// Mac (the Node tests cover the current shape).
+function waVoiceNote(el, host) {
+  var audio = host.querySelector("audio");
+  var play =
+    host.querySelector('[data-testid="audio-play"]') ||
+    host.querySelector('[data-testid="ptt"]') ||
+    host.querySelector('[data-icon="audio-play"]') ||
+    host.querySelector('[data-icon="ptt"]');
+  if (!audio && !play) return null;
+  var scope = (audio && audio.parentElement) || (play && play.parentElement);
+  var duration_s = null;
+  if (scope) {
+    var label = (scope.innerText || "").match(/(\d{1,3}):([0-5]\d)/);
+    if (label) duration_s = parseInt(label[1], 10) * 60 + parseInt(label[2], 10);
+  }
+  return { duration_s: duration_s };
+}
+
+// Download a voice note's audio: find the message by its data-pre-plain-text
+// meta hook, fetch the <audio> blob URL in page context and return base64.
+// Returns a promise; page.evaluate awaits it. Audio over 8 MB is refused
+// here too, before the Python side decodes it.
+function waVoiceNoteAudio(doc, meta) {
+  return (async function () {
+    var main = doc.querySelector("#main");
+    if (!main) return { ok: false, reason: "no-open-chat" };
+    var nodes = main.querySelectorAll("[data-pre-plain-text]");
+    var host = null;
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].getAttribute("data-pre-plain-text") === meta) {
+        host = nodes[i].closest('[data-testid="msg-container"]') || nodes[i];
+        break;
+      }
+    }
+    if (!host) return { ok: false, reason: "message-not-found" };
+    var audio = host.querySelector("audio");
+    if (!audio || !audio.src) return { ok: false, reason: "no-audio-element" };
+    try {
+      var resp = await fetch(audio.src);
+      if (!resp.ok) return { ok: false, reason: "fetch-" + resp.status };
+      var buf = await resp.arrayBuffer();
+      if (buf.byteLength > 8 * 1024 * 1024)
+        return { ok: false, reason: "too-large" };
+      var bytes = new Uint8Array(buf);
+      var bin = "";
+      var CHUNK = 32768;
+      for (var o = 0; o < bytes.length; o += CHUNK) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(o, o + CHUNK));
+      }
+      var b64 =
+        typeof btoa === "function"
+          ? btoa(bin)
+          : Buffer.from(bin, "binary").toString("base64");
+      return { ok: true, audio_b64: b64, bytes: bytes.length };
+    } catch (e) {
+      return { ok: false, reason: "download-failed: " + (e && e.message) };
+    }
+  })();
 }
 
 function waTypeAndSend(doc, text) {
@@ -420,5 +494,7 @@ if (typeof module !== "undefined" && module.exports) {
     waIsOutgoing: waIsOutgoing,
     waComposerBox: waComposerBox,
     waSearchBox: waSearchBox,
+    waVoiceNote: waVoiceNote,
+    waVoiceNoteAudio: waVoiceNoteAudio,
   };
 }

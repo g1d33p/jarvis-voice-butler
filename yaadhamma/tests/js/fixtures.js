@@ -129,4 +129,23 @@ function conversationDoc({ title = "SC1-Confidants", useTitleAttr = false, messa
   return docWith([main]);
 }
 
-module.exports = { loggedInDoc, qrDoc, loadingDoc, chatRow, conversationDoc, _msgEl };
+/* A conversation pane holding one outgoing voice note: an audio element plus
+ * the player duration label, mirroring WhatsApp Web's player structure
+ * (best-effort; the real validation is the Mac acceptance run).
+ */
+function voiceNoteDoc() {
+  const player = new El("div", { class: "audio-player" }, [
+    new El("button", { "data-testid": "audio-play" }, []),
+    new El("audio", { src: "blob:https://web.whatsapp.com/abc123" }, []),
+    new El("span", {}, ["0:37"]),
+  ]);
+  const msg = new El(
+    "div",
+    { "data-testid": "msg-container", class: "message-out" },
+    [new El("div", { "data-pre-plain-text": "[10:35, 24/09/2026] Jeevan: " }, [player])]
+  );
+  const main = new El("div", { id: "main" }, [msg]);
+  return docWith([main]);
+}
+
+module.exports = { loggedInDoc, qrDoc, loadingDoc, chatRow, conversationDoc, _msgEl, voiceNoteDoc };

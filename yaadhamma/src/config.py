@@ -191,6 +191,19 @@ def remote_settings() -> dict:
     }
 
 
+def voice_note_settings() -> dict:
+    """WhatsApp voice notes from his own chats.
+
+    YAADHAMMA_VOICE_NOTE_MAX_S: notes longer than this are skipped with a
+    single reply (default 60).
+    """
+    try:
+        max_s = float(os.environ.get("YAADHAMMA_VOICE_NOTE_MAX_S", "60"))
+    except ValueError:
+        max_s = 60.0
+    return {"max_s": max_s if max_s > 0 else 60.0}
+
+
 def email_tidy_settings() -> dict:
     """Nightly Gmail labels and archiving. Safe default: propose-only.
 

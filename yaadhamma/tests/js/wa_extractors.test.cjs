@@ -6,7 +6,7 @@
 
 const assert = require("node:assert/strict");
 const ex = require("../../src/whatsapp_extractors.js");
-const { loggedInDoc, qrDoc, loadingDoc, chatRow, conversationDoc } = require("./fixtures.js");
+const { loggedInDoc, qrDoc, loadingDoc, chatRow, conversationDoc, voiceNoteDoc } = require("./fixtures.js");
 
 let passed = 0;
 function test(name, fn) {
@@ -302,3 +302,23 @@ test("a plain message has no quoted field", () => {
 
 
 console.log(`\n${passed} passed`);
+
+test("read messages flags a voice note with its duration", () => {
+  const { messages } = ex.waReadMessages(voiceNoteDoc(), 10);
+  assert.equal(messages.length, 1);
+  assert.ok(messages[0].voice, "voice note not detected");
+  assert.equal(messages[0].voice.duration_s, 37);
+  assert.equal(messages[0].outgoing, true);
+});
+
+test("read messages does not flag plain text as a voice note", () => {
+  const { messages } = ex.waReadMessages(loggedInDoc(), 10);
+  assert.ok(messages.length > 0);
+  for (const m of messages) assert.equal(m.voice, undefined);
+});
+
+test("voice note download reports a missing message honestly", async () => {
+  const r = await ex.waVoiceNoteAudio(voiceNoteDoc(), "[never] Nobody: ");
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "message-not-found");
+});

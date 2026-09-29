@@ -527,10 +527,16 @@ class WhatsAppClient:
                 "time": timestamp,
                 "text": raw.get("text", ""),
                 "outgoing": bool(raw.get("outgoing")),
+                # The stable hook for downloads (e.g. voice-note audio):
+                # data-pre-plain-text, e.g. "[10:30, 24/09/2026] Ravi: ".
+                "meta": raw.get("meta", ""),
             }
             if raw.get("quoted"):
                 # The earlier message this one replies to.
                 message["replying_to"] = raw["quoted"]
+            if raw.get("voice"):
+                # A voice note: {"duration_s": float | None}.
+                message["voice"] = raw["voice"]
             messages.append(message)
         return messages
 
@@ -577,6 +583,35 @@ class WhatsAppClient:
             messages = grown
             scrolls += 1
         return {"chat": matched, "messages": messages}
+
+    async def download_voice_note(self, chat_name: str, message: dict) -> bytes:
+        """Download a voice note's audio through the browser session.
+
+        `message` must be a parsed message dict carrying "meta"
+        (data-pre-plain-text) and "voice" from read_messages. Re-opens the
+        chat (already code-restricted to own chats by the poller), finds the
+        note by its meta hook, fetches the audio blob in page context and
+        returns raw bytes (WhatsApp serves Opus-in-Ogg). Refuses audio over
+        8 MB instead of pulling a huge file into memory.
+        """
+        import base64
+
+        voice = message.get("voice")
+        if voice is None:
+            raise WhatsAppError("message is not a voice note")
+        meta = str(message.get("meta") or "")
+        if not meta:
+            raise WhatsAppError("voice note has no meta hook to locate it")
+        matched = await self.find_chat(chat_name)
+        await self._open_chat(matched)
+        result = await self._evaluate("waVoiceNoteAudio", meta)
+        if not isinstance(result, dict) or not result.get("ok"):
+            reason = result.get("reason") if isinstance(result, dict) else result
+            raise WhatsAppError(f"could not download the voice note: {reason}")
+        data = base64.b64decode(result["audio_b64"])
+        if len(data) > 8 * 1024 * 1024:
+            raise WhatsAppError("voice note audio is larger than 8 MB")
+        return data
 
     # ------------------------------------------------------------------
     # Sending

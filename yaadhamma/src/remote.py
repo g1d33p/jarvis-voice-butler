@@ -46,6 +46,14 @@ AFFIRMATIVE = {"yes", "yeah", "yep", "sure", "do it", "go ahead", "ok"}
 NEGATIVE = {"no", "nope", "don't", "dont", "cancel", "stop", "never mind"}
 
 
+def _default_transcriber(audio: bytes) -> str:
+    """Live voice-note transcription (Gemini). Imported lazily so the
+    module loads without the transcription library."""
+    from voice_transcribe import transcribe_voice_note
+
+    return transcribe_voice_note(audio)
+
+
 class RemoteError(Exception):
     """A self chat could not be resolved safely."""
 
@@ -187,6 +195,11 @@ class RemotePoller:
     context_factory: Callable[[str], object] = field(
         default=lambda chat: RemoteContext(chat=chat)
     )
+    # Voice-note audio -> transcript. The default is the live Gemini
+    # transcriber; tests inject a fake so no model call ever happens here.
+    transcriber: Callable[[bytes], str] = field(
+        default=lambda audio: _default_transcriber(audio)
+    )
 
     def __post_init__(self) -> None:
         self._handled = JsonStore(handled_path(), _handled_default())
@@ -277,6 +290,10 @@ class RemotePoller:
     ) -> str | None:
         if not message.get("outgoing"):
             return None  # not his message: never a command
+        if message.get("voice") is not None:
+            # A voice note he sent to his own chat: no wake prefix needed,
+            # sending it to himself is already deliberate.
+            return await self._handle_voice_note(client, orchestrator, chat, message)
         text = str(message.get("text", "")).strip()
         if not text:
             return None
@@ -298,6 +315,72 @@ class RemotePoller:
             self._drop_pending(chat)
             log.info("remote: new command replaced a pending question in %s", chat)
         return await self._run_command(client, orchestrator, chat, task_text)
+
+    async def _handle_voice_note(
+        self, client, orchestrator, chat: str, message: dict
+    ) -> str | None:
+        """Transcribe a voice note he sent and run it as a command: same
+        orchestrator, same tools, same approval gates, same audit as a typed
+        command. The transcript is untrusted content, wrapped before use."""
+        import config
+        from voice_transcribe import log_voice_note_cost
+
+        voice = message.get("voice") or {}
+        duration_s = voice.get("duration_s")
+        max_s = config.voice_note_settings()["max_s"]
+        if duration_s is not None and duration_s > max_s:
+            await self._reply(
+                client,
+                chat,
+                f"That voice note is {int(duration_s)} seconds long — I only "
+                f"take voice notes up to {int(max_s)} seconds. Send a shorter one?",
+            )
+            return "voice note skipped: too long"
+        try:
+            audio = await client.download_voice_note(chat, message)
+        except Exception as exc:
+            log.warning("remote: voice-note download failed: %s", exc)
+            await self._reply(
+                client,
+                chat,
+                "I couldn't download that voice note — the WhatsApp browser "
+                "session may need attention. Try again in a bit?",
+            )
+            return "voice note download failed"
+        try:
+            transcript = self.transcriber(audio)
+        except Exception as exc:
+            log.warning("remote: voice-note transcription failed: %s", exc)
+            await self._reply(
+                client,
+                chat,
+                "I couldn't make out that voice note — could you send it "
+                "again, or type it instead?",
+            )
+            return "voice note transcription failed"
+        if not str(transcript).strip():
+            await self._reply(
+                client,
+                chat,
+                "That voice note came back empty — could you send it again?",
+            )
+            return "voice note transcription empty"
+        log_voice_note_cost(duration_s, transcript)
+        # A voice note is a new command: it replaces a waiting question
+        # (newest wins, like the voice loop).
+        if self._pending.read().get("chats", {}).get(chat):
+            self._drop_pending(chat)
+            log.info("remote: voice note replaced a pending question in %s", chat)
+        from untrusted import wrap as _wrap
+
+        goal = (
+            f"WhatsApp voice note from Jeevan (his own chat {chat}). "
+            f"Reply in this chat when done.\n"
+            f"He said:\n{_wrap(transcript, source=f'WhatsApp voice note ({chat})')}"
+        )
+        task = await orchestrator.start(goal, self.context_factory(chat))
+        heard = transcript if len(transcript) <= 280 else transcript[:277] + "..."
+        return await self._handle_outcome(client, orchestrator, chat, task, heard=heard)
 
     async def _run_command(
         self, client, orchestrator, chat: str, task_text: str
@@ -321,15 +404,20 @@ class RemotePoller:
         return await self._handle_outcome(client, orchestrator, chat, task)
 
     async def _handle_outcome(
-        self, client, orchestrator, chat: str, task
+        self, client, orchestrator, chat: str, task, heard: str | None = None
     ) -> str | None:
+        """Reply to the outcome. `heard` prefixes the reply for voice notes:
+        "Heard: '…'. Done: …"."""
         summary = task.summary()
         status = summary.get("status")
+        prefix = f"Heard: '{heard}'. " if heard else ""
         if status == "completed":
             self._drop_pending(chat)
             result = str(summary.get("result", "done"))
-            await self._reply(client, chat, result)
-            return "completed"
+            await self._reply(
+                client, chat, f"{prefix}Done: {result}" if heard else result
+            )
+            return "completed" if not heard else "voice note completed"
         if status == "waiting_for_user":
             question = str(summary.get("question_for_user", ""))
             task_id = str(summary.get("task_id", task.id))
@@ -339,18 +427,18 @@ class RemotePoller:
                 await self._reply(
                     client,
                     chat,
-                    "That approval expired before your answer arrived — "
+                    f"{prefix}That approval expired before your answer arrived — "
                     "approvals only stay open a minute. Send the command "
                     "again if you still want it.",
                 )
                 return "approval expired"
             self._store_pending(chat, task_id, question, rounds)
-            await self._reply(client, chat, question)
+            await self._reply(client, chat, f"{prefix}{question}")
             return "asked approval"
         # failed / cancelled: say so briefly and honestly.
         self._drop_pending(chat)
         error = str(summary.get("error", "it did not finish"))
-        await self._reply(client, chat, f"I couldn't do that: {error}")
+        await self._reply(client, chat, f"{prefix}I couldn't do that: {error}")
         return f"{status}: {error[:80]}"
 
     # ------------------------------------------------------------ replies
