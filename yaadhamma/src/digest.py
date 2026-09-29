@@ -439,6 +439,66 @@ def _health_warning() -> str:
     )
 
 
+def _daemon_line() -> str:
+    """A loud line when the always-on daemon is not running.
+
+    The daemon records its pid at startup (daemon-info.json). If the
+    record is missing, she has likely never started it; if the pid is
+    dead, it died. Either way the wake word and push-to-talk do nothing
+    until it is restarted — worth one line in the morning brief.
+    """
+    import json
+    import os
+
+    try:
+        data = json.loads((Path.home() / ".yaadhamma" / "daemon-info.json").read_text())
+    except Exception:
+        return (
+            "\n\n*The always-on daemon has no startup record* — it may never "
+            "have been started on this Mac. Until it runs, the wake word "
+            "and push-to-talk do nothing. Start it: "
+            "python scripts/daemon_control.py install"
+        )
+    pid = data.get("pid")
+    alive = True
+    if isinstance(pid, int):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            alive = False
+        except Exception:
+            alive = True
+    if not alive:
+        return (
+            "\n\n*The always-on daemon is not running* (its recorded "
+            "process is gone). The wake word and push-to-talk do nothing "
+            "until it is restarted: python scripts/daemon_control.py start"
+        )
+    return ""
+
+
+def _detection_line() -> str:
+    """A loud line when nothing is listening for him.
+
+    Both the wake word and push-to-talk are off: she cannot hear him at
+    all. Never raises.
+    """
+    try:
+        import config
+
+        wake_on = bool(config.wake_settings().get("enabled"))
+        ptt_on = bool(config.ptt_settings().get("enabled"))
+    except Exception:
+        return ""
+    if wake_on or ptt_on:
+        return ""
+    return (
+        "\n\n*Nothing is listening for you*: the wake word and push-to-talk "
+        "are both off. Turn one on (YAADHAMMA_WAKE=on or YAADHAMMA_PTT=on), "
+        "then restart the daemon."
+    )
+
+
 def _remote_health_line() -> str:
     """A loud line when the remote poll keeps failing the same way.
 
@@ -568,6 +628,8 @@ async def run_morning_brief(
             + _commitments_line()
             + _health_warning()
             + _remote_health_line()
+            + _daemon_line()
+            + _detection_line()
             + _budget_line()
         )
         self_chat = await find_self_chat(client)

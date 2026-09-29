@@ -254,3 +254,70 @@ Push target: `v2` only. Nothing here touches `main`, `gemini-live`,
    and she should confirm it.
 2. Ask for a file by partial name when two exist — she should ask which.
 3. Ask her to send a file to any other chat — she should refuse.
+
+---
+
+## Stage 5 — Failure visibility (2026-09-29)
+
+### What was built
+- Self-test (`scripts/selftest.py`) gained four checks:
+  - "push-to-talk listener is wired to the configured key": the real
+    `HotkeyListener` drives a fake listener through hold/release, proving
+    presses route to the configured key only; on macOS it also resolves
+    the key through the real pynput enum.
+  - "wake state is readable": the mute/listen control file round-trips
+    against a throwaway HOME, then the live flags are reported read-only.
+  - "remote poll job is loaded and its last outcome is known": launchd
+    job `com.yaadhamma.remote` on macOS plus the remote-health streak
+    outcome everywhere.
+  - "voice-note audio path is reachable": the extractor must export
+    `waVoiceNote`/`waVoiceNoteAudio` (static, works anywhere); on macOS
+    the WhatsApp browser profile must exist.
+- The same commit fixed a real gap these checks surfaced: v2's new
+  settings (`YAADHAMMA_PTT`, `YAADHAMMA_PTT_KEY`, `YAADHAMMA_PTT_HOLD_MS`,
+  `YAADHAMMA_IDLE_TIMEOUT_S`, `YAADHAMMA_VOICE_NOTE_MAX_S`) were missing
+  from `docs/SETTINGS.md`, and the `YAADHAMMA_WAKE` default was still
+  documented as `on`. All documented now; the retired
+  `YAADHAMMA_WAKE_IDLE_TIMEOUT_S` is marked retired.
+- Morning brief (`src/digest.py`) gained two loud warning lines:
+  - `_daemon_line()`: the daemon's recorded pid is dead, or it never
+    recorded a startup — the wake word and push-to-talk do nothing until
+    it is restarted. Joins the existing repeated-remote-failure line.
+  - `_detection_line()`: wake word and push-to-talk both off — nothing
+    is listening for him at all.
+- `daemon_control.py status` now shows three things: the detection mode
+  the running daemon recorded at startup ("push-to-talk",
+  "wake word + push-to-talk", …), whether a voice session is open
+  (written by the daemon on every session open/close to
+  `~/.yaadhamma/voice-session.json`; a stale "open" with a dead daemon
+  is reported as closed, not open), and the running-commit vs
+  checked-out-commit match.
+- `tests/test_stage5_visibility.py`: 11 tests — session open/close
+  records on worker start/stop/exit, no record on suppressed starts,
+  mode naming, the three status lines, pid liveness, and the two brief
+  warnings. Fakes and scratch dirs only.
+
+### Tests
+- `tests/test_stage5_visibility.py`: 11 pass.
+- `tests/test_daemon.py`, `tests/test_digest.py` with it: 81 pass.
+- `scripts/selftest.py`: 22/23 pass in the sandbox. The one failure is
+  environmental, not a regression: `openwakeword` is not installed in
+  this sandbox (`uv sync --extra wake` installs it on the Mac, where the
+  check passes).
+- `ruff check` and `ruff format`: clean.
+
+### What could not be verified here
+- The launchd and pid-liveness paths need macOS; in the sandbox they
+  report "skipped" honestly.
+- A crashed daemon that never writes the close record relies on the
+  stale-open rule in `status`; the brief's daemon warning relies on the
+  pid check. Both are best-effort, in the safe direction.
+
+### Needs Jeevan (Mac acceptance)
+1. `uv run scripts/selftest.py` — all 23 should pass (openwakeword
+   installs with `uv sync --extra wake --extra ui`).
+2. `python scripts/daemon_control.py status` — should show the
+   detection mode, "no voice session open", and a matching commit.
+3. Hold right Command and keep holding: `status` should say a voice
+   session is open; release and wait 20 s: it should close.
+4. The next morning brief should carry no new warning lines.

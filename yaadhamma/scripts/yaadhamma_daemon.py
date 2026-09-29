@@ -60,6 +60,7 @@ POLL_S = 0.2  # mic frame cadence
 CONTROL_POLL_S = 1.0  # mute-file cadence
 
 DAEMON_INFO_PATH = Path.home() / ".yaadhamma" / "daemon-info.json"
+SESSION_STATE_PATH = Path.home() / ".yaadhamma" / "voice-session.json"
 
 
 def _git_commit() -> str:
@@ -80,6 +81,28 @@ def _git_commit() -> str:
     return "unknown"
 
 
+def _detection_mode() -> str:
+    """Which input path this daemon is listening on. Never raises.
+
+    Written into daemon-info.json at startup so `daemon_control status`
+    can say it even when the config later changes under a running daemon.
+    """
+    try:
+        import config
+
+        wake = bool(config.wake_settings().get("enabled"))
+        ptt = bool(config.ptt_settings().get("enabled"))
+    except Exception:
+        return "unknown"
+    if wake and ptt:
+        return "wake word + push-to-talk"
+    if wake:
+        return "wake word"
+    if ptt:
+        return "push-to-talk"
+    return "none (detection off)"
+
+
 def _write_daemon_info() -> dict:
     """Record which code this daemon is running, for daemon_control status."""
     info = {
@@ -87,6 +110,7 @@ def _write_daemon_info() -> dict:
         "argv": sys.argv,
         "started": datetime.now(timezone.utc).isoformat(),
         "pid": os.getpid(),
+        "mode": _detection_mode(),
     }
     try:
         DAEMON_INFO_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -94,6 +118,30 @@ def _write_daemon_info() -> dict:
     except Exception:
         pass
     return info
+
+
+def _write_session_state(is_open: bool, path: Path | None = None) -> None:
+    """Record whether a voice session is currently open.
+
+    The daemon writes it on every session open/close; `daemon_control
+    status` and the self-test read it. A worker crash that skips the
+    close-write leaves a stale "open" — `status` treats anything older
+    than the idle timeout plus margin as closed, and says so.
+    Never raises.
+    """
+    try:
+        target = path or SESSION_STATE_PATH
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(
+                {
+                    "session_open": bool(is_open),
+                    "at": datetime.now(timezone.utc).isoformat(),
+                }
+            )
+        )
+    except Exception:
+        pass
 
 
 def _read_control() -> dict:
@@ -126,7 +174,9 @@ class VoiceWorker:
     SUPPRESS_S = 600.0
     LOG_TAIL_LINES = 40
 
-    def __init__(self, log_path: Path | None = None) -> None:
+    def __init__(
+        self, log_path: Path | None = None, state_path: Path | None = None
+    ) -> None:
         self._proc: subprocess.Popen | None = None
         self._started_at: float | None = None
         # Session cost baseline: today's model spend at session start, so the
@@ -134,6 +184,7 @@ class VoiceWorker:
         # the store could not be read.
         self._session_cost_baseline: float | None = None
         self._log_path = log_path or Path.home() / ".yaadhamma" / "voice-worker.log"
+        self._state_path = state_path or SESSION_STATE_PATH
         self._log_file = None
         self._quick_failures = 0
         self._suppress_until = 0.0
@@ -210,6 +261,7 @@ class VoiceWorker:
         self._session_cost_baseline = _today_cost_usd()
         # Silence is measured from the moment the session opens.
         note_speech_activity(time.monotonic())
+        _write_session_state(is_open=True, path=self._state_path)
         return True
 
     def note_exit(self) -> None:
@@ -224,6 +276,11 @@ class VoiceWorker:
             return  # suppressed start: nothing was launched, nothing to record
         self._close_log()
         code = self.quick_exit_code()
+        if self._proc.poll() is not None:
+            # The worker is gone: the session it owned is closed, whatever
+            # the exit code. (A PTT mic release does not stop the worker,
+            # so an open session survives releases — see _on_ptt_release.)
+            _write_session_state(is_open=False, path=self._state_path)
         if code is None:
             self._quick_failures = 0
             return
@@ -273,6 +330,7 @@ class VoiceWorker:
         self._close_log()
         self._started_at = None
         self._session_cost_baseline = None
+        _write_session_state(is_open=False, path=self._state_path)
         if proc is None:
             return
         if proc.poll() is not None:

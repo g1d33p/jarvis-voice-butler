@@ -537,6 +537,175 @@ def _ptt_config():
     return f"key={settings['key']}, hold={settings['hold_ms']} ms, tap-safe"
 
 
+@check("push-to-talk listener is wired to the configured key")
+def _ptt_listener():
+    # Stage 5: the listener factory, the key routing and the start/stop
+    # lifecycle — with a stand-in key enum and fake timer/listener so the
+    # check needs neither pynput nor macOS. The real pynput resolution is
+    # verified on macOS below.
+    import sys
+    from types import SimpleNamespace
+
+    import config
+    from hotkey import HotkeyListener, resolve_key
+
+    settings = config.ptt_settings()
+
+    class FakeKeys:
+        cmd_r = "cmd_r"
+        alt_r = "alt_r"
+        ctrl_r = "ctrl_r"
+
+    key = resolve_key(settings["key"], key_enum=FakeKeys)
+
+    fired: list[str] = []
+    timers: list = []
+    callbacks: dict = {}
+
+    def fake_timer(delay, callback):
+        return SimpleNamespace(
+            start=lambda: timers.append(callback), cancel=lambda: None
+        )
+
+    class FakeListener:
+        def __init__(self, on_press, on_release):
+            callbacks["on_press"] = on_press
+            callbacks["on_release"] = on_release
+
+        def start(self):
+            fired.append("started")
+
+        def stop(self):
+            fired.append("stopped")
+
+    listener = HotkeyListener(
+        key=key,
+        hold_ms=settings["hold_ms"],
+        on_press_start=lambda: fired.append("press"),
+        on_release=lambda: fired.append("release"),
+        listener_factory=lambda on_press, on_release: FakeListener(
+            on_press, on_release
+        ),
+        timer_factory=fake_timer,
+    )
+    listener.start()
+    assert fired == ["started"], f"listener did not start: {fired}"
+    callbacks["on_press"](key)  # the configured key, held…
+    for callback in timers:  # …past the hold threshold
+        callback()
+    callbacks["on_press"]("other")
+    callbacks["on_release"]("other")  # a wrong key must do nothing
+    callbacks["on_release"](key)
+    listener.stop()
+    assert fired == ["started", "press", "release", "stopped"], (
+        f"press/release did not route to the configured key only: {fired}"
+    )
+
+    if sys.platform == "darwin":
+        try:
+            resolve_key(settings["key"])  # the real pynput enum
+        except Exception as exc:
+            raise AssertionError(
+                f"pynput cannot resolve {settings['key']!r} — "
+                "on the Mac run: uv sync --extra wake --extra ui"
+            ) from exc
+        return f"key={settings['key']}: routed correctly, real pynput resolves"
+    return f"key={settings['key']}: routed correctly (real pynput needs macOS)"
+
+
+@check("wake state is readable")
+def _wake_state():
+    # Stage 5: the mute/listen control file the menu bar writes and the
+    # daemon polls. Round-trips against a throwaway HOME, then reports the
+    # live flags read-only.
+    import os
+    import tempfile
+
+    from ui_state import read_control, write_control
+
+    with tempfile.TemporaryDirectory(prefix="yaadhamma-selftest-") as tmp:
+        old_home = os.environ.get("HOME")
+        os.environ["HOME"] = tmp
+        try:
+            assert read_control() == {"muted": False, "listening": True}, (
+                "a missing control file must mean defaults"
+            )
+            write_control(muted=True)
+            assert read_control()["muted"] is True
+            write_control(listening=False)
+            assert read_control() == {
+                "muted": True,
+                "listening": False,
+            }, "flags must round-trip"
+        finally:
+            if old_home is None:
+                os.environ.pop("HOME", None)
+            else:
+                os.environ["HOME"] = old_home
+    live = read_control()
+    return (
+        "control file round-trips; live flags: "
+        f"muted={live['muted']}, listening={live['listening']}"
+    )
+
+
+@check("remote poll job is loaded and its last outcome is known")
+def _remote_poll():
+    # Stage 5: the 2-minute phone-command poll must be loaded, and its last
+    # outcome must be knowable — silent death was the 2026-09 failure mode.
+    import subprocess
+    import sys
+
+    from remote_health import streak
+
+    outcome = streak()
+    outcome_txt = (
+        f"{outcome.get('count')} consecutive failures: {outcome.get('signature')}"
+        if outcome
+        else "no failure streak on record"
+    )
+    if sys.platform != "darwin":
+        return f"skipped: launchd is macOS-only; last outcome: {outcome_txt}"
+    result = subprocess.run(
+        ["launchctl", "list", "com.yaadhamma.remote"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    combined = (result.stderr or "") + (result.stdout or "")
+    assert result.returncode == 0 and "Could not find service" not in combined, (
+        "remote poll job com.yaadhamma.remote is not loaded — "
+        "on the Mac run: python scripts/remote_schedule.py on"
+    )
+    return f"loaded; last outcome: {outcome_txt}"
+
+
+@check("voice-note audio path is reachable")
+def _voice_note_path():
+    # Stage 5: the extractor must export the voice-note audio helper
+    # (static, works anywhere); the live download path is Mac-only.
+    import sys
+    from pathlib import Path
+
+    src = (PROJECT / "src" / "whatsapp_extractors.js").read_text()
+    for name in ("waVoiceNote", "waVoiceNoteAudio"):
+        assert name in src, (
+            f"the WhatsApp extractor no longer exports {name} — "
+            "voice-note downloads would break silently"
+        )
+    if sys.platform != "darwin":
+        return "extractor exports waVoiceNoteAudio (live download needs the Mac)"
+    profile = Path.home() / ".yaadhamma" / "chrome-profile"
+    assert profile.exists(), (
+        "WhatsApp browser profile missing — on the Mac run: "
+        "uv run scripts/whatsapp_signin.py"
+    )
+    return (
+        "extractor exports waVoiceNoteAudio; browser profile present "
+        "(full reachability needs the paired session)"
+    )
+
+
 @check("voice tools build Gemini schemas")
 def _voice_tool_schemas():
     # A tool whose type hints cannot be resolved crashes Gemini Live at

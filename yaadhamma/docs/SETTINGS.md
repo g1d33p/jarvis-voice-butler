@@ -37,14 +37,24 @@ documented here, so this page cannot drift out of date silently.
 
 | Variable | Default | What it does |
 |---|---|---|
-| `YAADHAMMA_WAKE` | `on` | `off` disables the always-on listener entirely. |
+| `YAADHAMMA_WAKE` | `off` | `on` enables the always-on wake-word listener. Off in v2: push-to-talk is the primary input. |
 | `YAADHAMMA_WAKE_ENGINE` | `openwakeword` | `openwakeword` (free, "Hey Jarvis") or `porcupine` (custom phrase; needs an enterprise Picovoice key — free tier discontinued June 2026). |
 | `YAADHAMMA_WAKE_PHRASE` | `hey jarvis` | Phrase the openWakeWord engine listens for. |
 | `YAADHAMMA_WAKE_SENSITIVITY` | `0.5` | Detection sensitivity, 0–1. |
 | `YAADHAMMA_WAKE_PPN` | _(empty)_ | Path to the trained `.ppn` file (Porcupine engine). |
 | `YAADHAMMA_PICOVOICE_KEY` | _(empty)_ | Picovoice AccessKey (Porcupine engine; enterprise only since June 2026). |
-| `YAADHAMMA_WAKE_IDLE_TIMEOUT_S` | `90` | Seconds of silence before the session closes. |
+| `YAADHAMMA_WAKE_IDLE_TIMEOUT_S` | _(retired)_ | Retired in v2 — the idle timeout is now the shared `YAADHAMMA_IDLE_TIMEOUT_S` below. |
 | `YAADHAMMA_WAKE_SHORTCUT` | `on` | `off` disables the Option+Space shortcut. |
+
+## Push-to-talk and voice sessions (v2)
+
+| Variable | Default | What it does |
+|---|---|---|
+| `YAADHAMMA_PTT` | `on` | `off` disables push-to-talk entirely. |
+| `YAADHAMMA_PTT_KEY` | `cmd_r` | The hold-to-talk key: `cmd_r`, `alt_r` or `ctrl_r` (right Command by default). `fn` is refused — pynput cannot reliably see it. |
+| `YAADHAMMA_PTT_HOLD_MS` | `200` | How long the key must be held before listening starts. A shorter press does nothing. |
+| `YAADHAMMA_IDLE_TIMEOUT_S` | `20` | Seconds of silence before the voice session closes (shared by push-to-talk and the wake word). |
+| `YAADHAMMA_VOICE_NOTE_MAX_S` | `60` | WhatsApp voice notes longer than this are skipped, with one reply saying so. |
 
 ## Menu-bar UI
 

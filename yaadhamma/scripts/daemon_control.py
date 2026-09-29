@@ -21,6 +21,7 @@ PROJECT = Path(__file__).resolve().parents[1]
 LABEL = "com.yaadhamma.daemon"
 PLIST = Path.home() / "Library" / "LaunchAgents" / f"{LABEL}.plist"
 LOG = Path.home() / ".yaadhamma" / "daemon.log"
+SESSION_STATE_PATH = Path.home() / ".yaadhamma" / "voice-session.json"
 
 
 def _launchd_only() -> int | None:
@@ -94,11 +95,88 @@ def status() -> int:
         return 1
     print(result.stdout.strip())
     print()
-    print(code_match_report(_daemon_info(), _checked_out_commit()))
+    info = _daemon_info()
+    print(format_mode(info))
+    print(format_session_state(_session_state(), _pid_alive(info)))
+    print()
+    print(code_match_report(info, _checked_out_commit()))
     return 0
 
 
 def _daemon_info() -> dict | None:
+    """What the running daemon recorded about itself at startup."""
+    try:
+        import json
+
+        data = json.loads((Path.home() / ".yaadhamma" / "daemon-info.json").read_text())
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def _pid_alive(info: dict | None) -> bool | None:
+    """Whether the daemon's recorded pid is still running.
+
+    None when there is no pid to check (no record, or an old record
+    without one). Uses signal 0: no process is harmed.
+    """
+    if not info:
+        return None
+    pid = info.get("pid")
+    if not isinstance(pid, int):
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # a process exists, it is just not ours
+    except Exception:
+        return None
+    return True
+
+
+def _session_state() -> dict | None:
+    """The daemon's last session open/close record. Never raises."""
+    try:
+        import json
+
+        data = json.loads(SESSION_STATE_PATH.read_text())
+        return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def format_mode(info: dict | None) -> str:
+    """One line: which input path the running daemon listens on."""
+    if not info:
+        return "Listening via: unknown (the daemon never recorded its mode)."
+    mode = info.get("mode") or "unknown"
+    return f"Listening via: {mode}."
+
+
+def format_session_state(state: dict | None, daemon_alive: bool | None) -> str:
+    """One line: whether a voice session is currently open.
+
+    Pure (no disk, no signals) so tests can cover it. A stale "open"
+    record with a dead daemon is reported as closed, not open — the
+    daemon writes the record on close, so "open" with no living daemon
+    means it died without writing.
+    """
+    if not state:
+        return (
+            "Session: no record — no voice session has opened under this "
+            "daemon (or it predates session tracking; restart it)."
+        )
+    if state.get("session_open"):
+        if daemon_alive is False:
+            return (
+                "Session: the record says a session was open, but the "
+                "daemon is not running — treating it as closed."
+            )
+        when = state.get("at", "?")
+        return f"Session: a voice session is open (opened {when})."
+    return "Session: no voice session open right now."
     """What the running daemon recorded about itself at startup."""
     path = Path.home() / ".yaadhamma" / "daemon-info.json"
     try:
