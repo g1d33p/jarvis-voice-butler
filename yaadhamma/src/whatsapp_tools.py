@@ -16,6 +16,8 @@ Note: opening a chat marks its messages as read in WhatsApp, exactly as if
 Jeevan had opened it himself. Triage therefore consumes unread state.
 """
 
+from pathlib import Path
+
 from livekit.agents import RunContext, function_tool
 from livekit.agents.llm import ToolError
 
@@ -63,6 +65,79 @@ _SIGNIN_HINT = (
     "Link a device), then try again."
 )
 
+# WhatsApp file sends refuse anything bigger (v2 Stage 4).
+MAX_SEND_FILE_BYTES = 64 * 1024 * 1024
+
+
+def _check_sendable(path: Path) -> Path:
+    """Refuse paths outside his home and files over 64 MB. Returns the
+    resolved path."""
+    home = Path.home().resolve()
+    resolved = path.resolve()
+    if resolved != home and home not in resolved.parents:
+        raise ToolError(
+            f"I only send files from your home folder — {path} is outside it."
+        )
+    size = resolved.stat().st_size
+    if size > MAX_SEND_FILE_BYTES:
+        raise ToolError(
+            f"{resolved.name} is {size / (1024 * 1024):.1f} MB — over the "
+            "64 MB limit for WhatsApp file sends."
+        )
+    return resolved
+
+
+def _resolve_sendable_file(file_path: str) -> Path:
+    """Turn what he said into the file to send.
+
+    Exact path first; then the tidy log (where_did_file_go) in case the
+    nightly tidy moved it; then a bounded filename search of the usual
+    places. Zero matches — or several — stop with a question instead of
+    guessing.
+    """
+    raw = (file_path or "").strip()
+    if not raw:
+        raise ToolError("To send a file I need a file path or name.")
+    home = Path.home()
+    cand = Path(raw).expanduser()
+    if not cand.is_absolute():
+        cand = home / raw
+    if cand.is_file():
+        return _check_sendable(cand)
+    name = Path(raw).name
+    candidates: list[Path] = []
+    # The nightly tidy may have moved it.
+    try:
+        from tidy import TidyLog
+
+        for move in TidyLog().find_moved(name):
+            now = Path(move.get("now", ""))
+            if now.is_file() and now not in candidates:
+                candidates.append(now)
+    except Exception:
+        pass  # a broken tidy log must not block sending
+    # Bounded search: the usual places, then the home top level.
+    if not candidates:
+        for root in (home / "Desktop", home / "Documents", home / "Downloads"):
+            if root.is_dir():
+                candidates.extend(p for p in root.rglob(name) if p.is_file())
+            if len(candidates) >= 10:
+                break
+        if not candidates:
+            candidates.extend(p for p in home.glob(name) if p.is_file())
+        candidates = candidates[:10]
+    if not candidates:
+        raise ToolError(
+            f"I couldn't find a file named {name!r} in your home folder. "
+            "Give me more of the path?"
+        )
+    if len(candidates) > 1:
+        listing = "\n".join(f"- {p}" for p in candidates)
+        raise ToolError(
+            f"Several files match {name!r} — which one did you mean?\n{listing}"
+        )
+    return _check_sendable(candidates[0])
+
 
 class WhatsAppTools:
     """WhatsApp triage and messaging tools for the voice agent."""
@@ -85,6 +160,7 @@ class WhatsAppTools:
             self.whatsapp_where_needed,
             self.whatsapp_watchlist_digest,
             self.whatsapp_send_message,
+            self.whatsapp_send_file,
         ]
 
     async def _guarded(self, fn, *args, **kwargs):
@@ -280,6 +356,81 @@ class WhatsAppTools:
             return None
         self._auto_sent_for = key
         return reason
+
+    async def _own_chat_titles(self) -> list[str]:
+        """Exact titles of his own chats, resolved from the configured
+        self-chat numbers — the same mechanism the phone poller uses."""
+        import config
+
+        titles = []
+        for number in config.remote_settings()["self_chats"]:
+            try:
+                titles.append(await self._guarded(self._client.find_chat, number))
+            except Exception:
+                continue
+        return titles
+
+    @function_tool()
+    @browser_action(lambda self: self._client._browser_or_default())
+    async def whatsapp_send_file(
+        self, context: RunContext, chat_name: str, file_path: str, caption: str = ""
+    ) -> dict[str, object]:
+        """Send a file to one of Jeevan's own WhatsApp chats.
+
+        Files only ever go to his own chats — enforced in code, not by the
+        model — and always need his approval first: the approval names the
+        file, the folder it comes from, and the recipient. Files over 64 MB
+        or outside his home folder are refused outright. A partial file
+        name is searched for (including the tidy log of moved files); if
+        several files match, this stops and asks which one instead of
+        guessing. The attachment is verified in the chat before success is
+        reported.
+
+        Args:
+            chat_name: One of his own chats, e.g. "Jeevan (You)".
+            file_path: Path to the file, or part of its name.
+            caption: Optional caption sent with the file.
+        """
+        chat_name, file_path = (chat_name or "").strip(), (file_path or "").strip()
+        if not chat_name or not file_path:
+            raise ToolError("To send a file I need a chat and a file.")
+        # Resolve the file BEFORE the approval gate, so a yes can never
+        # approve a guessed file.
+        path = _resolve_sendable_file(file_path)
+        # Resolve the chat BEFORE the approval gate, so a yes can never
+        # approve a guessed recipient.
+        matched = await self._guarded(self._client.find_chat, chat_name)
+        own = {t.casefold() for t in await self._own_chat_titles()}
+        if matched.casefold() not in own:
+            raise ToolError(
+                f"Files only go to your own chats — {matched!r} is not one of them."
+            )
+        size_mb = path.stat().st_size / (1024 * 1024)
+        description = (
+            f"send WhatsApp file {path.name} ({size_mb:.1f} MB) "
+            f"from {path.parent} to {matched}"
+        )
+        quoted = (
+            f"To {matched} on WhatsApp:\n\n{path.name} "
+            f"({size_mb:.1f} MB) from {path.parent}"
+            + (f"\nCaption: {caption.strip()}" if caption.strip() else "")
+        )
+
+        async def execute() -> dict[str, object]:
+            return await self._guarded(
+                self._client.send_file, matched, str(path), caption.strip()
+            )
+
+        # No dictated-file bypass: file sends are always RiskTier.HIGH and
+        # always ask.
+        return await self._approvals.gate(
+            tool_name="whatsapp_send_file",
+            description=description,
+            context=context,
+            execute=execute,
+            args={"chat": matched, "file": str(path)},
+            quoted=quoted,
+        )
 
 
 async def collect_watchlist(

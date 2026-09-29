@@ -312,6 +312,7 @@ function waReadMessages(doc, limit) {
     if (parts.quoted) msg.quoted = parts.quoted;
     var voice = waVoiceNote(el, host);
     if (voice) msg.voice = voice;
+    if (!voice && waHasAttachment(host)) msg.attachment = true;
     out.push(msg);
   }
   // A genuinely empty chat shows a "No messages here yet" placeholder; the
@@ -390,6 +391,86 @@ function waVoiceNoteAudio(doc, meta) {
       return { ok: false, reason: "download-failed: " + (e && e.message) };
     }
   })();
+}
+
+// File sending (v2 Stage 4).
+//
+// WhatsApp Web hides its <input type=file> elements; automation cannot
+// drive the native file chooser, so the Python side sets the files on the
+// input directly (page.set_input_files) and the page's own change handlers
+// fire as if the user had picked the file.
+//
+// waAttachFile: click the attach (paperclip) button and report the file
+// inputs found, with their accept filters, so the Python side can pick the
+// document input rather than the photo/video one. Best-effort selectors:
+// if WhatsApp changes the composer chrome, this reports no-attach-button
+// and must be re-probed on the Mac.
+function waAttachFile(doc) {
+  var main = doc.querySelector("#main");
+  if (!main) return { ok: false, reason: "no-open-chat" };
+  var btn =
+    main.querySelector('[data-testid="attach"]') ||
+    main.querySelector('[data-icon="attach"]') ||
+    main.querySelector('button[aria-label="Attach"]') ||
+    doc.querySelector('[data-testid="attach"]');
+  if (btn && btn.click) btn.click();
+  var inputs = Array.prototype.slice.call(
+    doc.querySelectorAll('input[type="file"]')
+  );
+  var info = inputs.map(function (inp, i) {
+    return {
+      index: i,
+      accept: inp.getAttribute("accept") || "",
+      visible: !!(inp.offsetParent || (inp.getClientRects && inp.getClientRects().length)),
+    };
+  });
+  if (!info.length) return { ok: false, reason: "no-file-input" };
+  return { ok: true, inputs: info };
+}
+
+// After the files are set on the input, WhatsApp shows a preview with an
+// optional caption box and a Send button. Type the caption (if any) and
+// press send. Returns the send button state so the Python side knows
+// whether the preview appeared.
+function waConfirmFileSend(doc, caption) {
+  var cap =
+    doc.querySelector('[data-testid="media-caption-input"]') ||
+    doc.querySelector('div[contenteditable="true"][data-tab="9"]');
+  if (cap && caption) {
+    if (cap.focus) cap.focus();
+    try {
+      doc.execCommand("insertText", false, caption);
+    } catch (e) {
+      /* caption is optional: a failure here must not block the send */
+    }
+  }
+  var btn =
+    doc.querySelector('[data-testid="send"]') ||
+    doc.querySelector('button[aria-label="Send"]');
+  if (!btn) return { ok: false, reason: "no-send-button" };
+  btn.click();
+  return { ok: true, clickedSend: true };
+}
+
+// Whether a message bubble carries an attachment (document, photo, video,
+// voice note): used to verify a file send really landed. Conservative:
+// only true when we find a download link or a media/document icon.
+function waHasAttachment(host) {
+  if (host.querySelector("a[download]")) return true;
+  var icons = host.querySelectorAll("[data-icon]");
+  for (var i = 0; i < icons.length; i++) {
+    var name = String(icons[i].getAttribute("data-icon") || "").toLowerCase();
+    if (
+      name.indexOf("document") !== -1 ||
+      name.indexOf("image") !== -1 ||
+      name.indexOf("video") !== -1 ||
+      name.indexOf("audio") !== -1 ||
+      name.indexOf("ptt") !== -1 ||
+      name.indexOf("sticker") !== -1
+    )
+      return true;
+  }
+  return false;
 }
 
 function waTypeAndSend(doc, text) {
@@ -496,5 +577,7 @@ if (typeof module !== "undefined" && module.exports) {
     waSearchBox: waSearchBox,
     waVoiceNote: waVoiceNote,
     waVoiceNoteAudio: waVoiceNoteAudio,
+    waAttachFile: waAttachFile,
+    waConfirmFileSend: waConfirmFileSend,
   };
 }

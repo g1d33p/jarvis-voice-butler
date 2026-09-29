@@ -187,3 +187,70 @@ Push target: `v2` only. Nothing here touches `main`, `gemini-live`,
 2. Send a note longer than 60 s — she should skip it with one reply, not
    transcribe it.
 3. Check the morning cost line includes the voice-note estimate.
+
+---
+
+## Stage 4 — whatsapp_send_file (2026-09-29)
+
+### What was built
+- New tool `whatsapp_send_file(chat_name, file_path, caption="")` in
+  `src/whatsapp_tools.py`, registered in the shared background tool
+  registry (voice and phone commands get it identically).
+- Own-chat restriction is code, not the model: the tool resolves the
+  configured self-chat numbers to their exact titles and refuses any
+  other chat before any approval is requested.
+- Always `RiskTier.HIGH` (`src/permissions.py`): no dictated-file bypass —
+  every file send asks first, and the approval names the file, the folder
+  it comes from, and the recipient.
+- Refusals before approval: paths outside his home folder; files over
+  64 MB (`MAX_SEND_FILE_BYTES`).
+- File resolution: exact path first, then the tidy log
+  (`where_did_file_go` — the nightly tidy may have moved it), then a
+  bounded filename search of Desktop/Documents/Downloads and the home
+  top level. Zero matches — or several — stop with a question instead
+  of guessing.
+- Sending uses the real WhatsApp file input: new `waAttachFile` /
+  `waConfirmFileSend` extractors click the attach picker, the file is set
+  on WhatsApp Web's hidden `<input type=file>` through a new narrow
+  `BrowserManager.set_input_files` primitive (the native chooser cannot be
+  driven by automation), the caption is typed into the preview, and send
+  is pressed.
+- Verification before success is reported: a new outgoing message must
+  appear whose text contains the file name or which carries an attachment
+  marker (new `waHasAttachment` detection in `waReadMessages`). On any
+  doubt it raises without retrying — a blind retry could deliver the file
+  twice.
+
+### Tests
+- `tests/test_whatsapp_send_file.py`: 11 tests, all pass — HIGH tier,
+  approval names file/folder/recipient, approval then verified send,
+  non-own chat refused before approval, outside-home refused, 64 MB
+  refused, missing file asks, partial name found, ambiguous names ask,
+  verification failure reported honestly, tidy-log lookup followed.
+  Fake client only; no browser, no sends.
+- `tests/js/wa_extractors.test.cjs`: 3 new tests — attach picker reports
+  its file inputs, clean failure with no file input, clean failure with
+  no send button. 34 pass.
+- `tool_schemas.check_voice_tool_schemas`: all 21 voice tools still
+  describe cleanly (file sending goes through `run_task` like other
+  WhatsApp tools, not the small voice set — consistent with
+  `whatsapp_send_message`).
+- `ruff check` and `ruff format`: clean.
+
+### What could not be verified here
+- The real attach flow on WhatsApp Web: the attach-button selectors, the
+  hidden file inputs' `accept` filters, the preview caption box and the
+  send button are best-effort. If WhatsApp changes the composer chrome,
+  sending fails loudly before anything is sent (safe direction).
+- The attachment marker used for verification is heuristic (download
+  link or media/document icon); the file-name-in-text check is the
+  primary signal for documents.
+- `set_input_files` on WhatsApp's hidden input is the standard Playwright
+  approach, but the change-handler behaviour needs the Mac run.
+
+### Needs Jeevan (Mac acceptance)
+1. "Send the file report.pdf to my own chat" — she should ask, naming
+   the file, its folder, and the chat; say yes — the file should arrive
+   and she should confirm it.
+2. Ask for a file by partial name when two exist — she should ask which.
+3. Ask her to send a file to any other chat — she should refuse.

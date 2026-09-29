@@ -635,6 +635,21 @@ class BrowserManager:
             except Exception as exc:
                 raise BrowserError(f"I could not click there: {exc}") from exc
 
+    async def set_input_files(self, selector: str, path: str) -> None:
+        """Set the files on a <input type=file> element (skill use only).
+
+        Lets a skill attach a local file (e.g. WhatsApp Web's hidden file
+        input) without a native file chooser, which automation cannot drive.
+        The page's own change handlers still fire, so the site behaves as
+        if the user had picked the file.
+        """
+        page = await self._get_page()
+        async with self._lock:
+            try:
+                await page.set_input_files(selector, path)
+            except Exception as exc:
+                raise BrowserError(f"I could not attach the file: {exc}") from exc
+
     async def clear_focused_field(self) -> None:
         """Select everything in the focused field and delete it (internal use)."""
         page = await self._get_page()

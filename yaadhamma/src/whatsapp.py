@@ -161,6 +161,22 @@ def _is_whatsapp_url(url: str) -> bool:
     return "web.whatsapp.com" in (url or "")
 
 
+def _pick_file_input(inputs: list[dict]) -> int:
+    """Choose which <input type=file> gets the file: prefer the document
+    input over the photo/video one."""
+
+    def _score(info: dict) -> int:
+        accept = str(info.get("accept") or "").lower()
+        if "pdf" in accept or accept in ("", "*/*", "*"):
+            return 0
+        if "image" in accept or "video" in accept:
+            return 2
+        return 1
+
+    ranked = sorted(inputs, key=_score)
+    return int(ranked[0].get("index", 0)) if ranked else 0
+
+
 def _message_signature(message: dict | None) -> tuple | None:
     if not message:
         return None
@@ -688,4 +704,69 @@ class WhatsAppClient:
             "The message may not have been sent: I typed it but could not "
             "confirm it appeared in the chat. Please check WhatsApp before "
             "trying again — sending it again blindly could deliver it twice."
+        )
+
+    async def send_file(
+        self, chat_name: str, path: str, caption: str = ""
+    ) -> dict[str, object]:
+        """Attach a local file to the chat and send it, verifying delivery.
+
+        The file is set on WhatsApp Web's hidden file input through the
+        existing browser session (no native chooser involved), the caption
+        is typed into the preview, and send is pressed.
+
+        Verification: a NEW outgoing message must appear whose text contains
+        the file name or which carries an attachment marker. On any doubt it
+        raises without retrying — a blind retry could deliver the file
+        twice.
+        """
+        name = Path(path).name
+        if not name:
+            raise WhatsAppError("no file name to send")
+        matched = await self.find_chat(chat_name)
+        await self._open_chat(matched)
+        before = _message_signature(
+            (await self._evaluate("waLastMessage")).get("message")
+        )
+        attach = await self._evaluate("waAttachFile")
+        if not isinstance(attach, dict) or not attach.get("ok"):
+            reason = attach.get("reason") if isinstance(attach, dict) else attach
+            raise WhatsAppError(f"could not open WhatsApp's attach picker: {reason}")
+        chosen = _pick_file_input(attach.get("inputs") or [])
+        set_files = getattr(self._browser_or_default(), "set_input_files", None)
+        if set_files is None:
+            raise WhatsAppError("this browser session cannot attach files")
+        await set_files(f'input[type="file"] >> nth={chosen}', path)
+        await asyncio.sleep(1.0)  # let the file preview render
+        confirm = await self._evaluate("waConfirmFileSend", caption or "")
+        if not isinstance(confirm, dict) or not confirm.get("ok"):
+            reason = confirm.get("reason") if isinstance(confirm, dict) else confirm
+            raise WhatsAppError(
+                f"the file preview did not appear after attaching {name}: "
+                f"{reason}. The file was not sent."
+            )
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            await asyncio.sleep(1.0)
+            current = (await self._evaluate("waLastMessage")).get("message")
+            if (
+                current
+                and _message_signature(current) != before
+                and current.get("outgoing")
+            ):
+                text = str(current.get("text") or "")
+                if name in text or current.get("attachment"):
+                    return {
+                        "sent": True,
+                        "chat": matched,
+                        "file": name,
+                        "verified": True,
+                        "verification": (
+                            "a new outgoing message for the file appeared in the chat"
+                        ),
+                    }
+        raise WhatsAppError(
+            f"I attached {name} but no file message appeared in {matched}: "
+            "treating it as not sent. Please check WhatsApp before trying "
+            "again — sending it again blindly could deliver it twice."
         )

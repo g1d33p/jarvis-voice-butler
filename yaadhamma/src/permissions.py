@@ -102,6 +102,9 @@ TOOL_TIERS: dict[str, RiskTier] = {
     "whatsapp_read_chat": RiskTier.LOW,
     "whatsapp_where_needed": RiskTier.LOW,
     "whatsapp_send_message": RiskTier.MEDIUM,
+    # Sending a file is HIGH: it leaves the machine, goes only to his own
+    # chats (code-enforced in the tool), and always asks first.
+    "whatsapp_send_file": RiskTier.HIGH,
     # Google Calendar (calendar_tools.CalendarTools): reading is free; adding
     # an event is always read back first.
     "calendar_agenda": RiskTier.LOW,

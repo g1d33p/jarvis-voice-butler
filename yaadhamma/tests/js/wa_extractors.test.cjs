@@ -322,3 +322,31 @@ test("voice note download reports a missing message honestly", async () => {
   assert.equal(r.ok, false);
   assert.equal(r.reason, "message-not-found");
 });
+
+test("attach picker reports the file inputs it finds", () => {
+  const { El, docWith } = require("./dom_fake");
+  const main = new El("div", { id: "main" }, [
+    new El("button", { "data-testid": "attach", "aria-label": "Attach" }, []),
+    new El("input", { type: "file", accept: "image/*,video/*" }, []),
+    new El("input", { type: "file", accept: "*/*" }, []),
+  ]);
+  const r = ex.waAttachFile(docWith([main]));
+  assert.equal(r.ok, true);
+  assert.equal(r.inputs.length, 2);
+});
+
+test("attach picker reports it cleanly when there is no file input", () => {
+  const r = ex.waAttachFile(loggedInDoc());
+  assert.equal(r.ok, false);
+  assert.equal(r.reason, "no-file-input");
+});
+
+test("confirm file send reports a missing send button", () => {
+  const r = ex.waConfirmFileSend(loggedInDoc(), "hello");
+  // loggedInDoc has a send button (message composer); a bare doc does not.
+  const { El, docWith } = require("./dom_fake");
+  const bare = ex.waConfirmFileSend(docWith([new El("div", { id: "main" }, [])]), "");
+  assert.equal(bare.ok, false);
+  assert.equal(bare.reason, "no-send-button");
+  assert.equal(r.ok, true);
+});
