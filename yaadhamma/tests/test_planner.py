@@ -245,3 +245,24 @@ def test_interviews_soon_covers_today_and_tomorrow_only() -> None:
     ]
     soon = interviews_soon(events, now=DAY + timedelta(hours=8))
     assert [e["title"] for e in soon] == ["Interview with Acme", "Interview with Beta"]
+
+
+def test_every_voice_tool_builds_a_gemini_schema(monkeypatch) -> None:
+    """2026-09-28: a class-body import alias in planner.py made Gemini Live
+    fail at startup with NameError: name '_RunContext' is not defined, which
+    killed the whole session. Build the schemas exactly as the plugin does."""
+    for key in ("LIVEKIT_API_KEY", "LIVEKIT_API_SECRET", "GOOGLE_API_KEY"):
+        monkeypatch.setenv(key, "test-value")
+    from livekit.agents import llm
+
+    from agent import Assistant
+
+    schemas = llm.ToolContext(Assistant().tools).parse_function_tools(
+        "google", use_parameters_json_schema=True
+    )
+
+    assert {s["name"] for s in schemas} >= {
+        "make_a_plan",
+        "run_task",
+        "whatsapp_status",
+    }

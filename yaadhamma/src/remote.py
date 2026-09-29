@@ -434,9 +434,18 @@ async def real_client_factory():
 
 
 def real_orchestrator_factory():
-    from orchestrator import Orchestrator
+    """The same orchestrator the voice uses: every tool, gate and audit entry.
 
-    return Orchestrator()
+    2026-09-29: this called Orchestrator() with no arguments, so every phone
+    command failed with "missing 2 required positional arguments".
+    """
+    from actions import ActionRegistry
+    from agent import build_toolsets
+    from orchestrator import Orchestrator
+    from task_manager import TaskStore
+
+    toolsets, _shared = build_toolsets()
+    return Orchestrator(registry=ActionRegistry(*toolsets), store=TaskStore())
 
 
 async def main_async() -> int:

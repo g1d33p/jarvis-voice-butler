@@ -27,6 +27,8 @@ import os
 import re
 from datetime import datetime, time, timedelta
 
+from livekit.agents import RunContext, function_tool
+
 import config
 from untrusted import wrap as _wrap_untrusted
 
@@ -438,12 +440,9 @@ class PlanTools:
             self._digests or DigestStore(),
         )
 
-    from livekit.agents import RunContext as _RunContext
-    from livekit.agents import function_tool as _function_tool
-
-    @_function_tool()
+    @function_tool()
     async def make_a_plan(
-        self, context: _RunContext, horizon: str = "today", focus: str = ""
+        self, context: RunContext, horizon: str = "today", focus: str = ""
     ) -> dict[str, object]:
         """Suggest what he should do: a prioritised plan with reasons.
 

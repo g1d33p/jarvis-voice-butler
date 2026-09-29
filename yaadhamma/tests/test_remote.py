@@ -307,3 +307,19 @@ def test_reply_starting_with_prefix_is_not_a_command(setup) -> None:
     wa.chats["Jeevan (You)"].append(_msg("Yaadhamma here: all done", time="10:01"))
     asyncio.run(poller.poll_once(_noon()))
     assert len(orch.started) == 1  # the reply was skipped, not executed
+
+
+def test_phone_commands_get_a_working_orchestrator(monkeypatch) -> None:
+    """2026-09-29: every phone command failed for hours with
+    'Orchestrator.__init__() missing 2 required positional arguments'."""
+    for key in ("LIVEKIT_API_KEY", "LIVEKIT_API_SECRET", "GOOGLE_API_KEY"):
+        monkeypatch.setenv(key, "test-value")
+    from remote import real_orchestrator_factory
+
+    orchestrator = real_orchestrator_factory()
+
+    # The same tools the voice gets, so gates and audit entries are identical.
+    assert {"whatsapp_send_message", "calendar_add_event", "run_task"} <= set(
+        orchestrator.registry.names
+    ) | {"run_task"}
+    assert orchestrator.store is not None

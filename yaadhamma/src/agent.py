@@ -116,40 +116,41 @@ def _local_vad():
     return inference.VAD(min_silence_duration=config.LOCAL_VAD_SILENCE_S)
 
 
+def build_toolsets(browser: BrowserManager | None = None):
+    """Every toolset, sharing one approval manager and audit log.
+
+    Used by the voice assistant and by phone commands (remote.py), so both
+    paths get identical tools, gates and audit entries.
+    """
+    browser = browser or BrowserManager(headless=True)
+    audit_log = AuditLog()
+    approvals = ApprovalManager(audit=audit_log)
+    by_name = {
+        "browser_tools": BrowserTools(browser, approvals=approvals),
+        "mac_tools": MacTools(approvals=approvals),
+        "file_tools": FileTools(approvals=approvals),
+        "gmail_tools": GmailTools(approvals=approvals),
+        "approval_tools": ApprovalTools(approvals=approvals),
+        "observation_tools": ObservationTools(browser),
+        "memory_tools": MemoryTools(audit=audit_log),
+        "commitment_tools": CommitmentTools(),
+        "whatsapp_tools": WhatsAppTools(browser=browser, approvals=approvals),
+        "calendar_tools": CalendarTools(approvals=approvals),
+    }
+    shared = {"audit_log": audit_log, "approvals": approvals, "by_name": by_name}
+    return tuple(by_name.values()), shared
+
+
 class Assistant(Agent):
     def __init__(self, browser: BrowserManager | None = None) -> None:
         # The voice: Gemini Live speech-to-speech (realtime).
         self._voice_llm = voice_components()
         self.browser = browser or BrowserManager(headless=True)
-        # One approval manager and one audit log shared by every toolset, so
-        # an approval asked for in one path can be answered in any other, and
-        # every consequential action is recorded in one place.
-        self.audit_log = AuditLog()
-        self.approvals = ApprovalManager(audit=self.audit_log)
-        self.browser_tools = BrowserTools(self.browser, approvals=self.approvals)
-        self.mac_tools = MacTools(approvals=self.approvals)
-        self.file_tools = FileTools(approvals=self.approvals)
-        self.gmail_tools = GmailTools(approvals=self.approvals)
-        self.approval_tools = ApprovalTools(approvals=self.approvals)
-        self.observation_tools = ObservationTools(self.browser)
-        self.memory_tools = MemoryTools(audit=self.audit_log)
-        self.commitment_tools = CommitmentTools()
-        self.whatsapp_tools = WhatsAppTools(
-            browser=self.browser, approvals=self.approvals
-        )
-        self.calendar_tools = CalendarTools(approvals=self.approvals)
-        toolsets = (
-            self.browser_tools,
-            self.mac_tools,
-            self.file_tools,
-            self.gmail_tools,
-            self.approval_tools,
-            self.observation_tools,
-            self.memory_tools,
-            self.commitment_tools,
-            self.whatsapp_tools,
-            self.calendar_tools,
-        )
+        toolsets, shared = build_toolsets(self.browser)
+        self.audit_log = shared["audit_log"]
+        self.approvals = shared["approvals"]
+        for name, toolset in shared["by_name"].items():
+            setattr(self, name, toolset)
         self._end_call_tool = EndCallTool(
             extra_description=(
                 "Only end the call after the user clearly says they are finished, "
