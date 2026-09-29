@@ -129,6 +129,10 @@ class VoiceWorker:
     def __init__(self, log_path: Path | None = None) -> None:
         self._proc: subprocess.Popen | None = None
         self._started_at: float | None = None
+        # Session cost baseline: today's model spend at session start, so the
+        # menu can show the session's estimated cost as the delta. None when
+        # the store could not be read.
+        self._session_cost_baseline: float | None = None
         self._log_path = log_path or Path.home() / ".yaadhamma" / "voice-worker.log"
         self._log_file = None
         self._quick_failures = 0
@@ -203,6 +207,7 @@ class VoiceWorker:
             stderr=subprocess.STDOUT,
         )
         self._started_at = time.monotonic()
+        self._session_cost_baseline = _today_cost_usd()
         # Silence is measured from the moment the session opens.
         note_speech_activity(time.monotonic())
         return True
@@ -266,6 +271,8 @@ class VoiceWorker:
     def stop(self) -> None:
         proc, self._proc = self._proc, None
         self._close_log()
+        self._started_at = None
+        self._session_cost_baseline = None
         if proc is None:
             return
         if proc.poll() is not None:
@@ -316,6 +323,27 @@ class VoiceWorker:
             return agent_is_speaking() or task_is_running()
         except Exception:
             return False
+
+    @property
+    def session_elapsed_s(self) -> float:
+        """Seconds since this session opened. 0 when no session is open."""
+        if not self.running or self._started_at is None:
+            return 0.0
+        return max(0.0, time.monotonic() - self._started_at)
+
+    @property
+    def session_cost_usd(self) -> float | None:
+        """Estimated model spend since the session opened (today's total
+        minus the baseline at start). None when no session is open or the
+        baseline could not be read. The session's own turns dominate this
+        delta, so it is honest enough for a menu line; the provider's
+        billing page is the truth."""
+        if not self.running or self._session_cost_baseline is None:
+            return None
+        now = _today_cost_usd()
+        if now is None:
+            return None
+        return max(0.0, now - self._session_cost_baseline)
 
 
 def _which(name: str) -> str | None:
@@ -391,6 +419,80 @@ class PTTController:
             return False
         self._worker.stop()
         return True
+
+
+def _today_cost_usd() -> float | None:
+    """Today's estimated model spend, from costs.py. None on any failure."""
+    try:
+        from costs import CostStore
+
+        return float(CostStore().today_usd())
+    except Exception:
+        return None
+
+
+def _session_info(worker: VoiceWorker) -> dict:
+    """Facts for the menu's session line. Never raises."""
+    try:
+        return {
+            "active": bool(worker.running),
+            "elapsed_s": worker.session_elapsed_s,
+            "cost_usd": worker.session_cost_usd,
+        }
+    except Exception:
+        return {"active": False, "elapsed_s": 0.0, "cost_usd": None}
+
+
+def _build_ui_controller(worker: VoiceWorker, toggle_session):
+    """Build the menu-bar/orb controller.
+
+    Construction is pure: it reads nothing and writes nothing — detection
+    state (control file, mic gate, wake machine, worker) is untouched. The
+    orb click / menu item calls toggle_session. Returns the controller.
+    """
+    from ui_state import Actions, UIController
+
+    controller = UIController(
+        actions=Actions(toggle_session=toggle_session),
+        session_info=lambda: _session_info(worker),
+    )
+    return controller
+
+
+def _ptt_toggle_session(worker: VoiceWorker, ptt_controller: PTTController):
+    """Orb/menu toggle for push-to-talk mode: start a session, or finish
+    input in the open one (same semantics as releasing the key)."""
+
+    def toggle() -> str:
+        try:
+            if worker.running:
+                ptt_controller.on_release()
+                return "input finished — she will answer"
+            ptt_controller.on_press_start()
+            return "listening" if worker.running else "could not start the voice worker"
+        except Exception as exc:
+            log.warning("orb/menu session toggle failed: %s", exc)
+            return "session toggle failed"
+
+    return toggle
+
+
+def _ptt_state_provider(worker: VoiceWorker):
+    """Honest orb/menu state for push-to-talk mode."""
+
+    def provider():
+        from latency import agent_is_speaking
+        from ui_state import map_wake_to_ui
+
+        running = worker.running
+        return map_wake_to_ui(
+            "conversation" if running else "idle",
+            mic_open=running,
+            agent_speaking=agent_is_speaking(),
+            user_speaking=False,
+        )
+
+    return provider
 
 
 # The daemon is launched with `uv run --extra wake --extra ui`, but a stray
@@ -602,10 +704,27 @@ def _run_wake_mode(worker: VoiceWorker, ptt_controller, wake: dict, ptt: dict) -
         _install_shortcut(machine, wake["shortcut"])
 
     from ui import run_with_optional_ui
-    from ui_state import UIController, map_wake_to_ui
+    from ui_state import map_wake_to_ui
 
-    controller = UIController()
     mic_state = {"open": True}
+
+    def wake_toggle() -> str:
+        """Orb/menu toggle for wake-word mode: start a conversation, or end
+        the open one."""
+        from wake import WakeState
+
+        try:
+            if machine.state is WakeState.CONVERSATION:
+                machine.on_session_closed()
+                return "session finished"
+            if machine.on_wake_word(time.monotonic()):
+                return "listening"
+            return "already listening"
+        except Exception as exc:
+            log.warning("orb/menu session toggle failed: %s", exc)
+            return "session toggle failed"
+
+    controller = _build_ui_controller(worker, wake_toggle)
 
     def state_provider():
         from latency import agent_is_speaking
@@ -636,20 +755,12 @@ def _run_ptt_mode(worker: VoiceWorker, ptt_controller: PTTController, ptt: dict)
     _install_ptt_shortcut(ptt_controller)
 
     from ui import run_with_optional_ui
-    from ui_state import UIController, map_wake_to_ui
 
-    controller = UIController()
-
-    def state_provider():
-        from latency import agent_is_speaking
-
-        running = worker.running
-        return map_wake_to_ui(
-            "conversation" if running else "idle",
-            mic_open=running,
-            agent_speaking=agent_is_speaking(),
-            user_speaking=False,
-        )
+    controller = _build_ui_controller(
+        worker,
+        _ptt_toggle_session(worker, ptt_controller),
+    )
+    state_provider = _ptt_state_provider(worker)
 
     run_with_optional_ui(
         lambda: _ptt_loop(ptt_controller, worker, listener),

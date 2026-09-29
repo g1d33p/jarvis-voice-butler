@@ -718,3 +718,131 @@ def test_voice_worker_busy_reads_speech_and_task_state(
     assert worker.busy is True
     latency.note_task_running(False)
     assert worker.busy is False
+
+
+# --------------------------------- v2 Stage 2: orb click + session display
+
+
+class FakeStage2Worker(FakeSessionWorker):
+    """FakeSessionWorker plus the session facts the menu shows."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._elapsed = 0.0
+        self._cost = None
+
+    @property
+    def session_elapsed_s(self) -> float:
+        return self._elapsed
+
+    @property
+    def session_cost_usd(self):
+        return self._cost
+
+
+def _untouched_paths():
+    from hotkey import ptt_mic_path
+    from ui_state import control_path
+
+    return (control_path(), ptt_mic_path())
+
+
+def _snapshot(paths):
+    return {str(p): p.read_bytes() if p.exists() else None for p in paths}
+
+
+def test_ui_construction_leaves_detection_state_untouched(daemon) -> None:
+    """The startup bug: building the menu-bar/orb controller must not change
+    detection state — no control-file write, no mic-gate write, no worker."""
+    from hotkey import ptt_mic_path
+
+    worker = FakeStage2Worker()
+    ptt = daemon.PTTController(worker=worker, idle_timeout_s=20.0, clock=FakeClock())
+    before = _snapshot(_untouched_paths())
+    daemon._build_ui_controller(worker, daemon._ptt_toggle_session(worker, ptt))
+    assert _snapshot(_untouched_paths()) == before
+    assert worker.started == 0
+    assert worker.stopped == 0
+    assert ptt_mic_path().name == "ptt-mic.json"
+
+
+def test_ptt_toggle_starts_a_session_when_idle(daemon) -> None:
+    worker = FakeStage2Worker()
+    ptt = daemon.PTTController(worker=worker, idle_timeout_s=20.0, clock=FakeClock())
+    toggle = daemon._ptt_toggle_session(worker, ptt)
+    assert toggle() == "listening"
+    assert worker.started == 1
+    assert worker.running
+
+
+def test_ptt_toggle_finishes_input_without_killing_the_session(daemon) -> None:
+    worker = FakeStage2Worker()
+    ptt = daemon.PTTController(worker=worker, idle_timeout_s=20.0, clock=FakeClock())
+    toggle = daemon._ptt_toggle_session(worker, ptt)
+    toggle()  # start
+    assert toggle() == "input finished — she will answer"
+    assert worker.paused == 1  # mic paused, like releasing the key
+    assert worker.stopped == 0  # session keeps running
+    assert worker.running
+
+
+def test_ptt_toggle_never_raises(daemon) -> None:
+    class BrokenWorker(FakeStage2Worker):
+        def start(self):
+            raise RuntimeError("nope")
+
+    worker = BrokenWorker()
+    ptt = daemon.PTTController(worker=worker, idle_timeout_s=20.0, clock=FakeClock())
+    toggle = daemon._ptt_toggle_session(worker, ptt)
+    assert isinstance(toggle(), str)
+
+
+def test_session_info_reports_honest_facts(daemon) -> None:
+    worker = FakeStage2Worker()
+    worker._running = True
+    worker._elapsed = 192.0
+    worker._cost = 0.04
+    info = daemon._session_info(worker)
+    assert info == {"active": True, "elapsed_s": 192.0, "cost_usd": 0.04}
+
+
+def test_session_info_quiet_when_idle(daemon) -> None:
+    worker = FakeStage2Worker()
+    info = daemon._session_info(worker)
+    assert info["active"] is False
+
+
+def test_session_cost_is_today_delta(daemon, monkeypatch) -> None:
+    """Session cost = today's spend now minus the baseline at start."""
+    import costs
+
+    monkeypatch.setattr(costs.CostStore, "today_usd", lambda self: 1.25)
+    worker = daemon.VoiceWorker.__new__(daemon.VoiceWorker)
+    worker._proc = object()  # stand-in: only poll() matters
+    worker._started_at = None
+    worker._session_cost_baseline = None
+
+    class Proc:
+        def poll(self):
+            return None
+
+    worker._proc = Proc()
+    import time as _time
+
+    worker._started_at = _time.monotonic() - 60.0
+    worker._session_cost_baseline = 1.00
+    assert worker.session_elapsed_s >= 60.0
+    assert worker.session_cost_usd == pytest.approx(0.25)
+
+
+def test_session_cost_none_when_baseline_missing(daemon) -> None:
+    worker = daemon.VoiceWorker.__new__(daemon.VoiceWorker)
+
+    class Proc:
+        def poll(self):
+            return None
+
+    worker._proc = Proc()
+    worker._started_at = 0.0
+    worker._session_cost_baseline = None
+    assert worker.session_cost_usd is None

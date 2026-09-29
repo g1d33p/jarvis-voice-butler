@@ -85,7 +85,18 @@ def run_macos_ui(controller, state_provider) -> None:
             content.setLayer_(layer)
             self.setContentView_(content)
             self._orb_layer = layer
+            # Click handler, set by YaadhammaBar after init. A click starts a
+            # session, or finishes input in the open one (same as releasing
+            # the push-to-talk key).
+            self.on_click = None
             return self
+
+        def mouseDown_(self, event):  # noqa: N802 — AppKit selector name
+            try:
+                if callable(self.on_click):
+                    self.on_click()
+            except Exception:
+                log.warning("orb click failed", exc_info=True)
 
         def set_state(self, state: UIState, level: float) -> None:
             spec = VISUALS[state]
@@ -126,6 +137,9 @@ def run_macos_ui(controller, state_provider) -> None:
                 screen = NSScreen.mainScreen().frame()
                 pos = (screen.size.width - ORB_SIZE - 40, 120)
             self._orb.setFrameOrigin_(pos)
+            # Orb click = start session / finish input (same as releasing the
+            # push-to-talk key). Never raises out of the click handler.
+            self._orb.on_click = lambda: self.controller.toggle_session()
             self._orb.orderFrontRegardless()
             self._caption_item = None
             self._rebuild_menu()
@@ -139,6 +153,10 @@ def run_macos_ui(controller, state_provider) -> None:
             for title, action in self.controller.menu_items():
                 if title == "cost":
                     item = rumps.MenuItem(lines["cost"])
+                    item.set_callback(lambda _: self.refresh_(None))
+                    self.menu.add(item)
+                elif title == "session":
+                    item = rumps.MenuItem(lines["session"])
                     item.set_callback(lambda _: self.refresh_(None))
                     self.menu.add(item)
                 elif title == "whatsapp":
@@ -160,6 +178,7 @@ def run_macos_ui(controller, state_provider) -> None:
                 self.controller.listening,
                 self.controller.muted,
                 self.controller.jobs_paused,
+                bool(self.controller.session_info().get("active")),
             )
 
         def _quit_app(self):
@@ -176,6 +195,7 @@ def run_macos_ui(controller, state_provider) -> None:
                 self.controller.listening,
                 self.controller.muted,
                 self.controller.jobs_paused,
+                bool(self.controller.session_info().get("active")),
             )
             if flags != self._menu_flags:
                 self._rebuild_menu()
@@ -187,6 +207,8 @@ def run_macos_ui(controller, state_provider) -> None:
             for item in self.menu.values():
                 if item.title.startswith("Today's cost"):
                     item.title = lines["cost"]
+                elif item.title.startswith("Session:"):
+                    item.title = lines["session"]
                 elif item.title.startswith("WhatsApp"):
                     item.title = lines["whatsapp"]
             if self._caption_item is not None:

@@ -68,3 +68,53 @@ Push target: `v2` only. Nothing here touches `main`, `gemini-live`,
 - `fn` is accepted as a configuration value but refused at startup with a
   clear error: pynput 1.8.2 does not expose Fn press/release reliably on
   macOS. Use `cmd_r` (Right Command), `alt_r` or `ctrl_r`.
+
+---
+
+## Stage 2 — Orb click, honest state, session cost (built, sandbox-tested)
+
+### What was built
+- **Orb click** (`src/ui_macos.py`): clicking the orb calls
+  `controller.toggle_session()` — first click starts a session, the next
+  finishes input (same as releasing the push-to-talk key). The click handler
+  never raises out of the AppKit event.
+- **Honest states**: the daemon's state provider already maps to
+  idle/listening/thinking/speaking; Stage 2 wires both modes through one
+  shared `_build_ui_controller()` helper in `scripts/yaadhamma_daemon.py`.
+- **Startup-bug fix**: menu/orb construction is pure — it reads and writes
+  nothing. A test snapshots the control file, the mic gate and the worker
+  around construction and asserts nothing changed.
+- **Session cost line**: the menu shows `Session: 3:12 · ~$0.04` (elapsed
+  time plus estimated cost) and still shows today's total from `costs.py`.
+  Session cost = today's spend now minus the baseline taken at session
+  start; when the baseline is unavailable the line says `cost n/a` instead
+  of inventing a number.
+- The menu also gains a `Start session` / `Finish input` item that mirrors
+  the orb.
+- `YAADHAMMA_UI=off` still disables the UI entirely, and `src/ui.py`
+  guarantees a UI failure can never take the daemon down.
+
+### Tests (all green in the sandbox)
+- `tests/test_ui.py`: construction calls no actions; menu titles reflect
+  session state; the session item triggers the toggle; session line
+  formatting including missing-cost and never-raises cases.
+- `tests/test_daemon.py`: construction leaves detection state untouched;
+  toggle starts a session when idle and finishes input (mic paused, session
+  alive) when running; toggle never raises; session cost is the
+  today-minus-baseline delta and `None` when the baseline is missing.
+- `ruff check` and `ruff format`: clean.
+
+### What could not be verified here
+- The orb click itself, the Core Animation state changes, and the menu
+  rendering — all need macOS. The wiring behind them (controller, actions,
+  state mapping) is tested; the drawing is not.
+- Whether the session-cost delta feels right in practice; other model spend
+  during a session (e.g. a scheduled digest landing mid-call) is attributed
+  to the session.
+
+### Needs Jeevan (Mac acceptance)
+1. Click the orb — she should start listening; click again — she answers.
+2. The menu bar icon should move through idle → listening → thinking →
+   speaking honestly.
+3. The menu's session line should show elapsed time and a plausible cost,
+   and today's total should keep working.

@@ -168,3 +168,95 @@ def test_ui_import_failure_falls_back_to_headless(monkeypatch) -> None:
         lambda: ran.append("wake"), UIController(actions=_fake_actions([]))
     )
     assert ran == ["wake"]
+
+
+# --------------------------------- v2 Stage 2: orb click + session display
+
+from ui_state import default_session_info, format_session_line  # noqa: E402
+
+
+class RecordingActions(Actions):
+    def __init__(self) -> None:
+        super().__init__(
+            set_muted=lambda muted: calls.append(("set_muted", muted)),
+            set_listening=lambda listening: calls.append(("set_listening", listening)),
+            set_jobs_paused=lambda paused: (
+                calls.append(("set_jobs_paused", paused)) or "paused"
+            ),
+            toggle_session=lambda: calls.append(("toggle_session",)) or "toggled",
+            get_today_cost=lambda: "$0.00",
+            get_whatsapp_status=lambda: "WhatsApp: paired",
+            open_plans=lambda: calls.append(("open_plans",)),
+            open_settings=lambda: calls.append(("open_settings",)),
+            quit=lambda: calls.append(("quit",)),
+        )
+
+
+calls: list = []
+
+
+def _recording_controller(**kwargs) -> UIController:
+    calls.clear()
+    return UIController(actions=RecordingActions(), **kwargs)
+
+
+def test_construction_calls_no_actions() -> None:
+    """The startup bug: building the controller must never change detection
+    state — no action may fire at construction."""
+    _recording_controller()
+    assert calls == []
+
+
+def test_menu_offers_start_session_when_idle() -> None:
+    controller = _recording_controller()
+    titles = [title for title, _ in controller.menu_items()]
+    assert titles[0] == "Start session"
+    assert titles[1] == "session"  # the live elapsed/cost line from status_lines()
+
+
+def test_menu_offers_finish_input_when_session_open() -> None:
+    controller = _recording_controller(
+        session_info=lambda: {"active": True, "elapsed_s": 65.0, "cost_usd": 0.03}
+    )
+    titles = [title for title, _ in controller.menu_items()]
+    assert titles[0] == "Finish input"
+
+
+def test_menu_session_item_triggers_toggle() -> None:
+    controller = _recording_controller()
+    _, action = controller.menu_items()[0]
+    action()
+    assert ("toggle_session",) in calls
+
+
+def test_toggle_session_returns_the_action_message() -> None:
+    controller = _recording_controller()
+    assert controller.toggle_session() == "toggled"
+
+
+def test_status_lines_show_no_session_when_idle() -> None:
+    controller = _recording_controller()
+    assert controller.status_lines()["session"] == "Session: none open"
+
+
+def test_status_lines_show_session_elapsed_and_cost() -> None:
+    controller = _recording_controller(
+        session_info=lambda: {"active": True, "elapsed_s": 192.0, "cost_usd": 0.041}
+    )
+    assert controller.status_lines()["session"] == "Session: 3:12 · ~$0.04"
+
+
+def test_format_session_line_without_cost() -> None:
+    assert (
+        format_session_line({"active": True, "elapsed_s": 9.0, "cost_usd": None})
+        == "Session: 0:09 · cost n/a"
+    )
+
+
+def test_format_session_line_never_raises() -> None:
+    assert format_session_line({}) == "Session: none open"
+    assert format_session_line({"active": True}) == "Session: 0:00 · cost n/a"
+
+
+def test_default_session_info_is_idle() -> None:
+    assert default_session_info()["active"] is False

@@ -190,6 +190,10 @@ def default_quit(project_dir: Path) -> None:
     raise SystemExit(0)
 
 
+def default_toggle_session() -> str:
+    return "session control is not wired up"
+
+
 @dataclass
 class Actions:
     """Every menu action, injectable for tests."""
@@ -197,6 +201,7 @@ class Actions:
     set_muted: Callable[[bool], None] = default_set_muted
     set_listening: Callable[[bool], None] = default_set_listening
     set_jobs_paused: Callable[[bool], str] = default_set_jobs_paused
+    toggle_session: Callable[[], str] = default_toggle_session
     get_today_cost: Callable[[], str] = default_today_cost
     get_whatsapp_status: Callable[[], str] = default_whatsapp_status
     open_plans: Callable[[], None] = default_open_plans
@@ -204,9 +209,30 @@ class Actions:
     quit: Callable[[], None] = lambda: default_quit(Path(__file__).resolve().parents[1])
 
 
+def format_session_line(info: dict) -> str:
+    """Menu line for the current voice session. Never raises.
+
+    info: {"active": bool, "elapsed_s": float, "cost_usd": float | None}.
+    """
+    try:
+        if not info.get("active"):
+            return "Session: none open"
+        elapsed = float(info.get("elapsed_s", 0.0) or 0.0)
+        minutes, seconds = divmod(int(max(0.0, elapsed)), 60)
+        cost = info.get("cost_usd")
+        cost_text = f"~${cost:.2f}" if isinstance(cost, (int, float)) else "cost n/a"
+        return f"Session: {minutes}:{seconds:02d} · {cost_text}"
+    except Exception:
+        return "Session: n/a"
+
+
 @dataclass
 class UICaptions:
     enabled: bool = False
+
+
+def default_session_info() -> dict:
+    return {"active": False, "elapsed_s": 0.0, "cost_usd": None}
 
 
 @dataclass
@@ -224,6 +250,14 @@ class UIController:
     listening: bool = True
     jobs_paused: bool = False
     caption: str = ""
+    # Session facts for the menu (elapsed time, estimated cost). The daemon
+    # injects the real provider; the default reports no session.
+    session_info: Callable[[], dict] = default_session_info
+
+    def toggle_session(self) -> str:
+        """Orb click / menu item: start a session, or finish input in the
+        open one (same as releasing the push-to-talk key)."""
+        return self.actions.toggle_session()
 
     def toggle_mute(self) -> None:
         self.muted = not self.muted
@@ -245,11 +279,18 @@ class UIController:
         return {
             "cost": f"Today's cost: {self.actions.get_today_cost()}",
             "whatsapp": self.actions.get_whatsapp_status(),
+            "session": format_session_line(self.session_info()),
         }
 
     def menu_items(self) -> list[tuple[str, Callable[[], None]]]:
         """(title, action) in menu order. ui_macos renders these."""
+        session_open = bool(self.session_info().get("active"))
         return [
+            (
+                "Finish input" if session_open else "Start session",
+                self.toggle_session,
+            ),
+            ("session", lambda: None),
             (
                 f"{'Stop' if self.listening else 'Start'} listening",
                 self.toggle_listening,
