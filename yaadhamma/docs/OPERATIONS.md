@@ -1,36 +1,35 @@
-# Yaadhamma Operations
+# Yaadhamma Operations (v2)
 
 Day-to-day running of the assistant on Jeevan's Mac. Everything here
-assumes the project checked out at `~/jarvis-voice-butler` and Python
-managed with `uv`. Copy-paste the commands as-is; nothing here asks you
-to edit code.
+assumes the project checked out at `~/jarvis-voice-butler` on the `v2`
+branch, and Python managed with `uv`. Copy-paste the commands as-is;
+nothing here asks you to edit code.
 
 ## First evening: the one-time setup
 
 Do these once, in order. Each takes a couple of minutes.
 
 1. **Check out the code**: `git clone <repo-url> ~/jarvis-voice-butler`
-   (or `git fetch origin && git reset --hard origin/v1` if already cloned).
-2. **Health check**: `cd ~/jarvis-voice-butler/yaadhamma &&
-   uv run scripts/selftest.py` — 9 real checks, no network, takes seconds.
-   Everything should say PASS.
-3. **Secrets**: copy `.env.example` to `.env.local` and fill in
+   (or `git fetch origin && git reset --hard origin/v2` if already cloned).
+2. **Install the voice extras**: `cd ~/jarvis-voice-butler/yaadhamma &&
+   uv sync --extra wake --extra ui` — the wake-word listener, the
+   push-to-talk key listener, and the menu-bar UI all need these.
+3. **Health check**: `uv run scripts/selftest.py` — 23 real checks, no
+   network, takes seconds. Everything should say PASS.
+4. **Secrets**: copy `.env.example` to `.env.local` and fill in
    `GOOGLE_API_KEY` plus the Google OAuth client ID/secret.
-4. **Pair WhatsApp**: stop the agent if it is running, then
+5. **Pair WhatsApp**: stop the agent if it is running, then
    `uv run scripts/whatsapp_signin.py` and scan the QR with the phone
    (WhatsApp > Settings > Linked devices).
-5. **Sign in Gmail and Calendar**: `uv run scripts/gmail_signin.py` and
+6. **Sign in Gmail and Calendar**: `uv run scripts/gmail_signin.py` and
    `uv run scripts/calendar_signin.py` (three Gmail accounts; the label
    and archiving features need the `gmail.modify` scope — re-link any
    account whose `--check` says is missing it).
-6. **Start everything**:
+7. **Start everything**:
    `uv run scripts/digest_schedule.py on` (scheduled jobs),
    `uv run scripts/remote_schedule.py on` (phone access),
-   `python scripts/daemon_control.py install` (always-on wake word).
-7. **Say "Hey Jarvis"** and ask her something small.
-
-Microphone permission lives in System Settings > Privacy & Security >
-Microphone. Full per-service notes are below under "Sign-in and pairing".
+   `python scripts/daemon_control.py install` (the always-on daemon).
+8. **Hold the right Command key** and ask her something small.
 
 ### Editing settings (.env.local)
 
@@ -42,7 +41,8 @@ value, which only surfaced later as a confusing "no chat found" error.
 Keep one `KEY=value` per line and leave the trailing newline in place.
 `scripts/selftest.py` has a ".env.local parses sanely" check that catches
 glued lines, duplicate keys, and implausible values before a live run —
-run it after any settings change.
+run it after any settings change. Every setting is documented in
+`docs/SETTINGS.md`.
 
 ## Quick health check
 
@@ -59,11 +59,11 @@ space, and recent errors from the audit log. Read-only; changes nothing.
 
 - Voice agent: run `uv run src/agent.py` in a terminal (foreground, so
   approval prompts reach Jeevan).
-- Always-on daemon (wake word): `python scripts/daemon_control.py install`
+- Always-on daemon: `python scripts/daemon_control.py install`
   starts her at login and now; `status` / `start` / `stop` / `uninstall`
   control it. Logs land in `~/.yaadhamma/daemon.log`. The daemon only runs
-  the wake loop — scheduled jobs stay in their own launchd jobs, so a daemon
-  crash cannot stop the digests.
+  the voice loop — scheduled jobs stay in their own launchd jobs, so a
+  daemon crash cannot stop the digests.
 - Scheduled jobs: installed with `uv run scripts/digest_schedule.py on`,
   removed with `... off`. They run headless via launchd; logs land in
   `~/.yaadhamma/logs/`.
@@ -84,45 +84,89 @@ space, and recent errors from the audit log. Read-only; changes nothing.
    `python scripts/daemon_control.py stop` and
    `python scripts/daemon_control.py start`.
 3. Usual causes: microphone permission (System Settings > Privacy & Security
-   > Microphone, then restart), a missing extra (`uv sync --extra wake`
-   and/or `--extra ui`), or a bad value in `.env.local`.
+   > Microphone, then restart), a missing extra (`uv sync --extra wake --extra ui`),
+   or a bad value in `.env.local`.
 4. Reinstall after fixing: `python scripts/daemon_control.py uninstall`
    then `python scripts/daemon_control.py install`.
-5. `python scripts/daemon_control.py status` also reports whether the
-   running daemon matches the checked-out code: the daemon records its
-   git commit and launch arguments in `~/.yaadhamma/daemon-info.json` at
-   every start, and status says STALE when the checkout has moved on.
-   Restart the daemon after every `git pull`.
+5. `python scripts/daemon_control.py status` reports three things: which
+   input she is listening on (push-to-talk, wake word, or both), whether
+   a voice session is currently open, and whether the running daemon
+   matches the checked-out code (it records its git commit at every
+   start; status says STALE when the checkout has moved on). Restart the
+   daemon after every `git pull`.
 
-## Wake word
+## Talking to her: push-to-talk (v2)
 
-Out of the box she listens for **"Hey Jarvis"** using openWakeWord —
-no account, no training. `YAADHAMMA_WAKE=off` in `.env.local` disables the
-whole always-on listener. `Option+Space` also starts a conversation
-(needs `pip install pynput`); 90 seconds of silence closes the session.
+The primary way to talk to her is **hold-to-talk**: press and hold the
+**right Command key**. Keep holding while you speak, release when you are
+done.
 
-### Foreground test mode (microphone permission)
+- She starts listening after the key has been held **200 milliseconds** —
+  a quick tap does nothing, so brushing the key never triggers her.
+- **Release only pauses the microphone.** Your session and anything she
+  is doing keep running. Hold the key again and you rejoin the same
+  session — you never have to start over mid-thought.
+- **Option+Space** still works as a start/stop toggle, as before.
+- 20 seconds of silence closes the session on its own.
 
-A launchd background agent never gets the macOS microphone permission
-prompt: if the daemon log shows `PaMacCore err=-50`, the background
-daemon can never open the mic on its own. Run it once in the foreground
-from the project directory so the prompt can appear:
+### Changing the key
 
-```
-uv run --extra wake --extra ui python scripts/yaadhamma_daemon.py
-```
+In `.env.local`:
 
-Grant microphone access when macOS asks (the prompt names the `uv`
-binary — permission attaches to the binary that opens the mic, not to
-the script), say "Hey Jarvis" to confirm it hears you, then stop with
-Ctrl+C and restart the background daemon:
+- `YAADHAMMA_PTT=off` disables push-to-talk entirely.
+- `YAADHAMMA_PTT_KEY` picks the key: `cmd_r` (default), `alt_r`, or
+  `ctrl_r`. The `fn` key is refused on purpose — pynput cannot reliably
+  tell fn presses apart, so she would miss holds or fire on taps.
+- `YAADHAMMA_PTT_HOLD_MS` changes the hold threshold (default `200`).
+- `YAADHAMMA_IDLE_TIMEOUT_S` changes the silence timeout (default `20`).
 
-```
-python scripts/daemon_control.py start
-```
+Restart the daemon after changing any of these.
 
-This is also the fastest way to test any daemon change: the log goes
-straight to the terminal instead of `~/.yaadhamma/daemon.log`.
+### If the key does nothing
+
+1. Run `uv run scripts/selftest.py` — the "push-to-talk listener is wired
+   to the configured key" check proves the listener routes your key, and
+   tells you if pynput is missing (`uv sync --extra wake --extra ui`
+   installs it).
+2. macOS needs the terminal app to have **Input Monitoring** permission
+   (System Settings > Privacy & Security > Input Monitoring) for any app
+   to watch key presses. Enable it, then restart the daemon.
+3. If you changed `YAADHAMMA_PTT_KEY`, check the spelling: only `cmd_r`,
+   `alt_r`, `ctrl_r`.
+
+## The orb and honest state
+
+The daemon can show a menu-bar icon plus a small floating orb (dark
+near-black/violet-blue, draggable, remembers its position). Install the UI
+extra once: `uv sync --extra ui` from the project directory (needs macOS;
+it pulls in rumps / PyObjC).
+
+- **Click the orb** to start a voice session; click again to finish your
+  input (this pauses the microphone the same way releasing the key does —
+  the session stays alive until the silence timeout).
+- The icon and orb always show her real state: **idle** (daemon up, mic
+  closed), **listening** (mic open, waiting for you), **thinking** (in a
+  session, neither side speaking), **speaking** (she is talking), **muted**,
+  or **error**. She never pretends to listen when she isn't.
+- Menu: Start/Stop listening · Mute · Pause background jobs · Today's cost ·
+  WhatsApp status · Open plans folder · Settings · Quit.
+- `YAADHAMMA_UI=off` in `.env.local` runs the daemon headless. If the UI
+  ever fails to start, the daemon logs a warning and keeps listening —
+  a UI failure can never take the voice loop down.
+- `YAADHAMMA_UI_CAPTIONS=on` shows the last utterance and reply as fading
+  text beneath the orb (off by default).
+- Rendering needs a real Mac and is unverified here; the state mapping and
+  menu actions are covered by `tests/test_ui.py`.
+
+## The wake word (off by default in v2)
+
+Out of the box in v2 she does **not** listen for "Hey Jarvis" — push-to-talk
+is the primary input, and always-on listening is off.
+
+To re-enable it, set `YAADHAMMA_WAKE=on` in `.env.local` and restart the
+daemon. She listens for **"Hey Jarvis"** using openWakeWord — no account,
+no training. `Option+Space` also starts a conversation. 20 seconds of
+silence closes the session.
 
 ### Custom wake phrase ("Hey Yaadhamma")
 
@@ -137,28 +181,66 @@ openWakeWord's own training process, which needs no account.
 that case install `pvporcupine` separately — it is no longer in the
 wake extra.)
 
-Microphone permission: if the daemon logs a microphone error, open
-System Settings > Privacy & Security > Microphone on the Mac, enable
-access for the app running the daemon, and restart it. Real microphone
-behaviour is unverified in the sandbox (see `docs/BUILD_REPORT.md`).
+## Cost model
 
-## Menu-bar UI
+Every model call she makes is recorded in `~/.yaadhamma/yaadhamma.db`
+(the `model_calls` table) with an estimated dollar cost, tagged by
+feature (`voice`, `voice_note`, `digest`, …).
 
-The daemon can show a menu-bar icon plus a small floating orb (dark
-near-black/violet-blue, draggable, remembers its position). Install the UI
-extra once: `uv sync --extra ui` from the project directory (needs macOS; it pulls in rumps /
-PyObjC).
+- **Session cost**: when a voice session opens, she notes today's total
+  spend; the orb menu shows today's spend minus that baseline — what
+  *this session* has cost so far. It updates as calls are recorded.
+- **Monthly budget**: `YAADHAMMA_MONTHLY_BUDGET_USD` in `.env.local`
+  (default 35). The morning brief warns when the month's estimated spend
+  crosses it. It never blocks anything.
+- **The provider billing page is the only real meter.** Her numbers are
+  estimates for your awareness, not invoices. If Gemini calls start
+  failing with 429s, check the AI Studio spending cap first.
+- `uv run scripts/status.py` shows the last 7 days of spend per feature
+  and month-to-date against the budget.
 
-- The icon mirrors her state: listening, thinking, speaking, muted, error.
-- Menu: Start/Stop listening · Mute · Pause background jobs · Today's cost ·
-  WhatsApp status · Open plans folder · Settings · Quit.
-- `YAADHAMMA_UI=off` in `.env.local` runs the daemon headless. If the UI
-  ever fails to start, the daemon logs a warning and keeps listening —
-  a UI failure can never take the voice loop down.
-- `YAADHAMMA_UI_CAPTIONS=on` shows the last utterance and reply as fading
-  text beneath the orb (off by default).
-- Rendering needs a real Mac and is unverified here; the state mapping and
-  menu actions are covered by `tests/test_ui.py`.
+## WhatsApp voice notes
+
+From his own chat, Jeevan can send her a **voice note** instead of typing.
+No "Yaadhamma" prefix needed — a voice note in his own chat is always
+meant for her.
+
+- She downloads it (up to 8 MB), transcribes it, and runs the transcript
+  as a command — same tools, same approval gates, same audit as a typed
+  message.
+- She replies saying what she heard and what she did about it.
+- Voice notes **longer than 60 seconds** are skipped: she sends exactly
+  one reply saying it was too long, and does nothing else.
+  (`YAADHAMMA_VOICE_NOTE_MAX_S` changes the limit.)
+- If the download or transcription fails, she says so honestly and does
+  nothing — she never acts on a guess.
+- Only his own chats are polled (`YAADHAMMA_SELF_CHATS`); voice notes
+  anywhere else are ignored.
+- A voice note replaces a waiting approval question (newest wins), the
+  same as a typed message.
+- Real WhatsApp audio download and transcription quality are unverified
+  in the sandbox; the detection, limits, and failure behaviour are
+  covered by `tests/test_remote.py` and the self-test's "voice-note
+  audio path is reachable" check.
+
+## Sending files over WhatsApp
+
+Ask her in a voice session or by WhatsApp message: "send the file
+report.pdf to my own chat". She **always asks first** — the approval
+names the file, the folder it comes from, and the recipient — and she
+only sends to **his own chats** (refusing anything else is enforced in
+code, not left to her judgement).
+
+- She finds the file by exact path, by the tidy log (the nightly tidy may
+  have moved it), or by searching Desktop, Documents, Downloads and the
+  home folder. If she finds nothing — or several files with that name —
+  she asks instead of guessing.
+- Refusals before any approval: files outside the home folder, and files
+  over 64 MB.
+- She verifies the attachment actually appears in the chat before saying
+  it sent. If anything looks wrong, she reports the failure and never
+  retries blindly (a blind retry could deliver the file twice).
+- Every file send is appended to `~/.yaadhamma/audit.jsonl`.
 
 ## Phone access over WhatsApp
 
@@ -184,6 +266,69 @@ verification and audit.
   morning brief says so loudly and `uv run scripts/selftest.py` fails —
   the tracebacks are in `~/.yaadhamma/remote.log`. A passing self-test
   also proves the remote orchestrator actually constructs.
+
+## Browser troubleshooting
+
+Her WhatsApp runs in a dedicated Chromium window with its own profile
+(`~/.yaadhamma/chrome-profile`) — never Jeevan's own Chrome.
+
+1. **"WhatsApp is not paired"**: stop the agent first (the profile is
+   single-window — two processes cannot hold it), then
+   `uv run scripts/whatsapp_signin.py` and scan the QR with the phone
+   (WhatsApp > Settings > Linked devices).
+2. **Read-only check**: `uv run scripts/whatsapp_read_check.py` reads
+   chats and sends nothing. Safe to run any time.
+3. **A second Chromium window is open**: close every window that might be
+   holding the profile (including a stray sign-in run), then restart the
+   agent. The profile lock is the usual "it worked yesterday" culprit.
+4. **Stale session / weird page state**: `tail -40 ~/.yaadhamma/logs/*.log`
+   for the job that failed; the WhatsApp health history is in
+   `~/.yaadhamma/yaadhamma.db`, and the morning brief warns when the
+   WhatsApp check is failing.
+5. **File sends failing at the attach step**: WhatsApp Web changes its
+   composer markup from time to time. The failure is loud and sends
+   nothing — report it, and the attach selectors in
+   `src/whatsapp_extractors.js` need updating to match the new markup.
+
+## Microphone troubleshooting
+
+1. **No permission prompt ever appeared**: a launchd background agent never
+   gets the macOS microphone prompt. If the daemon log shows
+   `PaMacCore err=-50`, run the daemon once in the foreground so the
+   prompt can appear:
+   `uv run --extra wake --extra ui python scripts/yaadhamma_daemon.py`
+   Grant microphone access when macOS asks, confirm she hears you, then
+   stop with Ctrl+C and restart the background daemon:
+   `python scripts/daemon_control.py start`.
+2. **Permission was granted but she can't hear anything**: open
+   System Settings > Privacy & Security > Microphone and check the entry
+   is enabled. Note the permission attaches to the **`uv` binary** that
+   opened the mic, not to the script — this matters (see the app-bundle
+   note below).
+3. **Input Monitoring for the key listener**: the push-to-talk key watcher
+   needs System Settings > Privacy & Security > Input Monitoring enabled
+   for the terminal app, or key presses never arrive.
+4. **`uv run scripts/selftest.py`**: the "microphone permission" check
+   reports the current authorisation state on the Mac (authorised, denied,
+   or not yet asked).
+5. Real microphone behaviour is unverified in the sandbox
+   (see `docs/BUILD_REPORT.md`).
+
+### The stable app bundle (deferred — write-up only, not built)
+
+macOS microphone permission is keyed to the **binary that opens the mic**.
+Today that binary is `uv` — and every `uv` self-update replaces the
+binary, which silently invalidates the permission. The symptom is "she
+stopped hearing me after an update" with no error pointing at the cause.
+
+The durable fix, not yet built: a tiny `Yaadhamma.app` bundle with a
+stable bundle identifier, an `NSMicrophoneUsageDescription` string, and
+proper code signing. The launchd plist would run the bundle's launcher
+instead of `uv run`, so the permission attaches to Yaadhamma herself and
+survives updates. Building and signing it needs Jeevan's go-ahead (it
+touches his keychain and Developer ID choices), so it stays a plan until
+then. The foreground-test workaround above remains the fix in the
+meantime.
 
 ## Nightly tidy-ups (3 am)
 
@@ -242,10 +387,21 @@ Tokens live under `~/.yaadhamma/` and are never committed.
 ## Approvals
 
 Consequential actions (send a message or email, create a calendar
-event, trash a file) pause for Jeevan's explicit approval in the
+event, trash a file, send a file) pause for Jeevan's explicit approval in the
 terminal or voice session. One approval = one action, expires after 60
 seconds. Every approval, refusal and verification outcome is appended to
 `~/.yaadhamma/audit.jsonl`.
+
+## Morning brief warnings
+
+The 8:45 brief carries the plan, the calendar, and — when something needs
+him — a loud line:
+
+- **Phone commands keep failing**: the remote poll has failed the same way
+  3+ times in a row. Details in `~/.yaadhamma/remote.log`.
+- **The daemon is not running**: the wake word and push-to-talk do nothing
+  until it is restarted (`python scripts/daemon_control.py start`).
+- **Nothing is listening**: the wake word and push-to-talk are both off.
 
 ## Budget
 
@@ -263,19 +419,25 @@ spending cap first.
   WhatsApp health history
 - `~/.yaadhamma/memory.db` — durable memories
 - `~/.yaadhamma/voice_metrics.csv` — per-reply latency and tokens
+- `~/.yaadhamma/voice-session.json` — whether a voice session is open
+  (written by the daemon)
 
 ## When something breaks
 
-1. Run `scripts/status.py` — it surfaces the last 24h of audit errors.
-2. Check `~/.yaadhamma/logs/` for the failing job.
-3. WhatsApp Web: run `scripts/whatsapp_read_check.py` (reads, sends
+1. Run `uv run scripts/selftest.py` — 23 checks covering config, the
+   PTT listener, wake state, the remote poll, and voice notes.
+2. Run `uv run scripts/status.py` — it surfaces the last 24h of audit errors.
+3. Check `~/.yaadhamma/logs/` for the failing job.
+4. WhatsApp Web: run `scripts/whatsapp_read_check.py` (reads, sends
    nothing) or the full `digest_run.py --check`.
-4. Working rule: diagnose and explain the causes and options, get
+5. Working rule: diagnose and explain the causes and options, get
    Jeevan's go-ahead, then fix. Never jump straight to fixing.
 
 ## Updating the code
 
 The Mac is a read-only mirror of GitHub: `git fetch origin &&
-git reset --hard origin/<branch>`. Never commit on the Mac or the
+git reset --hard origin/v2`. Never commit on the Mac or the
 histories diverge. Changes are built and pushed from the dev machine,
-then pulled here.
+then pulled here. After every pull, restart the daemon
+(`python scripts/daemon_control.py stop`, then `start`) and confirm
+`status` no longer says STALE.

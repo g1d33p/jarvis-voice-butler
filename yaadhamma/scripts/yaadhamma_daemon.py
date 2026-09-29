@@ -124,10 +124,10 @@ def _write_session_state(is_open: bool, path: Path | None = None) -> None:
     """Record whether a voice session is currently open.
 
     The daemon writes it on every session open/close; `daemon_control
-    status` and the self-test read it. A worker crash that skips the
-    close-write leaves a stale "open" — `status` treats anything older
-    than the idle timeout plus margin as closed, and says so.
-    Never raises.
+    status` reads it. A worker crash that skips the close-write leaves a
+    stale "open" — `status` reports that as closed when the daemon itself
+    is not running (a long conversation can legitimately stay open for
+    minutes, so age alone is not a signal). Never raises.
     """
     try:
         target = path or SESSION_STATE_PATH

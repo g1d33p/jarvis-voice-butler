@@ -321,3 +321,43 @@ Push target: `v2` only. Nothing here touches `main`, `gemini-live`,
 3. Hold right Command and keep holding: `status` should say a voice
    session is open; release and wait 20 s: it should close.
 4. The next morning brief should carry no new warning lines.
+
+---
+
+## Stage 6 — Non-coder operations documentation (2026-09-29)
+
+### What was done
+- Rewrote `docs/OPERATIONS.md` for Jeevan (no code edits needed anywhere
+  in it), covering every v2 behaviour:
+  - start/stop of the agent, the daemon, and the scheduled jobs;
+  - the cost model: per-call recording in `model_calls`, session cost as
+    today's total minus the session-start baseline, the monthly budget
+    warning, and the provider billing page as the only real meter;
+  - the push-to-talk key, its configuration (`YAADHAMMA_PTT`,
+    `YAADHAMMA_PTT_KEY`, `YAADHAMMA_PTT_HOLD_MS`,
+    `YAADHAMMA_IDLE_TIMEOUT_S`), and why `fn` is refused;
+  - release semantics: release pauses the microphone only; the session
+    and in-flight work continue; a second hold rejoins; 20 s of silence
+    closes;
+  - wake re-enablement (`YAADHAMMA_WAKE=on`) now that it is off by
+    default, plus the custom-phrase situation;
+  - WhatsApp voice notes: own chats only, no prefix needed, 60-second
+    limit, honest failure behaviour;
+  - file sending: always asks, names file/folder/recipient, own chats
+    only, 64 MB cap, verified delivery, audit trail;
+  - browser troubleshooting (pairing, single-window profile lock,
+    read-only checks, stale sessions, attach-selector drift);
+  - microphone troubleshooting (foreground test for the permission
+    prompt, `PaMacCore err=-50`, Input Monitoring for the key listener,
+    the self-test permission check);
+  - the deferred stable `Yaadhamma.app` bundle as a write-up only: why
+    the permission breaks on `uv` self-updates, what the bundle would
+    be, and that building it needs his go-ahead.
+- The one-time setup now says `uv sync --extra wake --extra ui` and
+  targets the `v2` branch; the self-test count is corrected to 23.
+- The `daemon_control status` and morning-brief warning sections describe
+  the Stage 5 additions.
+
+### Tests
+- Documentation only; no code changed. `ruff check` and `ruff format`
+  clean; the focused suites re-run green before the commit (see below).
