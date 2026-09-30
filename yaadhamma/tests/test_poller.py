@@ -685,7 +685,9 @@ def test_poller_headless_defaults_on() -> None:
 
 
 def test_remote_log_rotated_once(monkeypatch, tmp_path) -> None:
-    """Stage 2: the old untimestamped remote.log moves aside exactly once."""
+    """Stage 2: the old untimestamped remote.log moves aside exactly once.
+    Copy-then-truncate (not rename): launchd keeps the log file open, so
+    the path must keep pointing at the fresh file."""
     monkeypatch.setenv("HOME", str(tmp_path))
     script = _load_script("remote_poller")
     log_dir = tmp_path / ".yaadhamma"
@@ -694,15 +696,14 @@ def test_remote_log_rotated_once(monkeypatch, tmp_path) -> None:
     old.write_text("untimestamped old line\n")
 
     script.rotate_old_log_once()
-    assert not old.exists()
+    assert old.read_text() == ""  # truncated in place, same inode
     assert (log_dir / "remote.log.1").read_text() == "untimestamped old line\n"
     assert (log_dir / "remote.log.rotated").exists()
 
     # A second start (e.g. launchd KeepAlive restart) rotates nothing.
-    new = log_dir / "remote.log"
-    new.write_text("2026-09-30T01:00:00 [poller] new line\n")
+    old.write_text("2026-09-30T01:00:00 [poller] new line\n")
     script.rotate_old_log_once()
-    assert new.read_text() == "2026-09-30T01:00:00 [poller] new line\n"
+    assert old.read_text() == "2026-09-30T01:00:00 [poller] new line\n"
     assert (log_dir / "remote.log.1").read_text() == "untimestamped old line\n"
 
 

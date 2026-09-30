@@ -29,6 +29,7 @@ beyond polling his own chats and replying in them.
 import asyncio
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
@@ -49,8 +50,15 @@ def rotate_old_log_once() -> None:
 
     The previous per-poll regime wrote untimestamped lines to remote.log;
     the resident poller writes timestamped lines. On first start the old
-    file moves to remote.log.1 so the new era starts clean. A marker file
-    guards the once-ness: launchd KeepAlive restarts must not rotate again.
+    content moves to remote.log.1 so the new era starts clean. A marker
+    file guards the once-ness: launchd KeepAlive restarts must not rotate
+    again.
+
+    Copy-then-truncate, not rename: launchd opens the log path once when
+    the job spawns and keeps the descriptor (append mode). Renaming the
+    path would send this generation's output to the renamed file;
+    truncating via the path keeps the open descriptor writing to the
+    fresh file.
     """
     remote_log = Path.home() / ".yaadhamma" / "remote.log"
     marker = remote_log.with_name("remote.log.rotated")
@@ -60,7 +68,8 @@ def rotate_old_log_once() -> None:
             return
         remote_log.parent.mkdir(parents=True, exist_ok=True)
         if remote_log.exists():
-            remote_log.rename(rotated)
+            shutil.copyfile(remote_log, rotated)
+            remote_log.write_text("")
         marker.touch()
     except OSError:
         pass  # best effort: logging must never fail startup
