@@ -38,6 +38,21 @@ DEFAULT_PROFILE_DIR = Path.home() / ".yaadhamma" / "chrome-profile"
 DIGEST_PROFILE_DIR = Path.home() / ".yaadhamma" / "digest-profile"
 
 
+def _is_digest_profile(profile_dir: Path | None) -> bool:
+    """Whether this is the digest/WhatsApp profile, which must stay invisible.
+
+    Checked against the path itself (not just the never_raise flag) so a
+    caller that forgets never_raise=True still cannot steal Jeevan's
+    keyboard focus by raising the digest's window.
+    """
+    if profile_dir is None:
+        return False
+    try:
+        return Path(profile_dir).resolve() == DIGEST_PROFILE_DIR.resolve()
+    except OSError:
+        return False
+
+
 def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
@@ -334,12 +349,19 @@ class BrowserManager:
         timeout_ms: int = 15_000,
         profile_dir: Path | None = None,
         launch_args: list[str] | None = None,
+        never_raise: bool = False,
     ) -> None:
         self._headless = headless
         self._timeout_ms = timeout_ms
         self._profile_dir = profile_dir or DEFAULT_PROFILE_DIR
         # Extra Chromium flags, e.g. to keep the digest's window off-screen.
         self._launch_args = list(launch_args or [])
+        # never_raise: never ask the OS to bring this browser's window to the
+        # front. Used for the digest/WhatsApp profile, which must stay
+        # invisible: raising it steals Jeevan's keyboard focus. The digest
+        # profile is non-raising by construction (see _is_digest_profile),
+        # so forgetting the flag cannot make it visible.
+        self._never_raise = never_raise or _is_digest_profile(self._profile_dir)
         self._playwright = None
         self._browser = None
         self._context = None
@@ -350,6 +372,20 @@ class BrowserManager:
         # Separate lock so two tools called at once cannot both launch the
         # browser (the second launch fails: "profile is already in use").
         self._start_lock = asyncio.Lock()
+
+    def _raise_window_allowed(self) -> bool:
+        """Whether this browser may request window focus from the OS."""
+        return not self._headless and not self._never_raise
+
+    async def _maybe_bring_to_front(self, page: Page) -> None:
+        """Ask the OS for window focus, unless this browser must stay invisible.
+
+        The single choke point for _bring_page_window_to_front: every focus
+        request in this class goes through here, so no call site can raise
+        the digest profile's window by forgetting the guard.
+        """
+        if self._raise_window_allowed():
+            await _bring_page_window_to_front(page)
 
     async def start(self) -> None:
         async with self._start_lock:
@@ -390,8 +426,7 @@ class BrowserManager:
         else:
             self._page = await self._context.new_page()
         self._page.set_default_timeout(self._timeout_ms)
-        if not self._headless:
-            await _bring_page_window_to_front(self._page)
+        await self._maybe_bring_to_front(self._page)
 
     async def close(self) -> None:
         async with self._lock:
@@ -744,8 +779,7 @@ class BrowserManager:
         async with self._lock:
             page = self._page_by_number(number)
             self._page = page
-            if not self._headless:
-                await _bring_page_window_to_front(page)
+            await self._maybe_bring_to_front(page)
             return {"number": number, **await self._page_summary(page)}
 
     async def open_tab(self, url: str | None = None) -> dict[str, object]:
@@ -766,8 +800,7 @@ class BrowserManager:
                     raise BrowserError("The new tab took too long to load.") from exc
                 except Exception as exc:
                     raise BrowserError(f"I could not open that page: {exc}") from exc
-            if not self._headless:
-                await _bring_page_window_to_front(page)
+            await self._maybe_bring_to_front(page)
             number = self._open_pages().index(page) + 1
             return {"number": number, **await self._page_summary(page)}
 
@@ -816,8 +849,7 @@ class BrowserManager:
             if self._page is page or self._page not in remaining:
                 # Activate the neighbour to the left, like a normal browser.
                 self._page = remaining[max(0, number - 2)]
-                if not self._headless:
-                    await _bring_page_window_to_front(self._page)
+                await self._maybe_bring_to_front(self._page)
 
             return {
                 "closed": True,

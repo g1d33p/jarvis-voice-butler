@@ -183,6 +183,9 @@ class FakeWhatsApp:
     async def list_all_chats(self):
         return [{"name": "+1 (940) 843-8446 (You)", "unread": 0}]
 
+    async def list_chats_settled(self, timeout_s=20.0, poll_s=1.0):
+        return await self.list_all_chats(), True
+
     async def find_chat(self, query):
         return "+1 (940) 843-8446 (You)"
 

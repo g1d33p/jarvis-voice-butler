@@ -32,6 +32,11 @@ class FakeClient:
             raise self.fail["list"]
         return self.chats
 
+    async def list_chats_settled(self, timeout_s=20.0, poll_s=1.0):
+        if "list" in self.fail:
+            raise self.fail["list"]
+        return self.chats, True
+
     async def find_chat(self, query):
         if "find" in self.fail:
             raise self.fail["find"]
@@ -49,12 +54,20 @@ def _config(monkeypatch):
     monkeypatch.setattr(config, "SELF_CHAT_NUMBER", "19408438446")
 
 
+@pytest.fixture(autouse=True)
+def _db_tmp(tmp_path, monkeypatch):
+    # ChatCountLog defaults to the real DB path (import-time constant), so
+    # point it at scratch: tests must never touch ~/.yaadhamma.
+    monkeypatch.setattr("whatsapp_health.DEFAULT_DB", tmp_path / "yaadhamma.db")
+
+
 async def test_a_working_setup_passes_every_check() -> None:
     report = await run_health_check(FakeClient())
     assert report.ok
     assert [c.name for c in report.checks] == [
         "paired",
         "list chats",
+        "chat list settled",
         "search",
         "open and read",
         "message shape",

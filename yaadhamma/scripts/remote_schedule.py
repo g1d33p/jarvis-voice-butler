@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Install the WhatsApp remote poll as its own launchd job.
+"""Install the WhatsApp remote poller as its own launchd job.
 
-Polls his own chats every 2 minutes; remote.py itself enforces the
-08:00-23:00 window and the YAADHAMMA_REMOTE=off switch.
+The poller is one resident process (scripts/remote_poller.py): a single
+browser opened once and reused across polls every 2 minutes. remote.py
+itself enforces the polling-hours window and the YAADHAMMA_REMOTE=off
+switch.
 
     uv run scripts/remote_schedule.py on      # install + load
     uv run scripts/remote_schedule.py off     # unload + remove
@@ -24,12 +26,15 @@ LABEL = "com.yaadhamma.remote"
 def build_plist(uv_path: str, project: Path = PROJECT) -> dict:
     return {
         "Label": LABEL,
-        "ProgramArguments": [uv_path, "run", "scripts/remote_poll.py"],
+        # One resident process, not a fresh one every 2 minutes: the poller
+        # itself sleeps 120 s between polls and reuses one browser.
+        "ProgramArguments": [uv_path, "run", "scripts/remote_poller.py"],
         "WorkingDirectory": str(project),
-        "StartInterval": 120,  # every 2 minutes; the 08:00-23:00 window is in code
+        "RunAtLoad": True,
+        "KeepAlive": True,  # relaunch if the poller process ever dies
+        "ThrottleInterval": 30,  # ...but not in a tight crash loop
         "StandardOutPath": str(LOG),
         "StandardErrorPath": str(LOG),
-        "RunAtLoad": False,
     }
 
 
@@ -57,7 +62,8 @@ def install() -> int:
         print(f"macOS refused {LABEL}: {done.stderr.strip()}")
         return 1
     print(
-        "Scheduled: WhatsApp remote poll every 2 minutes (08:00-23:00, Mac local time)."
+        "Scheduled: resident WhatsApp poller (one browser, a poll every 2 "
+        "minutes; polling hours from YAADHAMMA_REMOTE_HOURS, Mac local time)."
     )
     print(f"Log: {LOG}")
     return 0
@@ -77,7 +83,7 @@ def status() -> int:
         == 0
     )
     on = loaded and _plist_path().exists()
-    print(f"WhatsApp remote poll: {'on' if on else 'off'}")
+    print(f"WhatsApp resident poller: {'on' if on else 'off'}")
     return 0
 
 

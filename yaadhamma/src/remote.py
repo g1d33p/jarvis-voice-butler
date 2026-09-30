@@ -16,24 +16,41 @@ The first poll for a chat only marks the backlog handled — it never runs it.
 Messages she sends herself (digests, replies) are recorded as outbound so the
 next poll skips them instead of re-ingesting her own "Yaadhamma …" text as a
 command.
-Polls run every 2 minutes, 08:00-23:00 local, as their own launchd job
-(scripts/remote_schedule.py), using the digest browser profile and the
-digest browser lock — never the voice profile.
+
+The poller runs as one resident process (scripts/remote_poller.py, its own
+launchd job): a single browser is opened once and reused across polls every
+2 minutes, using the digest browser profile and the digest browser lock —
+never the voice profile. The lock is held only while a poll runs.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import fcntl
 import hashlib
 import json
 import logging
+import os
 import re
+import time
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
+
+import config
+from browser import DIGEST_PROFILE_DIR, BrowserManager
+from remote_health import record_failure, record_success
+from whatsapp import WhatsAppClient, WhatsAppNotPairedError
+from whatsapp_health import (
+    ChatCountLog,
+    Check,
+    HealthLog,
+    HealthReport,
+    guarded_chat_list,
+)
 
 log = logging.getLogger("yaadhamma.remote")
 
@@ -131,9 +148,15 @@ def _handled_default() -> dict:
     return {"hashes": [], "outbound": [], "primed": []}
 
 
-def in_window(now: datetime) -> bool:
-    """Polls run 08:00-23:00 local."""
-    return WINDOW_START_HOUR <= now.hour < WINDOW_END_HOUR
+def in_window(
+    now: datetime, window: tuple = (WINDOW_START_HOUR, WINDOW_END_HOUR)
+) -> bool:
+    """Whether the poller runs at this time. `window` is (start, end) in 24h
+    hours from YAADHAMMA_REMOTE_HOURS; an overnight window wraps (22-6)."""
+    start, end = window
+    if start <= end:
+        return start <= now.hour < end
+    return now.hour >= start or now.hour < end
 
 
 async def resolve_self_chat(client, number: str) -> str:
@@ -187,11 +210,60 @@ class RemoteContext:
 
 
 @dataclass
+class PollSummary:
+    """What one poll saw and did. Stage 2 turns this into the single
+    timestamped log line per poll; until then it is internal plumbing."""
+
+    chats_seen: int = 0
+    best_chats: int = 0
+    self_chats_matched: int = 0
+    commands_found: int = 0
+    actions_taken: int = 0
+    note: str = ""
+    outcomes: list = field(default_factory=list)
+
+
+def _match_self_chats(chats: list[dict], numbers: list[str]) -> dict[str, dict]:
+    """Match each configured number to at most one chat row.
+
+    Each row is claimed at most once: without this, one "(You)" chat would
+    match every configured number and be polled several times per cycle.
+    Digit evidence wins over the "(You)" marker; numbers are handled in
+    configured order, so the result is deterministic. Same strictness as
+    resolve_self_chat.
+    """
+
+    def digits_of(text: str) -> str:
+        return "".join(ch for ch in text if ch.isdigit())
+
+    remaining = list(chats)
+    matched: dict[str, dict] = {}
+    for number in numbers:
+        want = digits_of(number)
+        if not want:
+            continue
+        for chat in remaining:
+            if digits_of(chat.get("name", "")).endswith(want[-10:]):
+                matched[number] = chat
+                remaining.remove(chat)
+                break
+    for number in numbers:
+        if number in matched:
+            continue
+        for chat in remaining:
+            if "(you)" in chat.get("name", "").casefold():
+                matched[number] = chat
+                remaining.remove(chat)
+                break
+    return matched
+
+
+@dataclass
 class RemotePoller:
     """Poll his own chats for commands. All I/O is injected for tests."""
 
-    client_factory: Callable[[], Awaitable[object]]
-    orchestrator_factory: Callable[[], object]
+    client_factory: Callable[[], Awaitable[object]] | None = None
+    orchestrator_factory: Callable[[], object] | None = None
     context_factory: Callable[[str], object] = field(
         default=lambda chat: RemoteContext(chat=chat)
     )
@@ -204,58 +276,136 @@ class RemotePoller:
     def __post_init__(self) -> None:
         self._handled = JsonStore(handled_path(), _handled_default())
         self._pending = JsonStore(pending_path(), {"chats": {}})
+        self._poll_commands = 0
+        self._poll_actions = 0
 
     # ------------------------------------------------------------ polling
 
-    async def poll_once(self, now: datetime) -> list[str]:
-        """One poll. Returns short outcome lines for the log."""
+    async def poll_once(self, now: datetime) -> PollSummary:
+        """One-shot poll: build a client, poll, close it.
+
+        The resident poller (ResidentPoller, scripts/remote_poller.py)
+        instead keeps one client across polls via poll_with_client.
+        """
         import config
 
+        if self.client_factory is None:
+            raise RuntimeError("poll_once needs a client_factory")
         settings = config.remote_settings()
+        summary = PollSummary()
         if not settings["enabled"]:
-            return []
-        if not in_window(now):
-            return []
-        outcomes: list[str] = []
+            summary.note = "disabled (YAADHAMMA_REMOTE=off)"
+            return summary
+        if not in_window(now, settings["hours"]):
+            summary.note = "outside polling hours"
+            return summary
         client = await self.client_factory()
         try:
-            orchestrator = self.orchestrator_factory()
-            for number in settings["self_chats"]:
-                try:
-                    chat = await resolve_self_chat(client, number)
-                except RemoteError as exc:
-                    outcomes.append(f"{number}: {exc}")
-                    continue
-                outcomes.extend(await self._poll_chat(client, orchestrator, chat))
+            return await self.poll_with_client(client, now, settings=settings)
         finally:
             close = getattr(client, "close", None)
             if close is not None:
                 with contextlib.suppress(Exception):
                     await close()
-        return outcomes
 
-    async def _poll_chat(self, client, orchestrator, chat: str) -> list[str]:
+    async def poll_with_client(
+        self, client, now: datetime, settings: dict | None = None
+    ) -> PollSummary:
+        """Poll using an already-open client: no lock, no close.
+
+        Waits for the chat list to settle, refuses a partial list, then
+        reads only his own chats — and opens one only when its row shows
+        an unread message. Returns a one-line summary of the run.
+        Raises WhatsAppNotPairedError if the profile lost its pairing.
+        """
+        if self.orchestrator_factory is None:
+            raise RuntimeError("polling needs an orchestrator_factory")
+        settings = settings or config.remote_settings()
+        summary = PollSummary()
+        self._poll_commands = 0
+        self._poll_actions = 0
+        if not settings["enabled"]:
+            summary.note = "disabled (YAADHAMMA_REMOTE=off)"
+            return summary
+        if not in_window(now, settings["hours"]):
+            summary.note = "outside polling hours"
+            return summary
+        orchestrator = self.orchestrator_factory()
+        chats, best, sync_report = await guarded_chat_list(client, ChatCountLog())
+        summary.chats_seen = len(chats)
+        summary.best_chats = best
+        if sync_report:
+            # A partial list is worse than no poll: his own chat may simply
+            # not have loaded yet, and its commands would go silently
+            # unheard. Report loudly, touch nothing.
+            summary.note = f"{sync_report} — poll skipped"
+            log.warning("remote: %s", summary.note)
+            return summary
         outcomes: list[str] = []
-        try:
-            result = await client.read_messages(chat, limit=15)
-        except Exception as exc:
-            return [f"{chat}: read failed: {exc}"]
-        messages = result.get("messages", [])
+        matched = 0
+        by_number = _match_self_chats(chats, settings["self_chats"])
+        for number in settings["self_chats"]:
+            chat = by_number.get(number)
+            if chat is None:
+                # Not in the settled list: fall back to a targeted resolve
+                # (WhatsApp search), once. If that fails too, say so loudly —
+                # a missing self chat is exactly how commands used to go
+                # silently unheard — but keep polling the other numbers.
+                try:
+                    title = await resolve_self_chat(client, number)
+                except Exception as exc:
+                    outcomes.append(f"{number}: could not resolve self chat: {exc}")
+                    continue
+                chat = {"name": title, "unread": 1}
+            else:
+                matched += 1
+            outcomes.extend(await self._poll_self_chat(client, orchestrator, chat))
+        summary.self_chats_matched = matched
+        summary.commands_found = self._poll_commands
+        summary.actions_taken = self._poll_actions
+        summary.outcomes = outcomes
+        return summary
+
+    async def _poll_self_chat(self, client, orchestrator, chat: dict) -> list[str]:
+        """Poll one of his own chats. Opens it only when needed."""
+        name = chat.get("name", "")
         handled = self._handled.read()
-        seen = set(handled.get("hashes", []))
-        if chat not in set(handled.get("primed", [])):
-            # First poll for this chat: the backlog is history, not commands.
-            # Mark everything handled without executing, so old messages —
-            # including her own earlier digests — can never run.
+        if name not in set(handled.get("primed", [])):
+            # First sight of this chat: the backlog is history, not
+            # commands. Read once and mark everything handled without
+            # executing, so old messages can never run.
+            try:
+                result = await client.read_messages(name, limit=15)
+            except Exception as exc:
+                return [f"{name}: read failed: {exc}"]
+            messages = result.get("messages", [])
+            seen = set(handled.get("hashes", []))
             for message in messages:
-                seen.add(message_hash(chat, message))
+                seen.add(message_hash(name, message))
             handled["hashes"] = sorted(seen)[-2000:]
-            handled["primed"] = sorted(set(handled.get("primed", [])) | {chat})
+            handled["primed"] = sorted(set(handled.get("primed", [])) | {name})
             self._handled.write(handled)
             return [
-                f"{chat}: first poll: marked {len(messages)} existing "
+                f"{name}: first poll: marked {len(messages)} existing "
                 "message(s) as handled"
             ]
+        if not chat.get("unread", 0):
+            # Cheap poll: nothing new in this chat, don't open it.
+            return []
+        try:
+            result = await client.read_messages(name, limit=15)
+        except Exception as exc:
+            return [f"{name}: read failed: {exc}"]
+        return await self._handle_new_messages(
+            client, orchestrator, name, result.get("messages", [])
+        )
+
+    async def _handle_new_messages(
+        self, client, orchestrator, chat: str, messages: list
+    ) -> list[str]:
+        outcomes: list[str] = []
+        handled = self._handled.read()
+        seen = set(handled.get("hashes", []))
         outbound = set(handled.get("outbound", []))
         for message in messages:
             digest = message_hash(chat, message)
@@ -271,6 +421,8 @@ class RemotePoller:
             seen.add(digest)
             outcome = await self._handle_message(client, orchestrator, chat, message)
             if outcome:
+                # The message became a command, an answer, or a voice note.
+                self._poll_commands += 1
                 outcomes.append(f"{chat}: {outcome}")
         # Re-read before writing: _reply records outbound keys mid-poll, and
         # this write must merge them, never clobber them.
@@ -451,6 +603,8 @@ class RemotePoller:
         # Record her own message (only after a successful send) so the next
         # poll skips it instead of re-ingesting it as a command.
         record_outbound(chat, text[:1500])
+        # Every reply she sends is an action the poll took.
+        self._poll_actions += 1
 
     # ------------------------------------------------------------ pending
 
@@ -504,7 +658,10 @@ async def real_client_factory():
         ) from err
 
     browser = BrowserManager(
-        headless=False, profile_dir=DIGEST_PROFILE_DIR, launch_args=OFF_SCREEN
+        headless=False,
+        profile_dir=DIGEST_PROFILE_DIR,
+        launch_args=OFF_SCREEN,
+        never_raise=True,  # the digest profile never takes his focus
     )
     client = WhatsAppClient(browser=browser)
 
@@ -519,6 +676,262 @@ async def real_client_factory():
 
     client.close = close  # type: ignore[attr-defined]
     return client
+
+
+async def persistent_client_factory():
+    """One browser for the resident poller: opened once, reused across polls.
+
+    Headless first (invisible, no window to steal focus); if headless ever
+    proves unusable, YAADHAMMA_POLLER_HEADLESS=off falls back to a visible
+    off-screen window. Either way never_raise=True: this profile must never
+    ask the OS for focus. No lock handling here — ResidentPoller owns the
+    digest lock around each poll.
+    """
+    headless = config.remote_settings()["poller_headless"]
+    browser = BrowserManager(
+        headless=headless,
+        profile_dir=DIGEST_PROFILE_DIR,
+        launch_args=[] if headless else OFF_SCREEN,
+        never_raise=True,
+    )
+    client = WhatsAppClient(browser=browser)
+
+    async def close() -> None:
+        await browser.close()
+
+    client.close = close  # type: ignore[attr-defined]
+    return client
+
+
+class DigestLock:
+    """One lock for the digest browser profile, shared by poller and digests.
+
+    The resident poller holds it for the whole lifetime of its browser, so
+    the profile can never be driven by two Chromiums at once. A scheduled
+    digest that needs the profile writes a *request marker* first: the
+    poller notices it between polls, parks (closes) its browser and
+    releases the lock; the digest runs; afterwards the poller re-acquires
+    and reopens.
+
+    The marker carries the requester's pid and a timestamp. A marker from
+    a dead process, or one older than 10 minutes, is ignored — a crashed
+    digest can never park the poller forever.
+    """
+
+    REQUEST_TTL_S = 600.0
+
+    def __init__(self, path: Path = DIGEST_LOCK) -> None:
+        self._path = path
+        self._file = None
+
+    @property
+    def request_path(self) -> Path:
+        return self._path.with_name(self._path.name + ".request")
+
+    def request(self) -> None:
+        """Ask the resident poller to hand over the profile."""
+        self.request_path.parent.mkdir(parents=True, exist_ok=True)
+        self.request_path.write_text(
+            json.dumps({"at": time.time(), "pid": os.getpid()})
+        )
+
+    def requested(self) -> bool:
+        """True when a live digest recently asked for the profile."""
+        try:
+            data = json.loads(self.request_path.read_text())
+        except Exception:
+            return False
+        try:
+            if time.time() - float(data["at"]) > self.REQUEST_TTL_S:
+                return False
+            pid = int(data.get("pid", 0))
+        except (TypeError, ValueError):
+            return False
+        if pid:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                return False  # the requester died; ignore its marker
+            except PermissionError:
+                pass  # alive, just not ours
+            except OSError:
+                return False
+        return True
+
+    def clear_request(self) -> None:
+        """Remove this process's own request marker, if still present.
+
+        Never removes another live process's marker: two overlapping
+        digests must not cancel each other's handoff. (A marker from a
+        dead process is ignored by requested() anyway.)
+        """
+        try:
+            data = json.loads(self.request_path.read_text())
+            if int(data.get("pid", 0)) != os.getpid():
+                return
+        except Exception:
+            return
+        with contextlib.suppress(Exception):
+            self.request_path.unlink()
+
+    def acquire(self) -> bool:
+        """Non-blocking acquire. True when the lock is now held."""
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(self._path, "w")  # noqa: SIM115
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            handle.close()
+            return False
+        self._file = handle
+        return True
+
+    def release(self) -> None:
+        handle, self._file = self._file, None
+        if handle is None:
+            return
+        with contextlib.suppress(Exception):
+            fcntl.flock(handle, fcntl.LOCK_UN)
+        handle.close()
+
+    @property
+    def held(self) -> bool:
+        return self._file is not None
+
+
+@dataclass
+class ResidentPoller:
+    """The always-on poller: one process, one browser, a poll every 2 min.
+
+    The browser is opened once and reused across polls — never relaunched
+    on a schedule. Between polls it just sits on the WhatsApp tab: no
+    navigation, no reload, no focus requests.
+
+    The digest lock is held for the whole lifetime of the browser, so the
+    profile can never be driven by two Chromiums at once. A scheduled
+    digest writes a request marker (DigestLock.request()); the poller
+    notices it between polls, parks its browser and releases the lock; the
+    digest runs; afterwards the poller re-acquires and reopens. If the
+    profile loses its pairing, the browser is parked too — leaving the
+    profile free for the pairing script — and retried every 15 minutes.
+    """
+
+    poller: RemotePoller
+    client_factory: Callable[[], Awaitable[object]] = persistent_client_factory
+    lock: DigestLock = field(default_factory=DigestLock)
+    interval_s: float = 120.0
+    parked_retry_s: float = 30.0
+    unpaired_retry_s: float = 900.0
+    health_log_path: Path | None = None
+
+    def __post_init__(self) -> None:
+        self._client = None
+
+    async def run_forever(self) -> None:
+        while True:
+            delay = await self.run_one_cycle(datetime.now())
+            await self._sleep_between_polls(delay)
+
+    async def run_one_cycle(self, now: datetime) -> float:
+        """One cycle. Returns seconds until the next cycle.
+
+        Invariant: the browser exists only while the lock is held, so the
+        digest profile is never driven twice at once.
+        """
+        if self._client is None:
+            # The browser may only be opened while holding the lock.
+            if not self.lock.acquire():
+                log.info("poller: digest is using the profile — waiting")
+                return self.parked_retry_s
+            try:
+                self._client = await self.client_factory()
+            except Exception as exc:
+                self.lock.release()
+                record_failure(exc)
+                log.warning("poller: browser failed to open (%s); retrying", exc)
+                return self.interval_s
+            log.info("poller: browser opened (one browser for all polls)")
+        try:
+            summary = await self.poller.poll_with_client(self._client, now)
+        except WhatsAppNotPairedError as exc:
+            await self._park("WhatsApp is not paired")
+            self.lock.release()
+            self._record_lost_pairing(now, exc)
+            log.warning(
+                "poller: WhatsApp is NOT PAIRED (%s). The profile is free "
+                "now — re-pair it, then polls resume on their own.",
+                exc,
+            )
+            return self.unpaired_retry_s
+        except Exception as exc:
+            record_failure(exc)
+            log.warning("poller: poll failed (%s); browser will relaunch", exc)
+            await self._park("poll error")
+            self.lock.release()
+            return self.interval_s
+        for outcome in summary.outcomes:
+            log.info("poller: %s", outcome)
+        record_success()
+        if self.lock.requested():
+            # A digest asked for the profile: hand it over now.
+            await self._park("digest requested the profile")
+            self.lock.release()
+            log.info("poller: handed the profile to the digest")
+            return self.parked_retry_s
+        return self.interval_s
+
+    async def _sleep_between_polls(self, delay: float) -> None:
+        """Wait for the next poll, but yield promptly to a digest request."""
+        deadline = time.monotonic() + delay
+        while time.monotonic() < deadline:
+            await asyncio.sleep(min(5.0, max(0.0, deadline - time.monotonic())))
+            if self._client is not None and self.lock.requested():
+                await self._park("digest requested the profile")
+                self.lock.release()
+                log.info("poller: handed the profile to the digest")
+                return
+
+    async def shutdown(self) -> None:
+        """Park the browser and release the lock. Never raises."""
+        await self._park("shutting down")
+        with contextlib.suppress(Exception):
+            self.lock.release()
+
+    async def _park(self, reason: str) -> None:
+        """Close the browser so the digest profile is free for others."""
+        client, self._client = self._client, None
+        if client is None:
+            return
+        close = getattr(client, "close", None)
+        if close is not None:
+            with contextlib.suppress(Exception):
+                await close()
+        log.info("poller: browser parked (%s)", reason)
+
+    def _record_lost_pairing(self, now: datetime, exc: Exception) -> None:
+        """Persist the lost pairing so the morning brief and daemon status
+        see it without launching a browser.
+
+        Recorded once per outage, not every retry: if the latest entry
+        already says the pairing failed, there is nothing new to say.
+        Never raises — a logging failure must not break the poll loop.
+        """
+        try:
+            store = HealthLog(path=self.health_log_path)
+            latest = store.latest() or {}
+            already = any(
+                c.get("name") == "paired" and not c.get("ok")
+                for c in latest.get("checks", [])
+            )
+            if not already:
+                store.record(
+                    HealthReport(
+                        started=now.isoformat(),
+                        checks=[Check("paired", False, str(exc)[:200])],
+                    )
+                )
+        except Exception:
+            log.exception("poller: could not record the lost pairing")
 
 
 def real_orchestrator_factory():
@@ -542,11 +955,11 @@ async def main_async() -> int:
         orchestrator_factory=real_orchestrator_factory,
     )
     try:
-        outcomes = await poller.poll_once(datetime.now())
+        summary = await poller.poll_once(datetime.now())
     except RemoteError as exc:
         log.info("remote poll skipped: %s", exc)
         return 0
-    for outcome in outcomes:
+    for outcome in summary.outcomes:
         log.info("remote: %s", outcome)
     return 0
 

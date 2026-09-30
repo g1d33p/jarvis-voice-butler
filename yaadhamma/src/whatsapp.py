@@ -398,6 +398,39 @@ class WhatsAppClient:
                 seen.setdefault(chat.get("name", ""), chat)
         return [c for c in seen.values() if c.get("name")]
 
+    async def list_chats_settled(
+        self, timeout_s: float = 20.0, poll_s: float = 1.0
+    ) -> tuple[list[dict], bool]:
+        """Wait for the chat list to stop growing, then return every chat.
+
+        WhatsApp Web re-syncs after each fresh launch: the rendered list
+        grows (18 -> 60 -> 135) over seconds. Acting on the first glimpse
+        means missing chats entirely — e.g. polling for a command in his
+        own chat while that chat has not loaded yet. So poll the rendered
+        count until it is unchanged twice in a row, or timeout_s elapses,
+        then scroll the full list once.
+
+        Returns (chats, settled): settled is False when the count was still
+        moving after timeout_s. Raises WhatsAppNotPairedError if unpaired.
+        """
+        await self._require_login()
+        stable = 0
+        last_count = -1
+        deadline = time.monotonic() + timeout_s
+        while True:
+            count = len(await self.list_chats(limit=500))
+            if count == last_count:
+                stable += 1
+                if stable >= 2:
+                    break
+            else:
+                stable = 0
+            last_count = count
+            if time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(poll_s)
+        return await self.list_all_chats(), stable >= 2
+
     async def find_chat(self, name: str, max_rounds: int = 25) -> str:
         """Resolve `name` to the exact chat title, scrolling to find it.
 

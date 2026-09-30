@@ -11,8 +11,10 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import os
 import plistlib
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -98,6 +100,7 @@ def status() -> int:
     info = _daemon_info()
     print(format_mode(info))
     print(format_session_state(_session_state(), _pid_alive(info)))
+    print(format_whatsapp_pairing())
     print()
     print(code_match_report(info, _checked_out_commit()))
     return 0
@@ -177,6 +180,51 @@ def format_session_state(state: dict | None, daemon_alive: bool | None) -> str:
         when = state.get("at", "?")
         return f"Session: a voice session is open (opened {when})."
     return "Session: no voice session open right now."
+
+
+def _latest_whatsapp_health() -> dict | None:
+    """The most recent recorded WhatsApp health check, if any.
+
+    Read straight from the SQLite store — status must never launch a
+    browser just to answer "is WhatsApp paired?".
+    """
+    try:
+        db_path = Path.home() / ".yaadhamma" / "yaadhamma.db"
+        with sqlite3.connect(db_path) as db:
+            row = db.execute(
+                "SELECT checked, ok, report FROM whatsapp_health "
+                "ORDER BY checked DESC, rowid DESC LIMIT 1"
+            ).fetchone()
+        if not row:
+            return None
+        checked, ok, report = row
+        return {"time": checked, "ok": bool(ok), **json.loads(report)}
+    except Exception:
+        return None
+
+
+def format_whatsapp_pairing(latest: dict | None = None) -> str:
+    """One line: whether the digest WhatsApp profile is paired.
+
+    Takes an optional pre-read health record so tests can cover it without
+    touching the real database.
+    """
+    if latest is None:
+        latest = _latest_whatsapp_health()
+    if not latest:
+        return "WhatsApp: no health check recorded yet."
+    checks = {c["name"]: c for c in latest.get("checks", [])}
+    paired = checks.get("paired")
+    when = latest.get("time", "?")
+    if paired is None:
+        return f"WhatsApp: pairing unknown (last checked {when})."
+    if paired.get("ok"):
+        return f"WhatsApp: paired (last checked {when})."
+    return (
+        "WhatsApp: NOT PAIRED — the digest profile lost its pairing "
+        f"(last checked {when}). Chat summaries and phone commands are "
+        "paused until it is re-paired."
+    )
     """What the running daemon recorded about itself at startup."""
     path = Path.home() / ".yaadhamma" / "daemon-info.json"
     try:

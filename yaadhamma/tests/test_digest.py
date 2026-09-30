@@ -29,6 +29,11 @@ class FakeClient:
             raise WhatsAppNotPairedError("not paired")
         return self.chats
 
+    async def list_chats_settled(self, timeout_s=20.0, poll_s=1.0):
+        if not self.paired:
+            raise WhatsAppNotPairedError("not paired")
+        return self.chats, True
+
     async def read_messages(self, name, limit, exact=False):
         self.read.append(name)
         return {
@@ -72,9 +77,12 @@ CHATS = [
 
 
 @pytest.fixture(autouse=True)
-def _config(monkeypatch):
+def _config(monkeypatch, tmp_path):
     monkeypatch.setattr(config, "WHATSAPP_WATCHLIST", ["Saayam", "SC1", "SC2", "SC3"])
     monkeypatch.setattr(config, "SELF_CHAT_NUMBER", "9408438446")
+    # The guarded chat listing records best counts in the DB (import-time
+    # path), so point it at scratch: tests must never touch ~/.yaadhamma.
+    monkeypatch.setattr("whatsapp_health.DEFAULT_DB", tmp_path / "yaadhamma.db")
 
 
 async def test_digest_summarises_watched_chats_and_sends_to_himself(tmp_path) -> None:

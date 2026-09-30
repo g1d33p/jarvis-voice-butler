@@ -18,6 +18,7 @@ digest would not already open):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from dataclasses import dataclass, field
@@ -92,7 +93,79 @@ class HealthLog:
         return {"time": checked, "ok": bool(ok), **json.loads(report)}
 
 
-async def run_health_check(client) -> HealthReport:
+class ChatCountLog:
+    """The highest WhatsApp chat count ever seen, persisted across runs.
+
+    Guards against acting on a partial list: after a fresh launch WhatsApp
+    Web re-syncs and the list grows over seconds. A listing far below the
+    historical best is still syncing, not the truth.
+    """
+
+    def __init__(self, path=None) -> None:
+        self.path = path or DEFAULT_DB
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS whatsapp_chat_counts "
+                "(best INTEGER NOT NULL, updated TEXT NOT NULL)"
+            )
+
+    def best(self) -> int:
+        with sqlite3.connect(self.path) as db:
+            row = db.execute(
+                "SELECT best FROM whatsapp_chat_counts ORDER BY rowid DESC LIMIT 1"
+            ).fetchone()
+        return int(row[0]) if row else 0
+
+    def record(self, count: int) -> int:
+        """Record a listing; the stored best only ever grows. Returns it."""
+        best = max(self.best(), count)
+        with sqlite3.connect(self.path) as db:
+            db.execute(
+                "INSERT INTO whatsapp_chat_counts VALUES (?, ?)",
+                (best, datetime.now().isoformat(timespec="seconds")),
+            )
+        return best
+
+
+PARTIAL_RATIO = 0.5
+
+
+def partial_list_report(count: int, best: int) -> str | None:
+    """None when a listing is usable; otherwise the 'still syncing' report.
+
+    A listing below half the historical best is a sync in progress — the
+    caller must wait/retry once, then report and do nothing else rather
+    than act on a fraction of his chats.
+    """
+    if best > 0 and count < PARTIAL_RATIO * best:
+        return f"WhatsApp is still syncing ({count} of {best} chats)"
+    return None
+
+
+async def guarded_chat_list(
+    client, stats: ChatCountLog | None = None
+) -> tuple[list[dict], int, str | None]:
+    """Settled listing guarded against partial syncs.
+
+    Returns (chats, best, report): report is None when the listing is
+    usable, otherwise "WhatsApp is still syncing (N of M chats)" after one
+    wait-and-retry — and chats is then empty, so the caller does nothing.
+    Raises WhatsAppNotPairedError if unpaired.
+    """
+    stats = stats or ChatCountLog()
+    chats, _settled = await client.list_chats_settled()
+    best = stats.record(len(chats))
+    if partial_list_report(len(chats), best):
+        await asyncio.sleep(5)
+        chats, _settled = await client.list_chats_settled()
+        best = stats.record(len(chats))
+    if report := partial_list_report(len(chats), best):
+        return [], best, report
+    return chats, best, None
+
+
+async def run_health_check(client, stats: ChatCountLog | None = None) -> HealthReport:
     """Run every check. Never raises: a failure is a failed check."""
     report = HealthReport(started=datetime.now().isoformat(timespec="seconds"))
 
@@ -100,7 +173,8 @@ async def run_health_check(client) -> HealthReport:
         report.checks.append(Check(name=name, ok=ok, detail=detail))
 
     try:
-        chats = await client.list_all_chats()
+        chats, settled = await client.list_chats_settled()
+        best = (stats or ChatCountLog()).record(len(chats))
     except WhatsAppNotPairedError as exc:
         add("paired", False, str(exc)[:200])
         report.checks.append(Check("list chats", False, "skipped: not paired"))
@@ -116,6 +190,12 @@ async def run_health_check(client) -> HealthReport:
         add("list chats", False, "the chat list came back with no names")
         return report
     add("list chats", True, f"{len(named)} chats")
+    add(
+        "chat list settled",
+        settled,
+        f"{len(named)} chats, best {best}"
+        + ("" if settled else " — still syncing; counts may be incomplete"),
+    )
 
     # Search: find a chat by the digits in its name (unsaved contacts).
     numeric = next(

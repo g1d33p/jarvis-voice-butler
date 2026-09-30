@@ -28,7 +28,6 @@ Email preview (last 24 hours; prints the summary here, sends nothing):
 """
 
 import asyncio
-import fcntl
 import os
 import sys
 from pathlib import Path
@@ -200,21 +199,27 @@ async def main() -> int:
     if "--email-preview" in sys.argv:
         after = sys.argv[sys.argv.index("--email-preview") + 1 :]
         return await email_preview(float(after[0]) if after else 24)
-    LOCK.parent.mkdir(parents=True, exist_ok=True)
-    with open(LOCK, "w") as lock:
-        # The 8:45 brief may still be running at 9:00: wait for it (up to 5
-        # minutes) rather than skip the digest.
-        for _ in range(60):
-            try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                await asyncio.sleep(5)
-        else:
-            print("Another digest has been running for 5 minutes; skipping this one.")
-            return 0
+    from remote import DigestLock
+
+    digest_lock = DigestLock(LOCK)
+    # Ask the resident poller to hand over the WhatsApp profile, then wait
+    # for it (up to 5 minutes) rather than skip the digest. The 8:45 brief
+    # may still be running at 9:00.
+    digest_lock.request()
+    for _ in range(60):
+        if digest_lock.acquire():
+            break
+        await asyncio.sleep(5)
+    else:
+        digest_lock.clear_request()
+        print("Another digest has been running for 5 minutes; skipping this one.")
+        return 0
+    try:
         browser = BrowserManager(
-            headless=False, profile_dir=DIGEST_PROFILE_DIR, launch_args=OFF_SCREEN
+            headless=False,
+            profile_dir=DIGEST_PROFILE_DIR,
+            launch_args=OFF_SCREEN,
+            never_raise=True,  # the digest profile never takes his focus
         )
         client = WhatsAppClient(browser=browser)
         try:
@@ -280,6 +285,9 @@ async def main() -> int:
                 )
         finally:
             await browser.close()
+    finally:
+        digest_lock.clear_request()
+        digest_lock.release()
     print(f"Digest {result.status}. {result.error or result.summary[:200]}")
     return 0 if result.status != "failed" else 1
 

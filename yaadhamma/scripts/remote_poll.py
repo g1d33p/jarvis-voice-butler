@@ -25,7 +25,7 @@ async def main_async() -> int:
         orchestrator_factory=real_orchestrator_factory,
     )
     try:
-        outcomes = await poller.poll_once(datetime.now())
+        summary = await poller.poll_once(datetime.now())
     except Exception as exc:  # the poll must never crash the launchd job
         # A systemic failure (the same exception every 2 minutes) used to
         # pile up silently in remote.log; the streak file lets the morning
@@ -34,7 +34,7 @@ async def main_async() -> int:
         print(f"remote poll failed: {exc}")
         return 1
     record_success()
-    for outcome in outcomes:
+    for outcome in summary.outcomes:
         print(outcome)
     return 0
 

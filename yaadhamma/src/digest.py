@@ -30,6 +30,7 @@ from remote import record_outbound
 from task_manager import DEFAULT_DB
 from untrusted import wrap as _wrap_untrusted
 from whatsapp import WhatsAppError, WhatsAppNotPairedError
+from whatsapp_health import guarded_chat_list
 from whatsapp_tools import collect_watchlist
 
 SELF_CHAT_MARKER = "(You)"
@@ -430,6 +431,17 @@ def _health_warning() -> str:
     broken = [c for c in latest["checks"] if not c["ok"]]
     if not broken:
         return ""
+    paired = next((c for c in broken if c["name"] == "paired"), None)
+    if paired is not None:
+        # Lost pairing is the one failure he must act on himself: nothing
+        # works until he re-pairs the digest profile from his phone.
+        return (
+            "\n\n*WhatsApp is not paired* — the digest profile lost its "
+            "pairing, so chat summaries and phone commands are paused. "
+            "On the phone: WhatsApp → Settings → Linked devices, remove any "
+            "stale 'Yaadhamma' entries, then re-pair the digest profile. "
+            "Chat summaries may be incomplete until this is fixed."
+        )
     return (
         "\n\n*WhatsApp check failed* at '"
         + broken[0]["name"]
@@ -685,6 +697,58 @@ async def check_whatsapp_health(client) -> None:
         pass
 
 
+async def _run_digest_body(
+    client, brain, store: DigestStore, started, chat_rows, gmail_clients, calendar
+) -> DigestResult:
+    """The digest once WhatsApp is known healthy and the list is complete."""
+    chats = await collect_watchlist(
+        client,
+        config.WHATSAPP_WATCHLIST,
+        open_chats=True,
+        max_chats=20,
+        chats=chat_rows,
+    )
+    unread = int(chats.get("unread_watched_chats", 0))
+    email = await collect_email(gmail_clients, email_since(store, started))
+    new_emails = len(email["emails"])
+    cal = await calendar_update(calendar, store, started)
+    calendar_news = bool(cal.get("new_clashes") or cal.get("starting_soon"))
+    if unread == 0 and new_emails == 0 and not calendar_news:
+        return DigestResult(
+            status="quiet", summary="Nothing new in the watched chats or email."
+        )
+    turn = await brain.generate(
+        config.BRAIN_MODEL,
+        [
+            {"role": "system", "content": DIGEST_INSTRUCTIONS},
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {"whatsapp": chats, "email": email, "calendar": cal},
+                    ensure_ascii=False,
+                ),
+            },
+        ],
+        [],
+        feature="digest",
+    )
+    summary = (turn.text or "").strip()[:MAX_DIGEST_CHARS]
+    if not summary:
+        raise WhatsAppError("The summary came back empty.")
+    header = f"Yaadhamma digest, {started:%a %I:%M %p}\n\n"
+    summary += _health_warning() + _commitments_line(now=started)
+    self_chat = await find_self_chat(client)
+    await client.send_message(self_chat, header + summary)
+    record_outbound(self_chat, header + summary)
+    return DigestResult(
+        status="sent",
+        summary=summary,
+        unread_chats=unread,
+        emails=new_emails,
+        tokens=turn.tokens_in + turn.tokens_out,
+    )
+
+
 async def run_digest(
     client, brain, store: DigestStore, gmail_clients=None, calendar=None
 ) -> DigestResult:
@@ -692,48 +756,18 @@ async def run_digest(
     started = datetime.now()
     try:
         await check_whatsapp_health(client)
-        chats = await collect_watchlist(
-            client, config.WHATSAPP_WATCHLIST, open_chats=True, max_chats=20
-        )
-        unread = int(chats.get("unread_watched_chats", 0))
-        email = await collect_email(gmail_clients, email_since(store, started))
-        new_emails = len(email["emails"])
-        cal = await calendar_update(calendar, store, started)
-        calendar_news = bool(cal.get("new_clashes") or cal.get("starting_soon"))
-        if unread == 0 and new_emails == 0 and not calendar_news:
+        # Refuse a partial list: a digest must never summarise a fraction
+        # of his chats as if it were all of them.
+        chat_rows, _best, sync_report = await guarded_chat_list(client)
+        if sync_report:
             result = DigestResult(
-                status="quiet", summary="Nothing new in the watched chats or email."
+                status="failed",
+                error=f"{sync_report} — skipped this run rather than "
+                "summarise a partial list.",
             )
         else:
-            turn = await brain.generate(
-                config.BRAIN_MODEL,
-                [
-                    {"role": "system", "content": DIGEST_INSTRUCTIONS},
-                    {
-                        "role": "user",
-                        "content": json.dumps(
-                            {"whatsapp": chats, "email": email, "calendar": cal},
-                            ensure_ascii=False,
-                        ),
-                    },
-                ],
-                [],
-                feature="digest",
-            )
-            summary = (turn.text or "").strip()[:MAX_DIGEST_CHARS]
-            if not summary:
-                raise WhatsAppError("The summary came back empty.")
-            header = f"Yaadhamma digest, {started:%a %I:%M %p}\n\n"
-            summary += _health_warning() + _commitments_line(now=started)
-            self_chat = await find_self_chat(client)
-            await client.send_message(self_chat, header + summary)
-            record_outbound(self_chat, header + summary)
-            result = DigestResult(
-                status="sent",
-                summary=summary,
-                unread_chats=unread,
-                emails=new_emails,
-                tokens=turn.tokens_in + turn.tokens_out,
+            result = await _run_digest_body(
+                client, brain, store, started, chat_rows, gmail_clients, calendar
             )
     except WhatsAppNotPairedError:
         result = DigestResult(

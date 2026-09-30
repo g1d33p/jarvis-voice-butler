@@ -55,6 +55,7 @@ class FakeOrchestrator:
 class FakeWhatsApp:
     def __init__(self):
         self.chats = {}  # title -> list of message dicts
+        self.unread = {}  # title -> unread badge count (the cheap-poll signal)
         self.sent = []  # (chat, text)
         self.resolved = {}
         self.downloads = []  # (chat, message)
@@ -62,6 +63,15 @@ class FakeWhatsApp:
 
     def resolve(self, number, title):
         self.resolved[number] = title
+
+    async def list_chats_settled(self, timeout_s=20.0, poll_s=1.0):
+        rows = []
+        for title in self.chats:
+            # Unset means "whatever the staged messages imply": a chat with
+            # staged messages shows an unread badge, an empty one does not.
+            unread = self.unread.get(title, 1 if self.chats.get(title) else 0)
+            rows.append({"name": title, "unread": unread, "preview": "", "time": ""})
+        return rows, True
 
     async def find_chat(self, number):
         return self.resolved[number]
@@ -101,6 +111,9 @@ def setup(monkeypatch, tmp_path):
     monkeypatch.setenv("YAADHAMMA_REMOTE", "on")
     monkeypatch.setenv("YAADHAMMA_SELF_CHATS", f"{SELF_A},{SELF_B}")
     monkeypatch.setenv("HOME", str(tmp_path))
+    # ChatCountLog defaults to the real DB path (import-time constant), so
+    # point it at scratch: tests must never touch ~/.yaadhamma.
+    monkeypatch.setattr("whatsapp_health.DEFAULT_DB", tmp_path / "yaadhamma.db")
     wa = FakeWhatsApp()
     orch = FakeOrchestrator()
     wa.resolve(SELF_A, "Jeevan (You)")
@@ -219,7 +232,8 @@ def test_no_is_not_a_command_while_pending(setup) -> None:
     assert len(orch.started) == 1
 
 
-def test_outside_hours_silence(setup) -> None:
+def test_outside_hours_silence(setup, monkeypatch) -> None:
+    monkeypatch.setenv("YAADHAMMA_REMOTE_HOURS", "8-23")
     wa, orch, poller = setup
     wa.chats["Jeevan (You)"] = [_msg("Yaadhamma remind me")]
     import asyncio
@@ -259,7 +273,7 @@ def test_remote_off_disables(setup, monkeypatch) -> None:
     wa.chats["Jeevan (You)"] = [_msg("Yaadhamma remind me")]
     import asyncio
 
-    assert asyncio.run(poller.poll_once(_noon())) == []
+    assert asyncio.run(poller.poll_once(_noon())).outcomes == []
     assert orch.started == []
 
 

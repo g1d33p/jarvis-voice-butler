@@ -177,6 +177,21 @@ def wake_settings() -> dict:
     }
 
 
+def _parse_hours(raw: str) -> tuple:
+    """Parse 'START-END' (24h) into a (start, end) window. Unparseable or
+    degenerate input means all day — polling hours must never silently
+    become "never" because of a typo in an env var."""
+    try:
+        start_s, end_s = raw.split("-", 1)
+        start = max(0, min(24, int(start_s.strip())))
+        end = max(0, min(24, int(end_s.strip())))
+    except (ValueError, AttributeError):
+        return (0, 24)
+    if start == end:
+        return (0, 24)
+    return (start, end)
+
+
 def remote_settings() -> dict:
     """Phone access over WhatsApp. YAADHAMMA_REMOTE=off disables it entirely.
 
@@ -188,6 +203,15 @@ def remote_settings() -> dict:
     return {
         "enabled": os.environ.get("YAADHAMMA_REMOTE", "on").strip().lower() != "off",
         "self_chats": [c for c in chats if c],
+        # Polling window, 24h "START-END". Stage 2 defaults this to all day;
+        # Stage 1 keeps the v2 behaviour (08:00-23:00).
+        "hours": _parse_hours(os.environ.get("YAADHAMMA_REMOTE_HOURS", "8-23")),
+        # The resident poller tries headless first (invisible, no focus to
+        # steal). Set to "off" to fall back to a visible off-screen window.
+        "poller_headless": os.environ.get("YAADHAMMA_POLLER_HEADLESS", "on")
+        .strip()
+        .lower()
+        != "off",
     }
 
 
