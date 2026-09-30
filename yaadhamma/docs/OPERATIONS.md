@@ -1,7 +1,7 @@
-# Yaadhamma Operations (v2)
+# Yaadhamma Operations (v3)
 
 Day-to-day running of the assistant on Jeevan's Mac. Everything here
-assumes the project checked out at `~/jarvis-voice-butler` on the `v2`
+assumes the project checked out at `~/jarvis-voice-butler` on the `v3`
 branch, and Python managed with `uv`. Copy-paste the commands as-is;
 nothing here asks you to edit code.
 
@@ -10,7 +10,7 @@ nothing here asks you to edit code.
 Do these once, in order. Each takes a couple of minutes.
 
 1. **Check out the code**: `git clone <repo-url> ~/jarvis-voice-butler`
-   (or `git fetch origin && git reset --hard origin/v2` if already cloned).
+   (or `git fetch origin && git reset --hard origin/v3` if already cloned).
 2. **Install the voice extras**: `cd ~/jarvis-voice-butler/yaadhamma &&
    uv sync --extra wake --extra ui` — the wake-word listener, the
    push-to-talk key listener, and the menu-bar UI all need these.
@@ -185,7 +185,7 @@ wake extra.)
 
 Every model call she makes is recorded in `~/.yaadhamma/yaadhamma.db`
 (the `model_calls` table) with an estimated dollar cost, tagged by
-feature (`voice`, `voice_note`, `digest`, …).
+feature (`voice`, `voice_note`, `digest`, `email_triage`, …).
 
 - **Session cost**: when a voice session opens, she notes today's total
   spend; the orb menu shows today's spend minus that baseline — what
@@ -198,6 +198,34 @@ feature (`voice`, `voice_note`, `digest`, …).
   failing with 429s, check the AI Studio spending cap first.
 - `uv run scripts/status.py` shows the last 7 days of spend per feature
   and month-to-date against the budget.
+
+## How the digest decides what needs you (email)
+
+New email goes through two passes before anything lands under *Needs you*
+in the digest:
+
+1. **Pass 1 — cheap sort.** She looks at sender, subject and preview only
+   (no model call, no cost) and files each email as `noise` (bulk mail,
+   marketing, automated noreply with no personal signal), `needs_reading`
+   (a question, deadline or his name, but the preview cannot decide), or
+   `clearly_needs_him` (addressed to him by name with a direct request, or
+   a request tied to a date/deadline/meeting).
+2. **Pass 2 — deep read.** She opens the full body of up to 8 emails from
+   the latter two groups (clearest first; `YAADHAMMA_EMAIL_DEEP_READ` in
+   `.env.local` changes the cap) and the model decides which ones genuinely
+   need his reply, decision or action — with a one-line reason each.
+
+Only pass 2 can put an email under *Needs you*. A bulk job alert stays out
+however relevant the keywords look; a marketing email never needs him. A
+`noise` email can still get its own line under *Email* (account, security
+and billing notices do), but never under *Needs you*. Gmail is read-only
+throughout: nothing is marked read, archived or labelled.
+
+Honest limits: pass 1 is English-centric heuristics. An automated security
+alert from a `noreply@` address with no question in the preview is filed as
+noise — visible under *Email*, never *Needs you*. Emails past the deep-read
+cap never get a verdict either. If either behaviour is wrong for him, say so
+and the rules change.
 
 ## WhatsApp voice notes
 
@@ -251,21 +279,56 @@ verification and audit.
 
 - Only his own chats are polled (`YAADHAMMA_SELF_CHATS`, default
   19408438446 and 919640520634); anything else is ignored entirely.
-- Replies and approval questions come back in the same chat. Answering
-  "yes"/"no" to a pending question resolves it.
+- Replies and approval questions come back in the same chat. When a
+  question is waiting, his next message in that chat is the answer — no
+  `Yaadhamma` prefix needed, any wording ("yes", "no", "the second one").
+  Unanswered questions expire after 30 minutes. A new `Yaadhamma …`
+  command replaces the waiting question.
 - Approvals only stay open a minute: answer promptly, or she asks again and,
   after two rounds, tells him the approval expired and to send the command
   again.
-- Polls every 2 minutes, 08:00–23:00 Mac time, as its own launchd job:
-  `uv run scripts/remote_schedule.py on`. Uses the digest browser profile,
-  never the voice one. `YAADHAMMA_REMOTE=off` disables it.
-- Real WhatsApp reading/sending is unverified in the sandbox; the command
-  parsing, chat allowlist, dedupe, approval round-trip and hours window are
-  covered by `tests/test_remote.py`.
+- One resident poller, polling every 2 minutes around the clock, as its own
+  launchd job: `uv run scripts/remote_schedule.py on`. It opens a single
+  WhatsApp browser at startup and reuses it for every poll (no fresh browser
+  each time). Uses the digest browser profile, never the voice one.
+  `YAADHAMMA_REMOTE=off` disables it, or
+  `uv run scripts/remote_schedule.py off` unloads the job entirely.
+- The poller never acts on a partial chat list: it waits for the list to
+  settle and refuses loudly (morning brief, status,
+  `~/.yaadhamma/remote.log`) rather than summarise a fraction of his chats
+  as if it were all of them.
+- **"WhatsApp is still syncing"** means the chat list did not finish loading
+  in time (or came back under half of its usual size). The poller skipped
+  that run rather than act on incomplete data. Occasional syncing is normal
+  right after the Mac wakes or the network flaps. If every poll says it for
+  an hour: check the network, then look at `~/.yaadhamma/remote.log`; if the
+  chat count itself collapsed, he may have archived a large number of chats
+  (the guard relearns the baseline from full reads).
+- Each poll writes exactly one timestamped line to `~/.yaadhamma/remote.log`:
+  `remote poll: chats_seen=N self_chats_matched=N commands_found=N
+  actions_taken=N`. One line per poll — a quiet log means quiet polls.
 - If the poll itself keeps failing the same way (3 times in a row), the
   morning brief says so loudly and `uv run scripts/selftest.py` fails —
-  the tracebacks are in `~/.yaadhamma/remote.log`. A passing self-test
-  also proves the remote orchestrator actually constructs.
+  the tracebacks are in `~/.yaadhamma/remote.log`. A passing self-test also
+  proves the remote orchestrator actually constructs.
+- **Lost pairing**: if WhatsApp evicts the linked device, the poller parks
+  its browser, records one health failure, waits 15 minutes, and says so
+  loudly in the morning brief. Re-pair with
+  `uv run scripts/whatsapp_signin.py` (stop the agent first — the profile
+  is single-window). To make surprise unpairings rarer, prune stale entries
+  on the phone: WhatsApp → Settings → Linked devices, and remove
+  anything not recognised.
+
+### The poller stays invisible (mostly)
+
+The poller's Chromium runs headless and the code never brings its window
+forward, so normally nothing ever appears on screen — no window, no Dock
+bounce. Honest limits: this was verified against scripted fakes, not a real
+Mac. If a Chromium window or Dock icon ever does appear during a poll, that
+is a bug — report what was on screen and what `~/.yaadhamma/remote.log`
+said at that minute. To disable the poller entirely:
+`uv run scripts/remote_schedule.py off` (or `YAADHAMMA_REMOTE=off` in
+`.env.local`, then restart the job).
 
 ## Browser troubleshooting
 
