@@ -203,9 +203,9 @@ def remote_settings() -> dict:
     return {
         "enabled": os.environ.get("YAADHAMMA_REMOTE", "on").strip().lower() != "off",
         "self_chats": [c for c in chats if c],
-        # Polling window, 24h "START-END". Stage 2 defaults this to all day;
-        # Stage 1 keeps the v2 behaviour (08:00-23:00).
-        "hours": _parse_hours(os.environ.get("YAADHAMMA_REMOTE_HOURS", "8-23")),
+        # Polling window, 24h "START-END". Defaults to all day; restrict with
+        # YAADHAMMA_REMOTE_HOURS, e.g. "8-23".
+        "hours": _parse_hours(os.environ.get("YAADHAMMA_REMOTE_HOURS", "0-24")),
         # The resident poller tries headless first (invisible, no focus to
         # steal). Set to "off" to fall back to a visible off-screen window.
         "poller_headless": os.environ.get("YAADHAMMA_POLLER_HEADLESS", "on")

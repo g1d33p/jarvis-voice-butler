@@ -30,6 +30,7 @@ import asyncio
 import logging
 import os
 import sys
+from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
@@ -41,6 +42,28 @@ from remote import (
 )
 
 log = logging.getLogger("yaadhamma.poller")
+
+
+def rotate_old_log_once() -> None:
+    """Rotate the old untimestamped remote.log aside exactly once.
+
+    The previous per-poll regime wrote untimestamped lines to remote.log;
+    the resident poller writes timestamped lines. On first start the old
+    file moves to remote.log.1 so the new era starts clean. A marker file
+    guards the once-ness: launchd KeepAlive restarts must not rotate again.
+    """
+    remote_log = Path.home() / ".yaadhamma" / "remote.log"
+    marker = remote_log.with_name("remote.log.rotated")
+    rotated = remote_log.with_name("remote.log.1")
+    try:
+        if marker.exists() or rotated.exists():
+            return
+        remote_log.parent.mkdir(parents=True, exist_ok=True)
+        if remote_log.exists():
+            remote_log.rename(rotated)
+        marker.touch()
+    except OSError:
+        pass  # best effort: logging must never fail startup
 
 
 async def main_async() -> int:
@@ -60,6 +83,7 @@ async def main_async() -> int:
 
 
 def main() -> int:
+    rotate_old_log_once()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s [poller] %(message)s")
     try:
         return asyncio.run(main_async())

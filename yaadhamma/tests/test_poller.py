@@ -669,10 +669,9 @@ def test_in_window_overnight_wrap() -> None:
 
 
 def test_parse_hours_defaults_and_typos(monkeypatch) -> None:
-    # No env var: Stage 1 keeps the v2 polling window (08:00-23:00).
-    # Stage 2 changes this default to all day.
+    # No env var: Stage 2 polls all day by default.
     monkeypatch.delenv("YAADHAMMA_REMOTE_HOURS", raising=False)
-    assert config.remote_settings()["hours"] == (8, 23)
+    assert config.remote_settings()["hours"] == (0, 24)
     monkeypatch.setenv("YAADHAMMA_REMOTE_HOURS", "8-23")
     assert config.remote_settings()["hours"] == (8, 23)
     monkeypatch.setenv("YAADHAMMA_REMOTE_HOURS", "nonsense")
@@ -683,3 +682,37 @@ def test_parse_hours_defaults_and_typos(monkeypatch) -> None:
 
 def test_poller_headless_defaults_on() -> None:
     assert config.remote_settings()["poller_headless"] is True
+
+
+def test_remote_log_rotated_once(monkeypatch, tmp_path) -> None:
+    """Stage 2: the old untimestamped remote.log moves aside exactly once."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    script = _load_script("remote_poller")
+    log_dir = tmp_path / ".yaadhamma"
+    log_dir.mkdir(parents=True)
+    old = log_dir / "remote.log"
+    old.write_text("untimestamped old line\n")
+
+    script.rotate_old_log_once()
+    assert not old.exists()
+    assert (log_dir / "remote.log.1").read_text() == "untimestamped old line\n"
+    assert (log_dir / "remote.log.rotated").exists()
+
+    # A second start (e.g. launchd KeepAlive restart) rotates nothing.
+    new = log_dir / "remote.log"
+    new.write_text("2026-09-30T01:00:00 [poller] new line\n")
+    script.rotate_old_log_once()
+    assert new.read_text() == "2026-09-30T01:00:00 [poller] new line\n"
+    assert (log_dir / "remote.log.1").read_text() == "untimestamped old line\n"
+
+
+def test_remote_log_rotation_without_old_log(monkeypatch, tmp_path) -> None:
+    """Stage 2: rotation is a no-op when there is no old log, but the
+    marker is still written so the check stays once-only."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    script = _load_script("remote_poller")
+    script.rotate_old_log_once()
+    log_dir = tmp_path / ".yaadhamma"
+    assert not (log_dir / "remote.log").exists()
+    assert not (log_dir / "remote.log.1").exists()
+    assert (log_dir / "remote.log.rotated").exists()

@@ -519,3 +519,122 @@ def test_voice_note_replaces_pending_question(setup) -> None:
     assert poller._pending.read()["chats"] == {}
     assert len(orch.started) == 2
     assert "send my DL" in orch.started[1][0]
+
+
+def test_arbitrary_answer_resolves_pending(setup) -> None:
+    """Stage 2: any wording answers a pending question, no prefix needed."""
+    wa, orch, poller = setup
+    orch.next = FakeTask("waiting_for_user", question="Which one?", task_id="t1")
+    import asyncio
+
+    asyncio.run(poller.poll_once(_noon()))  # prime
+    wa.chats["Jeevan (You)"] = [_msg("Yaadhamma pick one", time="10:00")]
+    asyncio.run(poller.poll_once(_noon()))
+    assert poller._pending.read()["chats"]  # question is waiting
+
+    orch.next = FakeTask("completed", result="picked")
+    wa.chats["Jeevan (You)"] = [_msg("the second one", time="10:02")]
+    asyncio.run(poller.poll_once(_noon()))
+    assert orch.resumed and orch.resumed[0][:2] == ("t1", "the second one")
+    # It was an answer, not a new command.
+    assert len(orch.started) == 1
+
+
+def test_bare_yes_without_pending_does_nothing(setup) -> None:
+    """Stage 2: a bare 'yes' with no pending question is not a command."""
+    wa, orch, poller = setup
+    import asyncio
+
+    asyncio.run(poller.poll_once(_noon()))  # prime
+    wa.chats["Jeevan (You)"] = [_msg("yes", time="10:00")]
+    asyncio.run(poller.poll_once(_noon()))
+    assert orch.started == []
+    assert orch.resumed == []
+    assert wa.sent == []
+
+
+def test_expired_pending_is_ignored(setup) -> None:
+    """Stage 2: a pending question older than 30 minutes is dropped; a late
+    reply must not resolve a question he has forgotten about."""
+    import time
+
+    wa, orch, poller = setup
+    orch.next = FakeTask("waiting_for_user", question="Shall I send it?", task_id="t1")
+    import asyncio
+
+    asyncio.run(poller.poll_once(_noon()))  # prime
+    wa.chats["Jeevan (You)"] = [_msg("Yaadhamma send hi", time="10:00")]
+    asyncio.run(poller.poll_once(_noon()))
+    assert poller._pending.read()["chats"]  # question is waiting
+
+    # Backdate the question past the 30-minute TTL.
+    data = poller._pending.read()
+    data["chats"]["Jeevan (You)"]["asked_at"] = time.time() - 31 * 60
+    poller._pending.write(data)
+
+    orch.next = FakeTask("completed", result="sent")
+    wa.chats["Jeevan (You)"] = [_msg("yes", time="10:35")]
+    asyncio.run(poller.poll_once(_noon()))
+    assert orch.resumed == []  # the stale question was not resolved
+    assert poller._pending.read()["chats"] == {}  # it was dropped
+    assert len(orch.started) == 1  # and "yes" did not start a new command
+
+
+def test_fresh_pending_still_resolves(setup) -> None:
+    """Stage 2: a pending question within the 30-minute TTL still resolves."""
+    import time
+
+    wa, orch, poller = setup
+    orch.next = FakeTask("waiting_for_user", question="Shall I send it?", task_id="t1")
+    import asyncio
+
+    asyncio.run(poller.poll_once(_noon()))  # prime
+    wa.chats["Jeevan (You)"] = [_msg("Yaadhamma send hi", time="10:00")]
+    asyncio.run(poller.poll_once(_noon()))
+
+    data = poller._pending.read()
+    data["chats"]["Jeevan (You)"]["asked_at"] = time.time() - 29 * 60
+    poller._pending.write(data)
+
+    orch.next = FakeTask("completed", result="sent")
+    wa.chats["Jeevan (You)"] = [_msg("yes", time="10:30")]
+    asyncio.run(poller.poll_once(_noon()))
+    assert orch.resumed and orch.resumed[0][:2] == ("t1", "yes")
+
+
+def test_exactly_one_summary_line_per_poll(setup, caplog) -> None:
+    """Stage 2: each poll emits exactly one timestamped summary line with
+    chats seen, self-chats matched, commands found, actions taken."""
+    import asyncio
+    import logging
+
+    wa, _orch, poller = setup
+    caplog.set_level(logging.INFO, logger="yaadhamma.remote")
+
+    asyncio.run(poller.poll_once(_noon()))  # prime
+    wa.chats["Jeevan (You)"] = [_msg("Yaadhamma remind me to call mom")]
+    asyncio.run(poller.poll_once(_noon()))
+
+    lines = [
+        r.getMessage()
+        for r in caplog.records
+        if r.name == "yaadhamma.remote" and "remote poll:" in r.getMessage()
+    ]
+    assert len(lines) == 2  # one per poll, no more
+    line = lines[1]
+    assert "2026-09-28T12:00:00 remote poll:" in line
+    assert "chats_seen=" in line
+    assert "self_chats_matched=" in line
+    assert "commands_found=1" in line
+    assert "actions_taken=" in line
+
+
+def test_polls_run_around_the_clock_by_default(setup) -> None:
+    """Stage 2: with no YAADHAMMA_REMOTE_HOURS override, a 3am poll runs."""
+    wa, orch, poller = setup
+    import asyncio
+
+    asyncio.run(poller.poll_once(datetime(2026, 9, 28, 3, 0, 0)))  # prime
+    wa.chats["Jeevan (You)"] = [_msg("Yaadhamma remind me")]
+    asyncio.run(poller.poll_once(datetime(2026, 9, 28, 3, 5, 0)))
+    assert len(orch.started) == 1

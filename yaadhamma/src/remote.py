@@ -8,8 +8,9 @@ A command is a message HE sent starting with "Yaadhamma" (case-insensitive).
 The command text is wrapped as untrusted content and run through the
 orchestrator exactly like a voice task, so every approval gate, verification
 and audit entry applies unchanged. Replies — results or approval questions —
-go back to the same chat. A "yes"/"no" reply to a pending question resolves
-it via the orchestrator.
+go back to the same chat. His next outgoing message in a chat with a pending
+question is the answer — no prefix needed, any wording ("yes", "no", "the
+second one"); unanswered questions expire after 30 minutes.
 
 Each message is handled once (hashes in ~/.yaadhamma/remote-handled.json).
 The first poll for a chat only marks the backlog handled — it never runs it.
@@ -59,8 +60,9 @@ WINDOW_START_HOUR = 8
 WINDOW_END_HOUR = 23
 MAX_APPROVAL_ROUNDS = 2  # then the approval is declared expired, honestly
 
-AFFIRMATIVE = {"yes", "yeah", "yep", "sure", "do it", "go ahead", "ok"}
-NEGATIVE = {"no", "nope", "don't", "dont", "cancel", "stop", "never mind"}
+# A pending approval question he never answers within 30 minutes is dropped:
+# his late reply must not resolve a question he has forgotten about.
+PENDING_TTL_S = 30 * 60
 
 
 def _default_transcriber(audio: bytes) -> str:
@@ -178,6 +180,18 @@ async def resolve_self_chat(client, number: str) -> str:
     return name
 
 
+def _pending_expired(pending: dict) -> bool:
+    """Whether a stored pending question is older than PENDING_TTL_S.
+
+    A record with no timestamp (written by an older version) is treated as
+    expired: without proof it is fresh, a late reply must not resolve it.
+    """
+    asked_at = pending.get("asked_at")
+    if not isinstance(asked_at, (int, float)):
+        return True
+    return time.time() - asked_at > PENDING_TTL_S
+
+
 class JsonStore:
     """A tiny JSON file store. Never raises on read; writes best-effort."""
 
@@ -211,8 +225,11 @@ class RemoteContext:
 
 @dataclass
 class PollSummary:
-    """What one poll saw and did. Stage 2 turns this into the single
-    timestamped log line per poll; until then it is internal plumbing."""
+    """What one poll saw and did.
+
+    log_line() renders the single timestamped summary line emitted per poll:
+    chats seen, self-chats matched, commands found, actions taken.
+    """
 
     chats_seen: int = 0
     best_chats: int = 0
@@ -221,6 +238,19 @@ class PollSummary:
     actions_taken: int = 0
     note: str = ""
     outcomes: list = field(default_factory=list)
+
+    def log_line(self, now: datetime) -> str:
+        """The one summary line for a poll, timestamped with the poll time."""
+        line = (
+            f"{now.strftime('%Y-%m-%dT%H:%M:%S')} remote poll:"
+            f" chats_seen={self.chats_seen}"
+            f" self_chats_matched={self.self_chats_matched}"
+            f" commands_found={self.commands_found}"
+            f" actions_taken={self.actions_taken}"
+        )
+        if self.note:
+            line += f" note={self.note}"
+        return line
 
 
 def _match_self_chats(chats: list[dict], numbers: list[str]) -> dict[str, dict]:
@@ -324,47 +354,52 @@ class RemotePoller:
         summary = PollSummary()
         self._poll_commands = 0
         self._poll_actions = 0
-        if not settings["enabled"]:
-            summary.note = "disabled (YAADHAMMA_REMOTE=off)"
+        try:
+            if not settings["enabled"]:
+                summary.note = "disabled (YAADHAMMA_REMOTE=off)"
+                return summary
+            if not in_window(now, settings["hours"]):
+                summary.note = "outside polling hours"
+                return summary
+            orchestrator = self.orchestrator_factory()
+            chats, best, sync_report = await guarded_chat_list(client, ChatCountLog())
+            summary.chats_seen = len(chats)
+            summary.best_chats = best
+            if sync_report:
+                # A partial list is worse than no poll: his own chat may simply
+                # not have loaded yet, and its commands would go silently
+                # unheard. Report loudly, touch nothing.
+                summary.note = f"{sync_report} — poll skipped"
+                log.warning("remote: %s", summary.note)
+                return summary
+            outcomes: list[str] = []
+            matched = 0
+            by_number = _match_self_chats(chats, settings["self_chats"])
+            for number in settings["self_chats"]:
+                chat = by_number.get(number)
+                if chat is None:
+                    # Not in the settled list: fall back to a targeted resolve
+                    # (WhatsApp search), once. If that fails too, say so loudly —
+                    # a missing self chat is exactly how commands used to go
+                    # silently unheard — but keep polling the other numbers.
+                    try:
+                        title = await resolve_self_chat(client, number)
+                    except Exception as exc:
+                        outcomes.append(f"{number}: could not resolve self chat: {exc}")
+                        continue
+                    chat = {"name": title, "unread": 1}
+                else:
+                    matched += 1
+                outcomes.extend(await self._poll_self_chat(client, orchestrator, chat))
+            summary.self_chats_matched = matched
+            summary.commands_found = self._poll_commands
+            summary.actions_taken = self._poll_actions
+            summary.outcomes = outcomes
             return summary
-        if not in_window(now, settings["hours"]):
-            summary.note = "outside polling hours"
-            return summary
-        orchestrator = self.orchestrator_factory()
-        chats, best, sync_report = await guarded_chat_list(client, ChatCountLog())
-        summary.chats_seen = len(chats)
-        summary.best_chats = best
-        if sync_report:
-            # A partial list is worse than no poll: his own chat may simply
-            # not have loaded yet, and its commands would go silently
-            # unheard. Report loudly, touch nothing.
-            summary.note = f"{sync_report} — poll skipped"
-            log.warning("remote: %s", summary.note)
-            return summary
-        outcomes: list[str] = []
-        matched = 0
-        by_number = _match_self_chats(chats, settings["self_chats"])
-        for number in settings["self_chats"]:
-            chat = by_number.get(number)
-            if chat is None:
-                # Not in the settled list: fall back to a targeted resolve
-                # (WhatsApp search), once. If that fails too, say so loudly —
-                # a missing self chat is exactly how commands used to go
-                # silently unheard — but keep polling the other numbers.
-                try:
-                    title = await resolve_self_chat(client, number)
-                except Exception as exc:
-                    outcomes.append(f"{number}: could not resolve self chat: {exc}")
-                    continue
-                chat = {"name": title, "unread": 1}
-            else:
-                matched += 1
-            outcomes.extend(await self._poll_self_chat(client, orchestrator, chat))
-        summary.self_chats_matched = matched
-        summary.commands_found = self._poll_commands
-        summary.actions_taken = self._poll_actions
-        summary.outcomes = outcomes
-        return summary
+        finally:
+            # Exactly one timestamped summary line per poll, on every path:
+            # normal, skipped, disabled, or raising.
+            log.info("remote: %s", summary.log_line(now))
 
     async def _poll_self_chat(self, client, orchestrator, chat: dict) -> list[str]:
         """Poll one of his own chats. Opens it only when needed."""
@@ -450,14 +485,22 @@ class RemotePoller:
         if not text:
             return None
         pending = self._pending.read().get("chats", {}).get(chat)
-        lowered = text.lower()
-        if pending and (lowered in AFFIRMATIVE or lowered in NEGATIVE):
+        if pending and _pending_expired(pending):
+            # A question he never answered within 30 minutes is dropped: his
+            # late reply must not resolve a question he has forgotten about.
+            self._drop_pending(chat)
+            log.info("remote: pending question in %s expired unanswered", chat)
+            pending = None
+        task_text = is_command(text)
+        if task_text is None:
+            if pending is None:
+                return None  # bare "yes" with no pending question does nothing
+            # His next outgoing message in this chat is the answer — no
+            # Yaadhamma prefix needed. Arbitrary answers accepted: "yes",
+            # "no", "the second one".
             return await self._resolve_pending(
                 client, orchestrator, chat, pending, text
             )
-        task_text = is_command(text)
-        if task_text is None:
-            return None  # chat that is not a command and not an answer
         if task_text == "":
             await self._reply(client, chat, "Yes — what should I do?")
             return "bare prefix: prompted"
@@ -616,6 +659,7 @@ class RemotePoller:
             "task_id": task_id,
             "question": question,
             "rounds": rounds,
+            "asked_at": time.time(),
         }
         self._pending.write(data)
 
@@ -852,7 +896,7 @@ class ResidentPoller:
                 return self.interval_s
             log.info("poller: browser opened (one browser for all polls)")
         try:
-            summary = await self.poller.poll_with_client(self._client, now)
+            await self.poller.poll_with_client(self._client, now)
         except WhatsAppNotPairedError as exc:
             await self._park("WhatsApp is not paired")
             self.lock.release()
@@ -869,8 +913,8 @@ class ResidentPoller:
             await self._park("poll error")
             self.lock.release()
             return self.interval_s
-        for outcome in summary.outcomes:
-            log.info("poller: %s", outcome)
+        # The poll's one timestamped summary line was already emitted by
+        # poll_with_client.
         record_success()
         if self.lock.requested():
             # A digest asked for the profile: hand it over now.
